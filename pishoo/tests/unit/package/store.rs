@@ -112,7 +112,7 @@ fn authenticated_release_rejects_tampered_bytes_metadata_signers_and_identity() 
 fn complete_ids_conflict_with_legacy_names_and_reject_other_authors() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("libs")).unwrap();
+    std::fs::create_dir_all(profile.join("lib")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let (bytes, _) = release('a', "1.2.3");
@@ -132,7 +132,7 @@ fn complete_ids_conflict_with_legacy_names_and_reject_other_authors() {
     let mut sandbox = super::super::Sandbox::new(runtime.clone());
     sandbox.load_libs(&profile).unwrap();
     assert!(!sandbox.libs.contains_key("note") && sandbox.libs.contains_key(id));
-    assert!(profile.join("db/note").is_dir());
+    assert!(profile.join(".volume/note").is_dir());
     assert!(!profile.join("db/alice.dhttp.net").exists());
     let (rotated, _) = release('a', "1.2.4");
     install_lib(&profile, id, &rotated, &runtime).unwrap();
@@ -152,18 +152,18 @@ fn complete_ids_conflict_with_legacy_names_and_reject_other_authors() {
         runtime.clone(),
         id.into(),
         &snapshot,
-        &profile.join("db").join(id.rsplit('/').next().unwrap()),
+        &profile.join(".volume").join(id.rsplit('/').next().unwrap()),
     )
     .unwrap();
     assert_eq!(loaded.openapi.info.version, "2.0.0");
     assert!(install_lib(&profile, "bob.dhttp.net/note", &bytes, &runtime).is_err());
     super::super::remove_lib(&profile, id).unwrap();
     super::super::remove_lib(&profile, id).unwrap();
-    assert!(!profile.join("libs/note.wasm").exists());
-    assert!(profile.join("db/note").is_dir());
+    assert!(!profile.join("lib/note.wasm").exists());
+    assert!(profile.join(".volume/note").is_dir());
     let outside = root.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
-    std::os::unix::fs::symlink(&outside, profile.join("libs/note.wasm")).unwrap();
+    std::os::unix::fs::symlink(&outside, profile.join("lib/note")).unwrap();
     assert!(install_lib(&profile, id, &bytes, &runtime).is_err());
     super::super::remove_lib(&profile, id).unwrap();
     assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
@@ -295,7 +295,7 @@ fn published_std_release_proofs_match_signed_packages() {
         .unwrap();
         let metadata: Value = serde_json::from_slice(
             &std::fs::read(
-                root.join("logs")
+                root.join("log")
                     .join(format!("diagnose-{name}-{kind}-store-metadata.stdout")),
             )
             .unwrap(),
@@ -311,14 +311,14 @@ fn published_std_release_proofs_match_signed_packages() {
 fn installed_dependency_reuse_uses_registered_identity_and_version_only() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("libs")).unwrap();
+    std::fs::create_dir_all(profile.join("lib")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let (source, _) = release('a', "1.2.3");
     let id = "alice.dhttp.net/note";
     install_lib(&profile, id, &source, &runtime).unwrap();
     assert!(can_reuse_lib(&profile, id, "1.2.3").unwrap());
-    let path = profile.join("libs/note.wasm");
+    let path = profile.join("lib/note.wasm");
     let mut changed = std::fs::read(&path).unwrap();
     section(&mut changed, "local-note", b"locally edited payload");
     std::fs::write(&path, &changed).unwrap();
@@ -337,21 +337,22 @@ fn loaded_legacy_dependency_is_reinstalled_before_it_becomes_reusable() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
-    std::fs::create_dir_all(profile.join("libs")).unwrap();
-    std::fs::create_dir_all(profile.join("apps")).unwrap();
-    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    std::fs::create_dir_all(profile.join("lib")).unwrap();
+    std::fs::create_dir_all(profile.join("app")).unwrap();
+    let db =
+        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
     db.execute_batch("PRAGMA foreign_keys=OFF;
-        DROP TABLE lib_capability_operations; DROP TABLE lib_capabilities;
-        DROP TABLE app_dependencies; DROP TABLE lib_dependencies; DROP TABLE libs; DROP TABLE apps;
-        CREATE TABLE libs(id TEXT PRIMARY KEY NOT NULL,name TEXT UNIQUE NOT NULL,version TEXT NOT NULL);
-        CREATE TABLE apps(id TEXT PRIMARY KEY NOT NULL,name TEXT UNIQUE NOT NULL,version TEXT NOT NULL);
-        CREATE TABLE app_dependencies(app_id TEXT REFERENCES apps(id) ON DELETE CASCADE,lib_id TEXT REFERENCES libs(id) ON DELETE RESTRICT,version TEXT,PRIMARY KEY(app_id,lib_id));
-        CREATE TABLE lib_dependencies(lib_id TEXT REFERENCES libs(id) ON DELETE CASCADE,dependency_id TEXT REFERENCES libs(id) ON DELETE RESTRICT,version TEXT,PRIMARY KEY(lib_id,dependency_id));
-        CREATE TABLE lib_capabilities(lib_id TEXT REFERENCES libs(id) ON DELETE CASCADE,capability_id TEXT,title TEXT,PRIMARY KEY(lib_id,capability_id));
-        CREATE TABLE lib_capability_operations(lib_id TEXT,capability_id TEXT,method TEXT,path TEXT,PRIMARY KEY(lib_id,capability_id,method,path),FOREIGN KEY(lib_id,capability_id) REFERENCES lib_capabilities(lib_id,capability_id) ON DELETE CASCADE);").unwrap();
+        DROP TABLE lib_capability_operation; DROP TABLE lib_capability;
+        DROP TABLE app_dependency; DROP TABLE lib_dependency; DROP TABLE lib; DROP TABLE app;
+        CREATE TABLE lib(id TEXT PRIMARY KEY NOT NULL,name TEXT UNIQUE NOT NULL,version TEXT NOT NULL);
+        CREATE TABLE app(id TEXT PRIMARY KEY NOT NULL,name TEXT UNIQUE NOT NULL,version TEXT NOT NULL);
+        CREATE TABLE app_dependency(app_id TEXT REFERENCES app(id) ON DELETE CASCADE,lib_id TEXT REFERENCES lib(id) ON DELETE RESTRICT,version TEXT,PRIMARY KEY(app_id,lib_id));
+        CREATE TABLE lib_dependency(lib_id TEXT REFERENCES lib(id) ON DELETE CASCADE,dependency_id TEXT REFERENCES lib(id) ON DELETE RESTRICT,version TEXT,PRIMARY KEY(lib_id,dependency_id));
+        CREATE TABLE lib_capability(lib_id TEXT REFERENCES lib(id) ON DELETE CASCADE,capability_id TEXT,title TEXT,PRIMARY KEY(lib_id,capability_id));
+        CREATE TABLE lib_capability_operation(lib_id TEXT,capability_id TEXT,method TEXT,path TEXT,PRIMARY KEY(lib_id,capability_id,method,path),FOREIGN KEY(lib_id,capability_id) REFERENCES lib_capability(lib_id,capability_id) ON DELETE CASCADE);").unwrap();
     let id = "alice.dhttp.net/note";
     let (source, _) = release('a', "1.2.3");
-    db.execute("INSERT INTO libs VALUES(?1,'note','1.2.3')", [id])
+    db.execute("INSERT INTO lib VALUES(?1,'note','1.2.3')", [id])
         .unwrap();
     let artifact = profile.join("lib/alice.dhttp.net/note/lib.webc");
     std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
@@ -365,13 +366,13 @@ fn loaded_legacy_dependency_is_reinstalled_before_it_becomes_reusable() {
     assert_eq!(sandbox.libs[id].openapi.info.version, "1.2.3");
     assert!(!profile.join("db/note").exists());
     assert_eq!(
-        std::fs::read(legacy_data.join("keep.db")).unwrap(),
+        std::fs::read(profile.join(".volume/note/keep.db")).unwrap(),
         b"existing business data"
     );
     assert!(!can_reuse_lib(&profile, id, "1.2.3").unwrap());
     assert_eq!(
         db.query_row(
-            "SELECT count(*) FROM pragma_table_info('libs') WHERE name='id'",
+            "SELECT count(*) FROM pragma_table_info('lib') WHERE name='id'",
             [],
             |row| row.get::<_, i64>(0)
         )
@@ -392,17 +393,17 @@ fn loaded_legacy_dependency_is_reinstalled_before_it_becomes_reusable() {
         runtime,
         id.into(),
         &snapshot,
-        &profile.join("db").join(id.rsplit('/').next().unwrap()),
+        &profile.join(".volume").join(id.rsplit('/').next().unwrap()),
     )
     .unwrap();
     assert_eq!(installed.openapi.info.version, "1.2.3");
     assert!(!profile.join("db/note").exists());
     assert_eq!(
-        std::fs::read(legacy_data.join("keep.db")).unwrap(),
+        std::fs::read(profile.join(".volume/note/keep.db")).unwrap(),
         b"existing business data"
     );
     db.execute(
-        "UPDATE libs SET author='bob.dhttp.net' WHERE name='note'",
+        "UPDATE lib SET author='bob.dhttp.net' WHERE name='note'",
         [],
     )
     .unwrap();

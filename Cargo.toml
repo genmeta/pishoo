@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["gateway", "pishoo"]
+members = ["pishoo"]
 exclude = ["xtask"]
 
 # Lib installation compiles WASM inside the host. Optimize the compiler hot

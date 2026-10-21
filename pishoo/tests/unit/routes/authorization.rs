@@ -8,8 +8,14 @@ async fn authorization_uses_current_library_allow_and_deny_results() {
         (access_control::Effect::Deny, StatusCode::FORBIDDEN),
     ] {
         let (access, app) = authorization_app(effect).await;
-        let response = app.oneshot(anonymous_request()).await.unwrap();
-        assert_eq!(response.status(), expected);
+        for mode in ["waiting", "break"] {
+            let mut request = anonymous_request();
+            request
+                .headers_mut()
+                .insert("if-reviewed", mode.parse().unwrap());
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), expected);
+        }
         assert_eq!(access.pending_persistent_reviews(0, 10).await.unwrap().0, 0);
     }
 }
@@ -36,7 +42,7 @@ async fn anonymous_reviews_are_denied_without_creating_a_record() {
 }
 
 #[tokio::test]
-async fn persistent_reviews_are_scoped_to_the_subject_and_consumed_on_retry() {
+async fn persistent_reviews_are_scoped_to_the_subject_and_write_durable_acl() {
     use access_control::{AuthResult, Effect, Grantee, Headers, PendingReviewResponse};
     use tower::ServiceExt;
     let (access, _) = authorization_app(Effect::Deny).await;
@@ -89,14 +95,7 @@ async fn persistent_reviews_are_scoped_to_the_subject_and_consumed_on_retry() {
             expected
         );
     }
-    access
-        .decide_review(
-            id,
-            Action::Allow,
-            chrono::Utc::now() + chrono::Duration::minutes(5),
-        )
-        .await
-        .unwrap();
+    access.decide_review(id, Action::Allow).await.unwrap();
     assert!(matches!(
         access
             .auth(
@@ -113,12 +112,12 @@ async fn persistent_reviews_are_scoped_to_the_subject_and_consumed_on_retry() {
             .auth(headers, Some(visitor.name()), Some(visitor.subject_id()))
             .await
             .unwrap(),
-        AuthResult::Reviewing(_)
+        AuthResult::Allowed
     ));
 }
 
 #[tokio::test]
-async fn contact_approval_is_local_and_the_applicant_polls_its_application() {
+async fn contact_approval_is_local_and_the_applicant_reads_its_relationship() {
     use tower::ServiceExt;
     let (access, _) = authorization_app(access_control::Effect::Deny).await;
     let app = access_router(access.clone());
@@ -130,6 +129,7 @@ async fn contact_approval_is_local_and_the_applicant_polls_its_application() {
         .header(header::CONTENT_TYPE, "application/json")
         .body(AxumBody::from(
             serde_json::json!({
+                "from":"peer.dhttp.net", "to":"owner.dhttp.net",
                 "application_id": application_id, "description": "Chat",
                 "requested_access": {"/std/message": ["POST"]}, "offers": {},
             })
@@ -143,7 +143,7 @@ async fn contact_approval_is_local_and_the_applicant_polls_its_application() {
     );
     let mut approval = Request::builder()
         .method(Method::PATCH)
-        .uri("/std/contact/peer.dhttp.net")
+        .uri("/std/contact?name=peer.dhttp.net")
         .header(header::CONTENT_TYPE, "application/json")
         .body(AxumBody::from(r#"{"status":"active"}"#))
         .unwrap();
@@ -164,7 +164,7 @@ async fn contact_approval_is_local_and_the_applicant_polls_its_application() {
         2
     );
     let mut status = Request::builder()
-        .uri(format!("/std/contact/self?application_id={application_id}"))
+        .uri("/std/contact?name=peer.dhttp.net")
         .body(AxumBody::empty())
         .unwrap();
     status.extensions_mut().insert(visitor);
@@ -184,8 +184,8 @@ async fn status_routes_reject_a_forged_visitor_on_an_anonymous_connection() {
     let app = access_router(access.clone())
         .layer(axum::middleware::from_fn_with_state(access, authorize));
     for (path, expected) in [
-        ("/std/acl/review/1/status", StatusCode::FORBIDDEN),
-        ("/std/contact/self", StatusCode::BAD_REQUEST),
+        ("/std/acl/status/1", StatusCode::FORBIDDEN),
+        ("/std/contact/status", StatusCode::FORBIDDEN),
     ] {
         let mut request = anonymous_request();
         *request.uri_mut() = path.parse().unwrap();
@@ -194,4 +194,237 @@ async fn status_routes_reject_a_forged_visitor_on_an_anonymous_connection() {
             expected
         );
     }
+}
+
+fn reviewed_request(mode: &str) -> Request<AxumBody> {
+    let mut request = anonymous_request();
+    let name = "alice.dhttp.net";
+    let mut params = rcgen::CertificateParams::new(vec![name.into()]).unwrap();
+    let ski = format!("0:0:{}", "a".repeat(64));
+    let mut der = vec![4, ski.len() as u8];
+    der.extend_from_slice(ski.as_bytes());
+    params
+        .custom_extensions
+        .push(rcgen::CustomExtension::from_oid_content(
+            &[2, 5, 29, 14],
+            der,
+        ));
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = params.self_signed(&key).unwrap();
+    let local = dhttp::LocalAuthority::new(
+        &qtls::default_provider(),
+        Arc::from(name),
+        vec![cert.der().clone()],
+        qtls::PrivateKeyDer::try_from(key.serialize_der()).unwrap(),
+        vec![1],
+    )
+    .unwrap();
+    request.extensions_mut().remove::<dhttp::HandshakeSummary>();
+    request.extensions_mut().insert(local);
+    request
+        .headers_mut()
+        .insert("if-reviewed", mode.parse().unwrap());
+    request
+}
+
+#[tokio::test]
+async fn business_requests_trigger_break_and_waiting_reviews_without_a_permission_preflight() {
+    use tower::ServiceExt;
+    let (access, _) = authorization_app(access_control::Effect::Deny).await;
+    access
+        .set_policy(
+            access_control::Method::Unspecified,
+            "/protected",
+            access_control::Effect::Review,
+            access_control::Grantee::Named,
+        )
+        .await
+        .unwrap();
+    let app = Router::new()
+        .route(
+            "/protected",
+            axum::routing::get(|| async { StatusCode::NO_CONTENT }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            access.clone(),
+            authorize,
+        ));
+    let response = app
+        .clone()
+        .oneshot(reviewed_request("break"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let pending: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(pending["error"], "need_review");
+    assert_eq!(access.pending_persistent_reviews(0, 10).await.unwrap().0, 1);
+    let management = access_router(access.clone());
+    for action in ["allow", "deny", "cancel"] {
+        access
+            .remove_policy(
+                access_control::Method::Specified(Method::GET),
+                "/protected",
+                access_control::Grantee::One("alice.dhttp.net".into()),
+            )
+            .await
+            .unwrap();
+        let task = tokio::spawn(app.clone().oneshot(reviewed_request("waiting")));
+        let live = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let response = management
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri("/std/acl/reviews?kind=live")
+                            .body(AxumBody::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(
+                    &response.into_body().collect().await.unwrap().to_bytes(),
+                )
+                .unwrap();
+                if body["total"] == 1 {
+                    break body["items"][0].clone();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(live["kind"], "live");
+        assert!(live["expired_after"].is_null());
+        if action == "cancel" {
+            task.abort();
+            let _ = task.await;
+        } else {
+            let response = management
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri("/std/acl/review")
+                        .header("content-type", "application/json")
+                        .body(AxumBody::from(
+                            serde_json::json!({"kind":"live","id":live["id"],"action":action})
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 204);
+            assert_eq!(
+                task.await.unwrap().unwrap().status(),
+                if action == "allow" { 204 } else { 403 }
+            );
+            for mode in ["break", "waiting"] {
+                assert_eq!(
+                    app.clone()
+                        .oneshot(reviewed_request(mode))
+                        .await
+                        .unwrap()
+                        .status(),
+                    if action == "allow" { 204 } else { 403 }
+                );
+            }
+        }
+        let response = management
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/std/acl/reviews?kind=live")
+                    .body(AxumBody::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["total"], 0);
+    }
+    assert_eq!(access.pending_persistent_reviews(0, 10).await.unwrap().0, 0);
+    assert_eq!(
+        app.oneshot(reviewed_request("invalid"))
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+}
+
+#[tokio::test]
+async fn waiting_timeout_cleans_up_without_granting_acl() {
+    use sea_orm::ConnectionTrait;
+    use tower::ServiceExt;
+    let (access, _) = authorization_app(access_control::Effect::Deny).await;
+    access
+        .set_policy(
+            access_control::Method::Unspecified,
+            "/protected",
+            access_control::Effect::Review,
+            access_control::Grantee::Named,
+        )
+        .await
+        .unwrap();
+    let app = Router::new()
+        .route(
+            "/protected",
+            axum::routing::get(|| async { StatusCode::NO_CONTENT }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            access.clone(),
+            authorize,
+        ));
+    tokio::time::pause();
+    let task = tokio::spawn(app.oneshot(reviewed_request("waiting")));
+    let management = access_router(access.clone());
+    loop {
+        let response = management
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/std/acl/reviews?kind=live")
+                    .body(AxumBody::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        if body["total"] == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(std::time::Duration::from_secs(301)).await;
+    assert_eq!(task.await.unwrap().unwrap().status(), 403);
+    let response = management
+        .oneshot(
+            Request::builder()
+                .uri("/std/acl/reviews?kind=live")
+                .body(AxumBody::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["total"], 0);
+    tokio::time::resume();
+    assert_eq!(access.pending_persistent_reviews(0, 10).await.unwrap().0, 0);
+    let row = access
+        .database()
+        .query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT count(*) AS n FROM access_rules WHERE grantee='alice.dhttp.net'",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<i64>("", "n").unwrap(), 0);
 }

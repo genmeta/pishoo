@@ -1,4 +1,4 @@
-//! Contact database initialization, saved contacts and outbound request records.
+//! Contact database initialization and outbound request records.
 use std::time::Duration;
 
 use dhttp_home::identity::IdentityProfile;
@@ -18,16 +18,18 @@ pub(super) fn storage(error: rusqlite::Error) -> Failure {
 }
 
 pub(super) fn outbound_request(db: &Connection, id: i64) -> Result<Value, Failure> {
-    db.query_row("SELECT id,target_name,description,requested_capabilities,offered_capabilities,status,expired_after,delivery_deadline,remote_expired_after,last_checked_at,error_message,created_at,updated_at FROM outbound_contact_requests WHERE id=?1",[id],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"target_name":r.get::<_,String>(1)?,"description":r.get::<_,String>(2)?,"requested_capabilities":serde_json::from_str::<Value>(&r.get::<_,String>(3)?).unwrap_or(Value::Null),"offered_capabilities":serde_json::from_str::<Value>(&r.get::<_,String>(4)?).unwrap_or(Value::Null),"status":r.get::<_,String>(5)?,"expired_after":r.get::<_,i64>(6)?,"delivery_deadline":r.get::<_,i64>(7)?,"remote_expired_after":r.get::<_,Option<i64>>(8)?,"last_checked_at":r.get::<_,Option<i64>>(9)?,"error_message":r.get::<_,Option<String>>(10)?,"created_at":r.get::<_,i64>(11)?,"updated_at":r.get::<_,i64>(12)?}))).optional().map_err(storage)?.ok_or_else(||fail(404,"contact request not found"))
+    db.query_row("SELECT id,target_name,description,requested_capabilities,offered_capabilities,status,expired_after,delivery_deadline,remote_expired_after,last_checked_at,error_message,created_at,updated_at FROM outbound_contact_request WHERE id=?1",[id],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"target_name":r.get::<_,String>(1)?,"description":r.get::<_,String>(2)?,"requested_capabilities":serde_json::from_str::<Value>(&r.get::<_,String>(3)?).unwrap_or(Value::Null),"offered_capabilities":serde_json::from_str::<Value>(&r.get::<_,String>(4)?).unwrap_or(Value::Null),"status":r.get::<_,String>(5)?,"valid_before":r.get::<_,i64>(6)?,"delivery_deadline":r.get::<_,i64>(7)?,"remote_valid_before":r.get::<_,Option<i64>>(8)?,"last_checked_at":r.get::<_,Option<i64>>(9)?,"error_message":r.get::<_,Option<String>>(10)?,"created_at":r.get::<_,i64>(11)?,"updated_at":r.get::<_,i64>(12)?}))).optional().map_err(storage)?.ok_or_else(||fail(404,"contact request not found"))
 }
 pub(super) fn expire_requests(db: &Connection) -> Result<(), Failure> {
-    db.execute("UPDATE outbound_contact_requests SET status=CASE WHEN status='queued' THEN 'failed' ELSE 'expired' END,lease_until=NULL,updated_at=?1,error_message='contact request expired' WHERE status IN ('queued','pending') AND expired_after<=?1",[now()]).map_err(storage)?;
+    db.execute("UPDATE outbound_contact_request SET status=CASE WHEN status='queued' THEN 'failed' ELSE 'expired' END,lease_until=NULL,updated_at=?1,error_message='contact request expired' WHERE status IN ('queued','pending') AND expired_after<=?1",[now()]).map_err(storage)?;
     Ok(())
 }
 
 pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let path = profile.join("db/contact.db");
+    let directory = profile.join(".volume/sys/contact");
+    std::fs::create_dir_all(&directory).map_err(|e| fail(500, e.to_string()))?;
+    let path = directory.join(".db");
     match path.symlink_metadata() {
         Ok(metadata) if !metadata.file_type().is_file() => {
             return Err(fail(500, "contact database must be a regular file"));
@@ -43,7 +45,7 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
                     if rustix::process::geteuid().is_root() {
                         use std::os::unix::fs::MetadataExt;
                         let owner = profile
-                            .db_dir()
+                            .join(".volume/sys/contact")
                             .metadata()
                             .map_err(|error| fail(500, error.to_string()))?;
                         rustix::fs::fchown(
@@ -117,20 +119,26 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
         }
         tx.execute_batch(include_str!("contact.sql"))
             .map_err(storage)?;
-        tx.pragma_update(None, "user_version", 1).map_err(storage)?;
-    } else if version != 1 {
+        tx.pragma_update(None, "user_version", 3).map_err(storage)?;
+    } else if version == 1 {
+        tx.execute_batch("ALTER TABLE outbound_contact_requests ADD COLUMN contact_id INTEGER; ALTER TABLE outbound_contact_requests ADD COLUMN contact_subject TEXT; DROP TABLE IF EXISTS saved_contacts;").map_err(storage)?;
+        tx.pragma_update(None, "user_version", 2).map_err(storage)?;
+    } else if version != 2 && version != 3 {
         return Err(fail(500, "unsupported contact database version"));
     }
-    tx.prepare("SELECT contact_name,contact_id,subject_id,saved_at FROM saved_contacts LIMIT 0")
-        .map_err(storage)?;
-    tx.prepare("SELECT id,target_name,description,requested_capabilities,offered_capabilities,application_id,status,expired_after,delivery_deadline,remote_expired_after,next_attempt_at,attempt_count,lease_until,last_checked_at,error_message,created_at,updated_at FROM outbound_contact_requests LIMIT 0").map_err(storage)?;
+    if version == 1 || version == 2 {
+        tx.execute_batch(include_str!("migrate-v3.sql"))
+            .map_err(storage)?;
+        tx.pragma_update(None, "user_version", 3).map_err(storage)?;
+    }
+    tx.prepare("SELECT id,target_name,description,requested_capabilities,offered_capabilities,application_id,status,expired_after,delivery_deadline,remote_expired_after,next_attempt_at,attempt_count,lease_until,last_checked_at,error_message,created_at,updated_at,contact_id,contact_subject FROM outbound_contact_request LIMIT 0").map_err(storage)?;
     tx.commit().map_err(storage)?;
     if rustix::process::geteuid().is_root() {
         use rustix::fs::{Mode, OFlags};
         use std::os::unix::fs::MetadataExt;
         let directory = std::fs::File::from(
             rustix::fs::open(
-                profile.db_dir(),
+                profile.join(".volume/sys/contact"),
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
             )
@@ -139,7 +147,7 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
         let owner = directory
             .metadata()
             .map_err(|error| fail(500, error.to_string()))?;
-        for name in ["contact.db", "contact.db-wal", "contact.db-shm"] {
+        for name in [".db", ".db-wal", ".db-shm"] {
             let file = match rustix::fs::openat(
                 &directory,
                 name,

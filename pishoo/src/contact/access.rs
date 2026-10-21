@@ -7,7 +7,11 @@ use http::{Method, Request};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use super::{Failure, capabilities::offered, fail};
+use super::{
+    Failure,
+    capabilities::{offered, requested},
+    fail,
+};
 
 pub(super) fn owner(endpoint: &dhttp::Endpoint) -> Result<access_control::Visitor, Failure> {
     let local = endpoint
@@ -36,7 +40,26 @@ pub(super) async fn local_api(
             body.map_or_else(Vec::new, |v| serde_json::to_vec(v).unwrap()),
         ))
         .map_err(|e| fail(500, e.to_string()))?;
-    request.extensions_mut().insert(owner(endpoint)?);
+    let visitor = owner(endpoint)?;
+    let headers = access_control::Headers {
+        method: request.method().clone(),
+        path: path.to_owned(),
+        fields: request.headers().clone(),
+    };
+    match access
+        .auth(headers, Some(visitor.name()), Some(visitor.subject_id()))
+        .await
+        .map_err(|e| fail(500, e.to_string()))?
+    {
+        access_control::AuthResult::Allowed => {}
+        access_control::AuthResult::Denied => {
+            return Err(fail(403, "contact operation denied by ACL"));
+        }
+        access_control::AuthResult::Reviewing(_) | access_control::AuthResult::Waiting(_) => {
+            return Err(fail(409, "contact operation awaits ACL approval"));
+        }
+    }
+    request.extensions_mut().insert(visitor);
     let response = crate::routes::access_router(access.clone())
         .oneshot(request)
         .await
@@ -63,38 +86,13 @@ pub(super) async fn contact(
         access,
         endpoint,
         Method::GET,
-        &format!("/std/contact/{}", encoded(target)),
+        &format!("/std/contact?name={}", encoded(target)),
         None,
     )
     .await
 }
 pub(super) fn encoded(value: &str) -> String {
     form_urlencoded::byte_serialize(value.as_bytes()).collect()
-}
-pub(super) async fn contacts(
-    access: &Arc<AccessService>,
-    endpoint: &dhttp::Endpoint,
-) -> Result<Vec<Value>, Failure> {
-    let mut items = Vec::new();
-    let mut p = 1;
-    loop {
-        let value = local_api(
-            access,
-            endpoint,
-            Method::GET,
-            &format!("/std/contacts?page={p}&page_size=100&sort=name&order=asc"),
-            None,
-        )
-        .await?;
-        let chunk = value["items"]
-            .as_array()
-            .ok_or_else(|| fail(502, "invalid contact list"))?;
-        items.extend(chunk.clone());
-        if items.len() >= value["total"].as_u64().unwrap_or(0) as usize || chunk.is_empty() {
-            return Ok(items);
-        }
-        p += 1;
-    }
 }
 
 // Called only by the owner's submission, before enqueueing. Delivery and
@@ -104,7 +102,9 @@ pub(super) async fn grant_offered(
     endpoint: &dhttp::Endpoint,
     target: &str,
     subject: &str,
+    requests: &[Value],
     capabilities: &[Value],
+    valid_before: i64,
 ) -> Result<(), Failure> {
     let existing = match contact(access, endpoint, target).await {
         Ok(contact) => contact,
@@ -113,8 +113,8 @@ pub(super) async fn grant_offered(
                 access,
                 endpoint,
                 Method::PUT,
-                &format!("/std/contact/{}", encoded(target)),
-                Some(&json!({"subject_id":subject,"class":"Human","description":"","status":"pending","offers":offered(capabilities)})),
+                &format!("/std/contact?name={}", encoded(target)),
+                Some(&json!({"subject_id":subject,"class":"Human","description":"","status":"pending","valid_before":valid_before,"requested_access":requested(requests),"offers":offered(capabilities)})),
             )
             .await?;
             contact(access, endpoint, target).await?

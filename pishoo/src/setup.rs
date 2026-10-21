@@ -51,7 +51,7 @@ pub(crate) fn load_server_config(profile: &IdentityProfile) -> Result<ServerConf
         .map_err(|error| {
             Error::InvalidConfig(format!(
                 "configuration database {}: {error}",
-                profile.config_db_path().display()
+                profile.join(".volume/sys/setting/.db").display()
             ))
         })
 }
@@ -66,152 +66,440 @@ pub(crate) fn read_server_config(conn: &mut Connection) -> Result<ServerConfig> 
 }
 
 fn initialize_config(profile: &IdentityProfile) -> Result<()> {
-    let directory = profile.db_dir();
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    std::fs::create_dir_all(profile.path())?;
+    if !profile.path().symlink_metadata()?.file_type().is_dir() {
+        return Err(Error::InvalidConfig(
+            "identity must be a real directory".into(),
+        ));
     }
-    builder.create(&directory)?;
-    if !directory.symlink_metadata()?.file_type().is_dir() {
-        return Err(Error::InvalidConfig(format!(
-            "{} must be a directory, not a symlink",
-            directory.display()
-        )));
-    }
-    let path = profile.config_db_path();
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    match options.open(&path) {
-        Ok(file) =>
+    for name in [
+        ".volume",
+        ".volume/sys",
+        ".volume/sys/setting",
+        ".volume/sys/lib",
+        ".volume/sys/app",
+        ".volume/sys/access",
+        ".volume/sys/contact",
+    ] {
+        let path = profile.join(name);
+        match std::fs::DirBuilder::new()
+            .recursive(false)
+            .mode(0o700)
+            .create(&path)
         {
-            #[cfg(unix)]
-            if rustix::process::geteuid().is_root() {
-                use std::os::unix::fs::MetadataExt;
-                let owner = directory.metadata()?;
-                rustix::fs::fchown(
-                    &file,
-                    Some(rustix::fs::Uid::from_raw(owner.uid())),
-                    Some(rustix::fs::Gid::from_raw(owner.gid())),
-                )
-                .map_err(std::io::Error::from)?;
-            }
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error.into()),
+        if !path.symlink_metadata()?.file_type().is_dir() {
+            return Err(Error::InvalidConfig(
+                "volume must contain real directories".into(),
+            ));
+        }
     }
-    let conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let integrity: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    let path = profile.join(".volume/sys/setting/.db");
+    if !path.try_exists()? {
+        let old = profile.config_db_path();
+        let staging = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+        if old.try_exists()? {
+            if !old.symlink_metadata()?.file_type().is_file() {
+                return Err(Error::InvalidConfig(
+                    "legacy configuration must be a regular file".into(),
+                ));
+            }
+            let source = Connection::open_with_flags(old, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            source.backup(rusqlite::DatabaseName::Main, staging.path(), None)?;
+        }
+        staging.as_file().sync_all()?;
+        match staging.persist_noclobber(&path) {
+            Ok(_) => {}
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.error.into()),
+        }
+    }
+    for name in ["lib", "app", "access"] {
+        let path = profile.join(format!(".volume/sys/{name}/.db"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+        {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let integrity: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if integrity != "ok" {
         return Err(Error::InvalidConfig(integrity));
     }
-    let empty = conn.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%') AND (SELECT user_version FROM pragma_user_version) = 0",
-        [], |row| row.get::<_, bool>(0),
+    let mut version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let staged_legacy: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('lib','main') WHERE name='id')",
+        [],
+        |r| r.get(0),
     )?;
-    let current = !empty && !has_enabled_column(&conn)? && conn.query_row(
-        "SELECT type = 'TEXT' FROM pragma_table_info('settings') WHERE name = 'listen'",
-        [], |row| row.get::<_, bool>(0),
-    )? && conn.query_row(
-        "SELECT count(*) = 4 FROM sqlite_master WHERE type='table' AND name IN ('libs','apps','app_dependencies','lib_dependencies')",
-        [], |row| row.get::<_, bool>(0),
-    )?;
-    drop(conn);
-    if current {
+    if staged_legacy {
+        version = 1;
+    }
+    if version == 2 {
+        for (schema, table) in [
+            ("main", "setting"),
+            ("lib_registry", "lib"),
+            ("app_registry", "app"),
+            ("acl", "lib_capability_operation"),
+        ] {
+            let exists: bool = conn.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {schema}.sqlite_master WHERE name=?1)"),
+                [table],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(Error::InvalidConfig(
+                    "incomplete split database schema".into(),
+                ));
+            }
+        }
         return Ok(());
     }
-    let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // Recheck under SQLite's write lock: another startup may have initialized it.
-    let empty = tx.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%') AND (SELECT user_version FROM pragma_user_version) = 0",
-        [], |row| row.get::<_, bool>(0),
-    )?;
-    if empty {
-        tx.execute_batch(
-            "CREATE TABLE settings (
-                listen TEXT NOT NULL CHECK(listen IN ('loopback','internal','external','all','off'))
-             );
-             INSERT INTO settings(listen) VALUES('all');
-             CREATE TABLE proxy_locations(location TEXT NOT NULL PRIMARY KEY, proxy_pass TEXT NOT NULL);
-             PRAGMA user_version=1;",
-        )?;
+    if version != 0 && version != 1 {
+        return Err(Error::InvalidConfig(
+            "unsupported configuration schema".into(),
+        ));
     }
-    upgrade_settings(&tx)?;
+    if version == 0
+        && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name NOT LIKE 'sqlite_%')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Err(Error::InvalidConfig(
+            "unrecognized configuration database".into(),
+        ));
+    }
+    let legacy = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name='settings')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )?;
+    // Read and validate the old configuration before modifying anything.
+    let kv: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name='setting')",
+        [],
+        |r| r.get(0),
+    )?;
+    let listen = if legacy || kv {
+        read_config(&conn)?.listen
+    } else {
+        "off".into()
+    };
+    for schema in ["main", "lib_registry", "app_registry", "acl"] {
+        conn.execute_batch(&format!(
+            "PRAGMA {schema}.journal_mode=DELETE; PRAGMA {schema}.synchronous=FULL;"
+        ))?;
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if staged_legacy {
+        for (singular, plural) in [
+            ("lib", "libs"),
+            ("app", "apps"),
+            ("app_dependency", "app_dependencies"),
+            ("lib_dependency", "lib_dependencies"),
+            ("lib_capability", "lib_capabilities"),
+            ("lib_capability_operation", "lib_capability_operations"),
+        ] {
+            if tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name=?1)",
+                [singular],
+                |r| r.get::<_, bool>(0),
+            )? {
+                tx.execute_batch(&format!("ALTER TABLE main.{singular} RENAME TO {plural}"))?;
+            }
+        }
+    }
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS setting(key TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS proxy_location(location TEXT PRIMARY KEY NOT NULL,proxy_pass TEXT NOT NULL);")?;
+    if listen != "off" {
+        tx.execute("INSERT INTO setting VALUES('listen',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&listen])?;
+    }
+    let old_proxy: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name='proxy_locations')",
+        [],
+        |r| r.get(0),
+    )?;
+    if old_proxy {
+        tx.execute_batch("INSERT INTO proxy_location SELECT * FROM proxy_locations;")?;
+    }
     tx.execute_batch(include_str!("package/packages.sql"))?;
+    for (old, schema, table) in [
+        ("libs", "lib_registry", "lib"),
+        ("apps", "app_registry", "app"),
+    ] {
+        let columns = tx
+            .prepare(&format!("PRAGMA main.table_info({old})"))?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if columns.is_empty() {
+            continue;
+        }
+        if columns.iter().any(|c| c == "package_proof")
+            && tx.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM main.{old} WHERE package_proof IS NOT NULL)"),
+                [],
+                |r| r.get::<_, bool>(0),
+            )?
+        {
+            return Err(Error::InvalidConfig(
+                "unpublished proof layout needs explicit recovery; original data preserved".into(),
+            ));
+        }
+        let author = if columns.iter().any(|c| c == "author") {
+            "author"
+        } else {
+            "CASE WHEN instr(id,'/')=0 THEN NULL ELSE substr(id,1,instr(id,'/')-1) END"
+        };
+        let fields = [
+            "title",
+            "description",
+            "license",
+            "repository",
+            "installed_at",
+            "upgraded_at",
+        ]
+        .map(|field| {
+            if columns.iter().any(|c| c == field) {
+                field
+            } else {
+                "NULL"
+            }
+        })
+        .join(",");
+        tx.execute_batch(&format!("INSERT INTO {schema}.{table}(name,author,version,title,description,license,repository,installed_at,upgraded_at) SELECT name,{author},version,{fields} FROM main.{old}"))?;
+    }
+    for (old, schema, table, modern, legacy_sql) in [
+        (
+            "app_dependencies",
+            "app_registry",
+            "app_dependency",
+            "app_name",
+            "SELECT a.name,l.name,d.version FROM main.app_dependencies d JOIN main.apps a ON a.id=d.app_id JOIN main.libs l ON l.id=d.lib_id",
+        ),
+        (
+            "lib_dependencies",
+            "lib_registry",
+            "lib_dependency",
+            "lib_name",
+            "SELECT l.name,t.name,d.version FROM main.lib_dependencies d JOIN main.libs l ON l.id=d.lib_id JOIN main.libs t ON t.id=d.dependency_id",
+        ),
+        (
+            "lib_capabilities",
+            "acl",
+            "lib_capability",
+            "lib_name",
+            "SELECT l.name,c.capability_id,c.title FROM main.lib_capabilities c JOIN main.libs l ON l.id=c.lib_id",
+        ),
+        (
+            "lib_capability_operations",
+            "acl",
+            "lib_capability_operation",
+            "lib_name",
+            "SELECT l.name,c.capability_id,c.method,c.path FROM main.lib_capability_operations c JOIN main.libs l ON l.id=c.lib_id",
+        ),
+    ] {
+        let columns = tx
+            .prepare(&format!("PRAGMA main.table_info({old})"))?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if columns.is_empty() {
+            continue;
+        }
+        let select = if columns.iter().any(|c| c == modern) {
+            format!("SELECT * FROM main.{old}")
+        } else {
+            legacy_sql.to_owned()
+        };
+        tx.execute_batch(&format!("INSERT INTO {schema}.{table} {select}"))?;
+        let copied: bool = tx.query_row(
+            &format!(
+                "SELECT (SELECT count(*) FROM {schema}.{table})=(SELECT count(*) FROM main.{old})"
+            ),
+            [],
+            |r| r.get(0),
+        )?;
+        if !copied {
+            return Err(Error::InvalidConfig(
+                "legacy references could not be migrated".into(),
+            ));
+        }
+    }
+    tx.execute_batch("UPDATE lib_capability_operation SET path='/'||lib_name||substr(path,5) WHERE substr(path,1,5)='/std/' AND lib_name IN (SELECT name FROM lib WHERE author IS NULL OR author<>'std.dhttp.net');")?;
+    for schema in ["lib_registry", "app_registry", "acl"] {
+        let broken = tx
+            .prepare(&format!("PRAGMA {schema}.foreign_key_check"))?
+            .exists([])?;
+        if broken {
+            return Err(Error::InvalidConfig("broken migrated foreign keys".into()));
+        }
+    }
+    let broken:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM app_dependency d LEFT JOIN lib l ON l.name=d.lib_name WHERE l.name IS NULL OR l.version<>d.version) OR EXISTS(SELECT 1 FROM lib_dependency d JOIN lib l ON l.name=d.dependency_name WHERE l.version<>d.version) OR EXISTS(SELECT 1 FROM lib_capability c LEFT JOIN lib l ON l.name=c.lib_name WHERE l.name IS NULL)",[],|r|r.get(0))?;
+    if broken {
+        return Err(Error::InvalidConfig(
+            "invalid migrated dependencies or capability owners".into(),
+        ));
+    }
+    // The original db/config.db is the backup. Drop only the migrated snapshot's tables.
+    tx.execute_batch("DROP TABLE IF EXISTS main.lib_capability_operations; DROP TABLE IF EXISTS main.lib_capabilities;
+        DROP TABLE IF EXISTS main.app_dependencies; DROP TABLE IF EXISTS main.lib_dependencies;
+        DROP TABLE IF EXISTS main.apps; DROP TABLE IF EXISTS main.libs;
+        DROP TABLE IF EXISTS main.proxy_locations; DROP TABLE IF EXISTS main.settings; PRAGMA main.user_version=2;")?;
     tx.commit()?;
     inherit_config_files(profile)?;
     Ok(())
 }
 
 pub(crate) fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result<Connection> {
-    let db = profile.config_db_path();
+    let current = profile.join(".volume/sys/setting/.db");
+    let db = if !current.try_exists()? && flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        profile.config_db_path()
+    } else {
+        current
+    };
     if !db.symlink_metadata()?.file_type().is_file() {
         return Err(Error::InvalidConfig(
-            "config.db must be a regular file".into(),
+            "configuration must be a regular file".into(),
         ));
     }
-    let conn = Connection::open_with_flags(db, flags)?;
+    let conn = Connection::open_with_flags(&db, flags)?;
     conn.busy_timeout(std::time::Duration::from_secs(3))?;
-    inherit_config_files(profile)?;
+    conn.pragma_update(None, "foreign_keys", true)?;
+    if db == profile.join(".volume/sys/setting/.db") {
+        for (schema, name) in [
+            ("lib_registry", "lib"),
+            ("app_registry", "app"),
+            ("acl", "access"),
+        ] {
+            let path = profile.join(format!(".volume/sys/{name}/.db"));
+            if !path.try_exists()? && flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
+                let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+                if version < 2 {
+                    continue;
+                }
+            }
+            if !path.symlink_metadata()?.file_type().is_file() {
+                return Err(Error::InvalidConfig(
+                    "attached database must be a regular file".into(),
+                ));
+            }
+            // URI mode prevents reads from creating a missing attached database.
+            let mode = if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
+                "ro"
+            } else {
+                "rw"
+            };
+            let uri = format!(
+                "file:{}?mode={mode}",
+                url::Url::from_file_path(path)
+                    .map_err(|_| Error::InvalidConfig("invalid database path".into()))?
+                    .path()
+            );
+            conn.execute(&format!("ATTACH DATABASE ?1 AS {schema}"), [uri])?;
+        }
+    }
     Ok(conn)
 }
 
 fn inherit_config_files(profile: &IdentityProfile) -> Result<()> {
-    use rustix::fs::{Mode, OFlags};
     use std::os::unix::fs::MetadataExt;
+
+    use rustix::fs::{Mode, OFlags};
     if !rustix::process::geteuid().is_root() {
         return Ok(());
     }
-    let directory = std::fs::File::from(
-        rustix::fs::open(
-            profile.db_dir(),
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(std::io::Error::from)?,
-    );
-    let owner = directory.metadata()?;
-    for name in ["config.db", "config.db-wal", "config.db-shm"] {
-        let file = match rustix::fs::openat(
-            &directory,
-            name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
-            Ok(file) => std::fs::File::from(file),
-            Err(rustix::io::Errno::NOENT) => continue,
-            Err(error) => return Err(std::io::Error::from(error).into()),
-        };
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.nlink() != 1 {
-            return Err(Error::InvalidConfig(
-                "config database files must be single-link regular files".into(),
-            ));
+    let owner = profile.path().symlink_metadata()?;
+    for name in ["setting", "lib", "app", "access"] {
+        let directory = std::fs::File::from(
+            rustix::fs::open(
+                profile.join(format!(".volume/sys/{name}")),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(std::io::Error::from)?,
+        );
+        for file in [".db", ".db-wal", ".db-shm", ".db-journal"] {
+            let file = match rustix::fs::openat(
+                &directory,
+                file,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(file) => std::fs::File::from(file),
+                Err(rustix::io::Errno::NOENT) => continue,
+                Err(error) => return Err(std::io::Error::from(error).into()),
+            };
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || metadata.nlink() != 1 {
+                return Err(Error::InvalidConfig(
+                    "database files must be single-link regular files".into(),
+                ));
+            }
+            rustix::fs::fchown(
+                &file,
+                Some(rustix::fs::Uid::from_raw(owner.uid())),
+                Some(rustix::fs::Gid::from_raw(owner.gid())),
+            )
+            .map_err(std::io::Error::from)?;
+            file.set_permissions(metadata.permissions())?;
         }
-        rustix::fs::fchown(
-            &file,
-            Some(rustix::fs::Uid::from_raw(owner.uid())),
-            Some(rustix::fs::Gid::from_raw(owner.gid())),
-        )
-        .map_err(std::io::Error::from)?;
     }
     Ok(())
 }
 
 fn read_config(conn: &Connection) -> Result<ServerConfig> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version != 1 {
+    if version != 1 && version != 2 {
         return Err(Error::InvalidConfig(format!(
             "unsupported schema {version}"
         )));
+    }
+    let kv: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name='setting')",
+        [],
+        |r| r.get(0),
+    )?;
+    if kv {
+        use rusqlite::OptionalExtension;
+        let listen: Option<String> = conn
+            .query_row("SELECT value FROM setting WHERE key='listen'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let listen = listen.unwrap_or_else(|| "off".into());
+        if listen != "off" && !valid_listen(&listen) {
+            return Err(Error::InvalidConfig("invalid listen mode".into()));
+        }
+        if listen == "off"
+            && conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM setting WHERE key='listen')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )?
+        {
+            return Err(Error::InvalidConfig(
+                "disabled listening must have no KV record".into(),
+            ));
+        }
+        let values = conn
+            .prepare("SELECT location,proxy_pass FROM proxy_location ORDER BY location")?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        return Ok(ServerConfig {
+            listen,
+            proxy_locations: parse_proxies(values)?,
+        });
     }
     let has_enabled = has_enabled_column(conn)?;
     let mut stmt = conn.prepare(if has_enabled {
@@ -229,7 +517,7 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
     let mut listen = match row.get_ref(0)? {
         ValueRef::Text(value) => std::str::from_utf8(value)
             .ok()
-            .filter(|value| valid_listen(value))
+            .filter(|value| *value == "off" || valid_listen(value))
             .map(str::to_owned)
             .ok_or_else(|| Error::InvalidConfig("invalid listen mode".into()))?,
         ValueRef::Integer(value @ 0..=3) => {
@@ -277,12 +565,12 @@ fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()
         return Err(Error::InvalidConfig("proxy cannot occupy /std".into()));
     }
     let has_apps: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='apps')",
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type='table' AND name='app')",
         [],
         |row| row.get(0),
     )?;
     if has_apps {
-        let mut names = conn.prepare("SELECT name FROM apps ORDER BY name")?;
+        let mut names = conn.prepare("SELECT name FROM app ORDER BY name")?;
         for name in names.query_map([], |row| row.get::<_, String>(0))? {
             let mount = format!("/{}", name?);
             if let Some(proxy) = proxies.iter().find(|proxy| {
@@ -297,20 +585,20 @@ fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()
         }
     }
     let has_libs: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='libs')",
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type='table' AND name='lib')",
         [],
         |row| row.get(0),
     )?;
     if has_libs {
         let has_author: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('libs') WHERE name='author')",
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('lib') WHERE name='author')",
             [],
             |row| row.get(0),
         )?;
         let mut names = conn.prepare(if has_author {
-            "SELECT name FROM libs WHERE author IS NULL OR author<>'std.dhttp.net' ORDER BY name"
+            "SELECT name FROM lib WHERE author IS NULL OR author<>'std.dhttp.net' ORDER BY name"
         } else {
-            "SELECT name FROM libs WHERE substr(id,1,14)<>'std.dhttp.net/' ORDER BY name"
+            "SELECT name FROM lib WHERE substr(id,1,14)<>'std.dhttp.net/' ORDER BY name"
         })?;
         for name in names.query_map([], |row| row.get::<_, String>(0))? {
             let mount = format!("/{}", name?);
@@ -340,29 +628,11 @@ fn has_enabled_column(conn: &Connection) -> Result<bool> {
 // Called only inside an IMMEDIATE transaction. Validate before modifying legacy v1.
 fn upgrade_settings(conn: &Connection) -> Result<()> {
     let config = read_config(conn)?;
-    check_proxy_mounts(conn, &config.proxy_locations)?;
-    let current: bool = conn.query_row(
-        "SELECT type = 'TEXT' FROM pragma_table_info('settings') WHERE name = 'listen'",
-        [],
-        |row| row.get(0),
-    )?;
-    if !current || has_enabled_column(conn)? {
-        conn.execute_batch(
-            "CREATE TABLE settings_listen (
-            listen TEXT NOT NULL CHECK(listen IN ('loopback','internal','external','all','off'))
-        );",
-        )?;
-        conn.execute(
-            "INSERT INTO settings_listen(listen) VALUES(?1)",
-            [&config.listen],
-        )?;
-        conn.execute_batch("DROP TABLE settings; ALTER TABLE settings_listen RENAME TO settings;")?;
-    }
-    Ok(())
+    check_proxy_mounts(conn, &config.proxy_locations)
 }
 
 fn valid_listen(value: &str) -> bool {
-    matches!(value, "loopback" | "internal" | "external" | "all" | "off")
+    matches!(value, "loopback" | "internal" | "external" | "all")
 }
 
 fn parse_proxies(values: Vec<(String, String)>) -> Result<Vec<ProxyLocation>> {
@@ -447,9 +717,7 @@ pub(crate) fn config_router(profile: IdentityProfile, endpoint: dhttp::Endpoint)
             response
         }
     };
-    Router::new()
-        .route("/std/sys/listen", any(handler.clone()))
-        .route("/std/sys/forward", any(handler))
+    Router::new().route("/std/sys/listen", any(handler))
 }
 
 async fn config_request(
@@ -481,19 +749,14 @@ async fn config_request(
         }
     }
 
-    let listening = request.uri().path() == "/std/sys/listen";
     let method = request.method().clone();
     let uri = request.uri().clone();
-    let allowed = if listening {
-        "GET, PATCH"
-    } else {
-        "GET, PUT, PATCH, DELETE"
-    };
-    if !(method == Method::GET
-        || method == Method::PATCH
-        || !listening && (method == Method::PUT || method == Method::DELETE))
-    {
-        return Ok((StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, allowed)]).into_response());
+    if !matches!(method, Method::GET | Method::PATCH | Method::DELETE) {
+        return Ok((
+            StatusCode::METHOD_NOT_ALLOWED,
+            [(header::ALLOW, "GET, PATCH, DELETE")],
+        )
+            .into_response());
     }
     let reading = method == Method::GET || method == Method::DELETE;
     if !reading
@@ -551,31 +814,38 @@ pub(crate) fn config_database(
     uri: &http::Uri,
     payload: Option<Value>,
 ) -> Result<Value> {
-    let listening = uri.path() == "/std/sys/listen";
-    if !listening && uri.path() != "/std/sys/forward" {
+    if uri.path() != "/std/sys/listen" {
         return Err(Error::RouteNotFound);
     }
-    let location = match uri.query() {
-        None => None,
-        Some(query) if !listening && (*method == Method::GET || *method == Method::DELETE) => {
-            let params = form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
-            if params.len() != 1 || params[0].0 != "location" {
-                return Err(Error::BadRequest(
-                    "query requires exactly one location".into(),
-                ));
-            }
-            let location = params[0].1.to_string();
-            let path = location.strip_prefix("= ").unwrap_or(&location);
-            if !valid_path(path) || reserved(path) {
-                return Err(Error::BadRequest("invalid proxy location".into()));
-            }
-            Some(location)
+    let deletion = if let Some(query) = uri.query() {
+        if *method != Method::DELETE {
+            return Err(Error::BadRequest("unsupported query parameters".into()));
         }
-        Some(_) => return Err(Error::BadRequest("unsupported query parameters".into())),
+        let params = form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
+        if params.len() != 2
+            || params.iter().filter(|(key, _)| key == "location").count() != 1
+            || params.iter().filter(|(key, _)| key == "proxy_pass").count() != 1
+        {
+            return Err(Error::BadRequest(
+                "deleting a forward requires exactly location and proxy_pass".into(),
+            ));
+        }
+        let location = params
+            .iter()
+            .find(|(key, _)| key == "location")
+            .unwrap()
+            .1
+            .to_string();
+        let upstream = params
+            .iter()
+            .find(|(key, _)| key == "proxy_pass")
+            .unwrap()
+            .1
+            .to_string();
+        Some(parse_proxy_json(&json!([{"location":location,"proxy_pass":upstream}]))?.remove(0))
+    } else {
+        None
     };
-    if *method == Method::DELETE && location.is_none() {
-        return Err(Error::BadRequest("DELETE requires a location".into()));
-    }
     let config = if *method == Method::GET {
         if payload.is_some() {
             return Err(Error::BadRequest("GET does not accept a body".into()));
@@ -583,57 +853,65 @@ pub(crate) fn config_database(
         let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         read_server_config(&mut conn)?
     } else {
-        let proxies = match (listening, method) {
-            (true, &Method::PATCH) => {
-                validate_listen_patch(
-                    payload
-                        .as_ref()
-                        .ok_or_else(|| Error::BadRequest("missing listen".into()))?,
-                )?;
+        let proxy = match method {
+            &Method::PATCH
+                if payload
+                    .as_ref()
+                    .and_then(|value| value.get("listen"))
+                    .is_some() =>
+            {
+                validate_listen_patch(payload.as_ref().unwrap())?;
                 None
             }
-            (false, &Method::PUT) => {
-                Some(parse_proxy_json(payload.as_ref().ok_or_else(|| {
-                    Error::BadRequest("missing forward rules".into())
-                })?)?)
-            }
-            (false, &Method::PATCH) => Some(parse_proxy_json(&Value::Array(vec![
-                payload
-                    .clone()
-                    .ok_or_else(|| Error::BadRequest("missing proxy".into()))?,
-            ]))?),
-            (false, &Method::DELETE) if payload.is_none() => None,
+            &Method::PATCH => Some(
+                parse_proxy_json(&Value::Array(vec![
+                    payload
+                        .clone()
+                        .ok_or_else(|| Error::BadRequest("missing configuration".into()))?,
+                ]))?
+                .remove(0),
+            ),
+            &Method::DELETE if payload.is_none() => None,
             _ => return Err(Error::MethodNotAllowed),
         };
+        initialize_config(profile)?;
         let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         upgrade_settings(&tx)?;
-        if listening {
-            let payload = payload.as_ref().unwrap();
+        if *method == Method::DELETE {
+            if let Some(rule) = deletion {
+                let current = read_config(&tx)?;
+                if let Some(existing) = current
+                    .proxy_locations
+                    .iter()
+                    .find(|existing| existing.location == rule.location)
+                {
+                    if upstream_text(existing) != upstream_text(&rule) {
+                        return Err(Error::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "forward upstream changed",
+                        )));
+                    }
+                    tx.execute(
+                        "DELETE FROM proxy_location WHERE location=?1",
+                        [&rule.location],
+                    )?;
+                }
+            } else {
+                tx.execute("DELETE FROM setting WHERE key='listen'", [])?;
+            }
+        } else if let Some(rule) = proxy {
             tx.execute(
-                "UPDATE settings SET listen=?1",
-                [payload["listen"].as_str().unwrap()],
+                "DELETE FROM proxy_location WHERE location=?1",
+                [&rule.location],
             )?;
-        } else if *method == Method::DELETE {
             tx.execute(
-                "DELETE FROM proxy_locations WHERE location=?1",
-                [location.as_ref().unwrap()],
+                "INSERT INTO proxy_location(location,proxy_pass) VALUES(?1,?2)",
+                rusqlite::params![rule.location, upstream_text(&rule)],
             )?;
         } else {
-            if *method == Method::PUT {
-                tx.execute("DELETE FROM proxy_locations", [])?;
-            }
-            for proxy in proxies.unwrap() {
-                // Delete/insert also supports existing v1 databases without a declared UNIQUE index.
-                tx.execute(
-                    "DELETE FROM proxy_locations WHERE location=?1",
-                    [&proxy.location],
-                )?;
-                tx.execute(
-                    "INSERT INTO proxy_locations(location, proxy_pass) VALUES(?1, ?2)",
-                    rusqlite::params![proxy.location, upstream_text(&proxy)],
-                )?;
-            }
+            tx.execute("INSERT INTO setting(key,value) VALUES('listen',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [payload.as_ref().unwrap()["listen"].as_str().unwrap()])?;
         }
         let config = read_config(&tx)?;
         check_proxy_mounts(&tx, &config.proxy_locations)?;
@@ -644,27 +922,12 @@ pub(crate) fn config_database(
     if *method == Method::DELETE {
         return Ok(Value::Null);
     }
-    if listening {
-        return Ok(json!({"listen": config.listen}));
-    }
-    let values = config
+    let forwards = config
         .proxy_locations
         .iter()
-        .map(|proxy| json!({"location": proxy.location, "proxy_pass": upstream_text(proxy)}))
+        .map(|proxy| json!({"location":proxy.location,"proxy_pass":upstream_text(proxy)}))
         .collect::<Vec<_>>();
-    if let Some(location) = location {
-        return values
-            .into_iter()
-            .find(|proxy| proxy["location"] == location)
-            .ok_or(Error::RouteNotFound);
-    }
-    if *method == Method::PATCH {
-        return values
-            .into_iter()
-            .find(|proxy| proxy["location"] == payload.as_ref().unwrap()["location"])
-            .ok_or(Error::RouteNotFound);
-    }
-    Ok(Value::Array(values))
+    Ok(json!({"listen":config.listen,"forward":forwards}))
 }
 
 fn validate_listen_patch(payload: &Value) -> Result<()> {

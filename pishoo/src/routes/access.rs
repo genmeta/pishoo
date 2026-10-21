@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use access_control::{
-    AccessService, AuthResult, Headers, PendingReviewResponse, SubjectId, Visitor,
+    AccessService, Action, AuthResult, Headers, PendingReviewResponse, SubjectId, Visitor,
 };
 use axum::{
     Router,
@@ -48,11 +48,6 @@ pub(crate) async fn authorize(
     if let Some(visitor) = &visitor {
         request.extensions_mut().insert(visitor.clone());
     }
-    if access_control::is_review_status_path(request.method(), request.uri().path())
-        || access_control::is_contact_status_path(request.method(), request.uri().path())
-    {
-        return next.run(request).await;
-    }
     let headers = Headers {
         method: request.method().clone(),
         path: request
@@ -73,11 +68,23 @@ pub(crate) async fn authorize(
         Ok(AuthResult::Allowed) => true,
         Ok(AuthResult::Denied) => false,
         Ok(AuthResult::Reviewing(review)) => {
-            return (
-                StatusCode::ACCEPTED,
+            let mut response = (
+                StatusCode::BAD_REQUEST,
                 axum::Json(PendingReviewResponse::from(review)),
             )
                 .into_response();
+            response.headers_mut().insert(
+                http::header::CACHE_CONTROL,
+                http::HeaderValue::from_static("no-store"),
+            );
+            return response;
+        }
+        Ok(AuthResult::Waiting(review)) => matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(300), review).await,
+            Ok(Ok(Action::Allow))
+        ),
+        Err(sea_orm::DbErr::Type(message)) => {
+            return (StatusCode::BAD_REQUEST, message).into_response();
         }
         Err(e) => {
             tracing::error!(error = %e, "authorization failed");

@@ -1,7 +1,6 @@
 //! Capability catalog lookup, selection and conversion to daccess operations.
 use dhttp_home::identity::IdentityProfile;
 use http::Method;
-use rusqlite::Connection;
 use serde_json::{Value, json};
 
 use super::{Failure, delivery::remote, fail, storage::storage};
@@ -37,14 +36,11 @@ pub(super) fn offered(selected: &[Value]) -> Value {
 }
 
 pub(super) fn catalog(profile: &IdentityProfile) -> Result<Value, Failure> {
-    let db = Connection::open_with_flags(
-        profile.config_db_path(),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(storage)?;
+    let db = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| fail(500, error.to_string()))?;
     let author: bool = db
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('libs') WHERE name='author')",
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('lib') WHERE name='author')",
             [],
             |row| row.get(0),
         )
@@ -69,7 +65,7 @@ pub(super) fn catalog(profile: &IdentityProfile) -> Result<Value, Failure> {
         std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     >::new();
     let mut stmt = db.prepare(&format!(
-        "SELECT ({package})||' · '||c.title,CASE WHEN coalesce({standard},0)=0 AND substr(o.path,1,5)='/std/' THEN '/'||l.name||substr(o.path,5) ELSE o.path END,o.method FROM lib_capabilities c JOIN libs l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operations o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
+        "SELECT ({package})||' · '||c.title,CASE WHEN coalesce({standard},0)=0 AND substr(o.path,1,5)='/std/' THEN '/'||l.name||substr(o.path,5) ELSE o.path END,o.method FROM lib_capability c JOIN lib l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operation o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
     )).map_err(storage)?;
     for row in stmt
         .query_map([], |row| {
@@ -98,6 +94,9 @@ pub(super) async fn selected(
     let ids = ids
         .as_array()
         .ok_or_else(|| fail(400, "invalid capabilities"))?;
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
     let catalog = if target == endpoint.name() {
         let profile = profile.clone();
         tokio::task::spawn_blocking(move || catalog(&profile))
@@ -108,7 +107,7 @@ pub(super) async fn selected(
             endpoint,
             target,
             Method::GET,
-            "/std/acl/promissions",
+            "/std/acl/permissions",
             None,
             None,
         )

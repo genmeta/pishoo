@@ -1,4 +1,4 @@
-use access_control::{AuthResult, Effect, Grantee, Headers, Method as AccessMethod, SubjectId};
+use access_control::{AuthResult, Grantee, Headers, Method as AccessMethod, SubjectId};
 use http::Method;
 
 use super::{access::access_version, *};
@@ -11,15 +11,15 @@ fn root_initialization_repairs_identity_directories_and_existing_packages() {
     assert!(rustix::process::geteuid().is_root());
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("apps/hello/public")).unwrap();
-    std::fs::create_dir_all(profile.join("libs/std/hello")).unwrap();
-    let index = profile.join("apps/hello/public/index.html");
+    std::fs::create_dir_all(profile.join("app/hello/public")).unwrap();
+    std::fs::create_dir_all(profile.join("lib/std/hello")).unwrap();
+    let index = profile.join("app/hello/index.html");
     std::fs::write(&index, b"page").unwrap();
     std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o600)).unwrap();
     let outside = root.path().join("outside");
     std::fs::write(&outside, b"untouched").unwrap();
-    symlink(&outside, profile.join("apps/symlink")).unwrap();
-    std::fs::hard_link(&outside, profile.join("libs/hardlink")).unwrap();
+    symlink(&outside, profile.join("app/symlink")).unwrap();
+    std::fs::hard_link(&outside, profile.join("lib/hardlink")).unwrap();
     let identity = std::fs::File::open(profile.path()).unwrap();
     rustix::fs::fchown(
         &identity,
@@ -33,14 +33,14 @@ fn root_initialization_repairs_identity_directories_and_existing_packages() {
         for name in [
             "db",
             "file",
-            "libs",
-            "libs/std",
-            "libs/std/hello",
-            "apps",
-            "apps/hello",
-            "apps/hello/public",
-            "apps/hello/public/index.html",
-            "logs",
+            "lib",
+            "lib/std",
+            "lib/std/hello",
+            "app",
+            "app/hello",
+            "app/hello/public",
+            "app/hello/index.html",
+            "log",
             "repo",
             "templates",
         ] {
@@ -89,24 +89,25 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path(), "alice");
     let config = load_server_config(&profile).unwrap();
-    assert_eq!(config.listen, "all");
-    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    assert_eq!(config.listen, "off");
+    let db =
+        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
     let columns: Vec<String> = db
-        .prepare("PRAGMA table_info(settings)")
+        .prepare("PRAGMA table_info(setting)")
         .unwrap()
         .query_map([], |row| row.get(1))
         .unwrap()
         .collect::<std::result::Result<_, _>>()
         .unwrap();
-    assert_eq!(columns, ["listen"]);
-    assert_ne!(config.listen, "off");
+    assert_eq!(columns, ["key", "value"]);
+    assert_eq!(config.listen, "off");
     assert!(config.proxy_locations.is_empty());
     for table in [
-        "libs",
-        "apps",
-        "app_dependencies",
-        "lib_dependencies",
-        "lib_capabilities",
+        "lib",
+        "app",
+        "app_dependency",
+        "lib_dependency",
+        "lib_capability",
     ] {
         assert_eq!(
             db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
@@ -119,10 +120,10 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
     let access = load_access(&profile, &SubjectId::new(b"owner").unwrap())
         .await
         .unwrap();
-    for file in ["config.db", "access.db"] {
-        assert!(profile.db_dir().join(file).is_file());
+    for name in ["setting", "access", "lib", "app"] {
+        assert!(profile.join(format!(".volume/sys/{name}/.db")).is_file());
     }
-    for directory in ["db", "file", "libs", "apps", "logs", "repo", "templates"] {
+    for directory in [".volume", "lib", "app", "log", "repo"] {
         assert!(profile.join(directory).is_dir());
     }
     assert!(!profile.join("server.conf").exists());
@@ -138,16 +139,24 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
         authorization(&access, Method::POST, "/std/contact", None).await,
         AuthResult::Denied
     ));
+    for path in ["/std/contact", "/std/acl/status/12"] {
+        assert!(matches!(
+            authorization(&access, Method::GET, path, Some("bob.dhttp.net")).await,
+            AuthResult::Allowed
+        ));
+        assert!(matches!(
+            authorization(&access, Method::GET, path, None).await,
+            AuthResult::Denied
+        ));
+    }
     for visitor in [None, Some("bob.dhttp.net")] {
         assert!(matches!(
-            authorization(&access, Method::GET, "/std/acl/promissions", visitor).await,
+            authorization(&access, Method::GET, "/std/acl/permissions", visitor).await,
             AuthResult::Allowed
         ));
         for (method, path) in [
             (Method::GET, "/std/profile"),
             (Method::GET, "/std/profile/avatar"),
-            (Method::GET, "/std/profile/context"),
-            (Method::HEAD, "/std/profile/context"),
             (Method::GET, "/workspace"),
             (Method::GET, "/workspace/"),
             (Method::GET, "/workspace/assets/app.js"),
@@ -162,16 +171,15 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
             );
         }
         for (method, path) in [
-            (Method::POST, "/std/acl/promissions"),
+            (Method::POST, "/std/acl/permissions"),
             (Method::GET, "/std/acl/access"),
             (Method::GET, "/std/acl/allow"),
             (Method::GET, "/std/sys/listen"),
             (Method::PATCH, "/std/profile"),
             (Method::PUT, "/std/profile/avatar"),
             (Method::DELETE, "/std/profile/avatar"),
-            (Method::GET, "/std/contacts"),
-            (Method::PATCH, "/std/contact/bob.dhttp.net"),
-            (Method::GET, "/std/contact/local/requests"),
+            (Method::GET, "/std/contact/list"),
+            (Method::PATCH, "/std/contact?name=bob.dhttp.net"),
             (Method::POST, "/std/message"),
             (Method::POST, "/workspace/"),
             (Method::GET, "/workspace-other/"),
@@ -195,7 +203,7 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
         .await,
         AuthResult::Allowed
     ));
-    let db = rusqlite::Connection::open(profile.access_db_path()).unwrap();
+    let db = rusqlite::Connection::open(profile.join(".volume/sys/access/.db")).unwrap();
     for table in ["contacts", "contact_applications", "access_reviews"] {
         assert_eq!(
             db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
@@ -204,26 +212,30 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
             0
         );
     }
-    assert!(!profile.db_dir().join("workspace.db").exists());
-    assert!(!profile.db_dir().join("chat.db").exists());
+    assert!(
+        !profile
+            .join(".volume/sys/setting")
+            .join("workspace.db")
+            .exists()
+    );
+    assert!(!profile.join(".volume/sys/setting").join("chat.db").exists());
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for file in ["config.db", "access.db"] {
+        for file in [".volume/sys/setting/.db", ".volume/sys/access/.db"] {
             assert_eq!(
-                profile
-                    .db_dir()
-                    .join(file)
-                    .metadata()
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
+                profile.join(file).metadata().unwrap().permissions().mode() & 0o777,
                 0o600
             );
         }
         assert_eq!(
-            profile.db_dir().metadata().unwrap().permissions().mode() & 0o777,
+            profile
+                .join(".volume/sys/setting")
+                .metadata()
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o700
         );
     }
@@ -247,24 +259,35 @@ async fn reopening_preserves_removed_default_rule_and_existing_config() {
     access
         .remove_policy(
             AccessMethod::Specified(Method::GET),
-            "/std/acl/promissions",
+            "/std/acl/permissions",
             Grantee::All,
         )
         .await
         .unwrap();
     for (method, path) in [
+        (Method::GET, "/std/contact"),
+        (Method::GET, "/std/contact/list"),
+        (Method::GET, "/std/acl/status"),
         (Method::GET, "/std/profile"),
-        (Method::HEAD, "/std/profile/context"),
         (Method::GET, "/workspace"),
         (Method::HEAD, "/workspace"),
     ] {
         access
-            .remove_policy(AccessMethod::Specified(method), path, Grantee::All)
+            .remove_policy(
+                AccessMethod::Specified(method),
+                path,
+                if matches!(path, "/std/contact" | "/std/acl/status") {
+                    Grantee::Named
+                } else {
+                    Grantee::All
+                },
+            )
             .await
             .unwrap();
     }
-    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
-    db.execute_batch("UPDATE settings SET listen='internal'; INSERT INTO proxy_locations VALUES('/service','127.0.0.1:8080');").unwrap();
+    let db =
+        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+    db.execute_batch("INSERT INTO setting VALUES('listen','internal'); INSERT INTO proxy_location VALUES('/service','127.0.0.1:8080');").unwrap();
     let config = load_server_config(&profile).unwrap();
     assert_eq!(config.listen, "internal");
     assert_eq!(config.proxy_locations.len(), 1);
@@ -283,14 +306,14 @@ async fn reopening_preserves_removed_default_rule_and_existing_config() {
         authorization(
             &reopened,
             Method::GET,
-            "/std/acl/promissions",
+            "/std/acl/permissions",
             Some("bob.dhttp.net")
         )
         .await,
         AuthResult::Denied
     ));
     assert_eq!(
-        rusqlite::Connection::open(profile.access_db_path())
+        rusqlite::Connection::open(profile.join(".volume/sys/access/.db"))
             .unwrap()
             .query_row("SELECT count(*) FROM access_rules", [], |r| r
                 .get::<_, i64>(0))
@@ -303,8 +326,10 @@ async fn reopening_preserves_removed_default_rule_and_existing_config() {
 async fn empty_access_file_and_abandoned_staging_do_not_lose_initial_rules() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path(), "alice");
-    std::fs::write(profile.access_db_path(), []).unwrap();
-    let abandoned = profile.db_dir().join(".access-init-abandoned");
+    std::fs::write(profile.join(".volume/sys/access/.db"), []).unwrap();
+    let abandoned = profile
+        .join(".volume/sys/setting")
+        .join(".access-init-abandoned");
     std::fs::create_dir(&abandoned).unwrap();
     std::fs::write(abandoned.join("partial.db"), b"partial").unwrap();
     let access = load_access(&profile, &SubjectId::new(b"owner").unwrap())
@@ -314,7 +339,10 @@ async fn empty_access_file_and_abandoned_staging_do_not_lose_initial_rules() {
         authorization(&access, Method::POST, "/std/contact", Some("bob.dhttp.net")).await,
         AuthResult::Allowed
     ));
-    assert_eq!(access_version(&profile.access_db_path()).unwrap(), Some(1));
+    assert_eq!(
+        access_version(&profile.join(".volume/sys/access/.db")).unwrap(),
+        Some(2)
+    );
 }
 
 #[tokio::test]
@@ -330,12 +358,16 @@ async fn unsupported_access_formats_are_preserved_without_adding_tables() {
             "CREATE TABLE important(value TEXT); INSERT INTO important VALUES('keep');",
         ),
         (
+            "published-legacy",
+            "CREATE TABLE migration(version TEXT PRIMARY KEY,applied_at INTEGER); CREATE TABLE location_rule_sets(id INTEGER PRIMARY KEY,pattern TEXT,created_at TEXT,updated_at TEXT); CREATE TABLE location_rules(id INTEGER PRIMARY KEY,location_id INTEGER,action INTEGER,exprs TEXT,created_at TEXT,updated_at TEXT); INSERT INTO location_rule_sets VALUES(1,'/private','old','old'); INSERT INTO location_rules VALUES(1,1,1,'old-rule','old','old');",
+        ),
+        (
             "future",
             "CREATE TABLE module(module_name TEXT,version INTEGER); INSERT INTO module VALUES('access',99);",
         ),
     ] {
         let profile = profile(root.path(), name);
-        let path = profile.access_db_path();
+        let path = profile.join(".volume/sys/access/.db");
         rusqlite::Connection::open(&path)
             .unwrap()
             .execute_batch(contents)
@@ -352,177 +384,119 @@ async fn unsupported_access_formats_are_preserved_without_adding_tables() {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
     let profile = profile(root.path(), "corrupt");
-    std::fs::write(profile.access_db_path(), b"not sqlite").unwrap();
+    std::fs::write(profile.join(".volume/sys/access/.db"), b"not sqlite").unwrap();
     assert!(
         load_access(&profile, &SubjectId::new(b"owner").unwrap())
             .await
             .is_err()
     );
     assert_eq!(
-        std::fs::read(profile.access_db_path()).unwrap(),
+        std::fs::read(profile.join(".volume/sys/access/.db")).unwrap(),
         b"not sqlite"
     );
 }
 
 #[tokio::test]
-async fn published_legacy_configuration_is_backed_up_and_not_imported() {
+async fn old_access_versions_upgrade_structure_without_replacing_data_or_seeding_rules() {
     let root = tempfile::tempdir().unwrap();
-    let profile = profile(root.path(), "alice");
-    let db = rusqlite::Connection::open(profile.access_db_path()).unwrap();
-    db.execute_batch("CREATE TABLE migration(version TEXT PRIMARY KEY,applied_at INTEGER); INSERT INTO migration VALUES('m20250909_154000_create_table',1);
-        CREATE TABLE location_rule_sets(id INTEGER PRIMARY KEY,pattern TEXT,created_at TEXT,updated_at TEXT);
-        CREATE TABLE location_rules(id INTEGER PRIMARY KEY,location_id INTEGER,action INTEGER,exprs TEXT,created_at TEXT,updated_at TEXT);
-        INSERT INTO location_rule_sets VALUES(1,'/private','old','old');
-        INSERT INTO location_rules VALUES(1,1,1,'old-rule','old','old');").unwrap();
-    drop(db);
-    let access = load_access(&profile, &SubjectId::new(b"owner").unwrap())
-        .await
+    for version in [0, 1] {
+        let profile = profile(root.path(), &format!("v{version}"));
+        let subject = SubjectId::new(b"owner").unwrap();
+        let access = load_access(&profile, &subject).await.unwrap();
+        drop(access);
+        let db = rusqlite::Connection::open(profile.join(".volume/sys/access/.db")).unwrap();
+        db.execute_batch(
+            "PRAGMA journal_mode=WAL;
+            DROP TRIGGER contacts_updated;
+            DROP TRIGGER contacts_inserted;
+            DROP TRIGGER contacts_delete_exact_rules;
+            DROP TABLE contact_deletions;
+            DROP INDEX contacts_updated_at;
+            CREATE TRIGGER contacts_delete_exact_rules AFTER DELETE ON contacts BEGIN
+                DELETE FROM access_rules WHERE grantee=OLD.name;
+            END;
+            DELETE FROM access_rules;
+            INSERT INTO contacts(name,subject_id,alias,status,expired_after,updated_at,created_at)
+                VALUES('bob.dhttp.net',X'01','Bob',2,2000000000,100,100);
+            INSERT INTO access_rules(method,api,effect,grantee_type,grantee,updated_at,created_at)
+                VALUES('POST','/std/contact','deny',2,'**',42,42);",
+        )
         .unwrap();
-    assert!(matches!(
-        authorization(&access, Method::POST, "/std/contact", Some("bob.dhttp.net")).await,
-        AuthResult::Allowed
-    ));
-    let current = rusqlite::Connection::open(profile.access_db_path()).unwrap();
-    assert_eq!(
-        current
-            .query_row("SELECT count(*) FROM contacts", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        current
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE name='location_rules'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        0
-    );
-    let backups = std::fs::read_dir(profile.db_dir())
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|p| {
-            p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("access-legacy-backup-")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(backups.len(), 1);
-    let backup = rusqlite::Connection::open(&backups[0]).unwrap();
-    assert_eq!(
-        backup
-            .query_row("SELECT exprs FROM location_rules WHERE id=1", [], |row| row
-                .get::<_, String>(0))
-            .unwrap(),
-        "old-rule"
-    );
-    load_access(&profile, &SubjectId::new(b"owner").unwrap())
-        .await
-        .unwrap();
-    assert_eq!(
-        std::fs::read_dir(profile.db_dir())
-            .unwrap()
-            .filter(|entry| entry
-                .as_ref()
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with("access-legacy-backup-"))
-            .count(),
-        1
-    );
-}
+        if version == 0 {
+            db.execute_batch("DROP TABLE contact_applications").unwrap();
+        }
+        db.execute("UPDATE module SET version=?1", [version])
+            .unwrap();
+        assert!(profile.join(".volume/sys/access/.db-wal").exists());
 
-#[tokio::test]
-async fn old_access_v0_is_archived_without_importing_its_policies() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = profile(root.path(), "alice");
-    let subject = SubjectId::new(b"owner").unwrap();
-    let access = load_access(&profile, &subject).await.unwrap();
-    access
-        .set_policy(
-            AccessMethod::Specified(Method::POST),
-            "/std/contact",
-            Effect::Deny,
-            Grantee::Named,
-        )
-        .await
-        .unwrap();
-    drop(access);
-    let db = rusqlite::Connection::open(profile.access_db_path()).unwrap();
-    db.execute_batch("PRAGMA journal_mode=WAL; DROP TABLE contact_applications; UPDATE module SET version=0; UPDATE access_rules SET updated_at=42;")
-        .unwrap();
-    assert!(profile.db_dir().join("access.db-wal").exists());
-    let reopened = load_access(&profile, &subject).await.unwrap();
-    assert!(matches!(
-        authorization(
-            &reopened,
-            Method::POST,
-            "/std/contact",
-            Some("bob.dhttp.net")
-        )
-        .await,
-        AuthResult::Allowed
-    ));
-    assert_eq!(access_version(&profile.access_db_path()).unwrap(), Some(1));
-    let backups = std::fs::read_dir(profile.db_dir())
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|p| {
-            p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("access-v0-backup-")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(backups.len(), 1);
-    assert_eq!(access_version(&backups[0]).unwrap(), Some(0));
-    assert_eq!(
-        rusqlite::Connection::open(&backups[0])
-            .unwrap()
-            .query_row(
-                "SELECT effect FROM access_rules WHERE api='/std/contact'",
+        let reopened = load_access(&profile, &subject).await.unwrap();
+        assert_eq!(
+            access_version(&profile.join(".volume/sys/access/.db")).unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            db.query_row("SELECT name,alias,updated_at FROM contacts", [], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap(),
+            ("bob.dhttp.net".into(), "Bob".into(), 100)
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT method,api,effect,updated_at FROM access_rules",
                 [],
-                |row| row.get::<_, String>(0)
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                }
             )
             .unwrap(),
-        "deny"
-    );
-    assert_eq!(
-        rusqlite::Connection::open(&backups[0])
-            .unwrap()
-            .query_row(
-                "SELECT updated_at FROM access_rules WHERE api='/std/contact'",
-                [],
-                |row| row.get::<_, i64>(0)
+            ("POST".into(), "/std/contact".into(), "deny".into(), 42)
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM access_rules", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(matches!(
+            authorization(
+                &reopened,
+                Method::GET,
+                "/std/contact",
+                Some("bob.dhttp.net")
             )
-            .unwrap(),
-        42
-    );
-    load_access(&profile, &subject).await.unwrap();
-    assert_eq!(
-        std::fs::read_dir(profile.db_dir())
-            .unwrap()
-            .filter(|entry| entry
-                .as_ref()
+            .await,
+            AuthResult::Denied
+        ));
+        assert!(
+            !std::fs::read_dir(profile.join(".volume/sys/setting"))
                 .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with("access-v0-backup-"))
-            .count(),
-        1
-    );
+                .any(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("access-v0-backup-")
+                })
+        );
+    }
 }
 
 #[test]
 fn unknown_config_is_preserved_and_empty_config_recovers() {
     let root = tempfile::tempdir().unwrap();
     let empty = profile(root.path(), "empty");
-    std::fs::write(empty.config_db_path(), []).unwrap();
-    assert_eq!(load_server_config(&empty).unwrap().listen, "all");
+    std::fs::write(empty.join(".volume/sys/setting/.db"), []).unwrap();
+    assert_eq!(load_server_config(&empty).unwrap().listen, "off");
     for (name, sql) in [
         (
             "unknown",
@@ -535,13 +509,16 @@ fn unknown_config_is_preserved_and_empty_config_recovers() {
         ),
     ] {
         let profile = profile(root.path(), name);
-        rusqlite::Connection::open(profile.config_db_path())
+        rusqlite::Connection::open(profile.join(".volume/sys/setting/.db"))
             .unwrap()
             .execute_batch(sql)
             .unwrap();
-        let before = std::fs::read(profile.config_db_path()).unwrap();
+        let before = std::fs::read(profile.join(".volume/sys/setting/.db")).unwrap();
         assert!(load_server_config(&profile).is_err());
-        assert_eq!(std::fs::read(profile.config_db_path()).unwrap(), before);
+        assert_eq!(
+            std::fs::read(profile.join(".volume/sys/setting/.db")).unwrap(),
+            before
+        );
     }
 }
 
@@ -554,15 +531,15 @@ async fn initialization_rejects_symlinked_directories_and_databases() {
     std::fs::create_dir(&external).unwrap();
     let identity = IdentityProfile::try_from(root.path().join("linked")).unwrap();
     std::fs::create_dir(identity.path()).unwrap();
-    symlink(&external, identity.db_dir()).unwrap();
+    symlink(&external, identity.join(".volume")).unwrap();
     assert!(initialize_directories(&identity).is_err());
     assert!(load_server_config(&identity).is_err());
     assert_eq!(std::fs::read_dir(&external).unwrap().count(), 0);
     let profile = profile(root.path(), "alice");
     let original = external.join("data");
     std::fs::write(&original, b"untouched").unwrap();
-    for file in ["config.db", "access.db"] {
-        symlink(&original, profile.db_dir().join(file)).unwrap();
+    for file in [".volume/sys/setting/.db", ".volume/sys/access/.db"] {
+        symlink(&original, profile.join(file)).unwrap();
     }
     assert!(load_server_config(&profile).is_err());
     assert!(
@@ -575,8 +552,7 @@ async fn initialization_rejects_symlinked_directories_and_databases() {
 
 #[tokio::test]
 async fn native_resource_handles_keep_the_personal_account_owner() {
-    use std::io::Write;
-    use std::os::unix::fs::MetadataExt;
+    use std::{io::Write, os::unix::fs::MetadataExt};
     let root = tempfile::tempdir().unwrap();
     let account = root.path().join("account");
     let profile = IdentityProfile::try_from(account.join(".dhttp/alice")).unwrap();
@@ -593,10 +569,10 @@ async fn native_resource_handles_keep_the_personal_account_owner() {
     let owner = account.metadata().unwrap();
     for path in [
         profile.path().to_path_buf(),
-        profile.config_db_path(),
-        profile.access_db_path(),
-        profile.join("db/contact.db"),
-        profile.join("logs/access.log"),
+        profile.join(".volume/sys/setting/.db"),
+        profile.join(".volume/sys/access/.db"),
+        profile.join(".volume/sys/contact/.db"),
+        profile.join("log/access.log"),
         profile.ocsp_path(),
     ] {
         let metadata = path.metadata().unwrap();
@@ -620,7 +596,7 @@ fn contact_database_links_do_not_modify_external_files() {
     std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o640)).unwrap();
     let original = outside.metadata().unwrap();
     for hardlink in [false, true] {
-        let path = profile.join("db/contact.db");
+        let path = profile.join(".volume/sys/contact/.db");
         if hardlink {
             std::fs::hard_link(&outside, &path).unwrap();
         } else {
@@ -641,8 +617,10 @@ fn contact_database_links_do_not_modify_external_files() {
 #[tokio::test]
 #[ignore = "requires root; run in an isolated filesystem"]
 async fn root_personal_home_repairs_initially_root_owned_native_resources() {
-    use std::io::Write;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    use std::{
+        io::Write,
+        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
+    };
     assert!(rustix::process::geteuid().is_root());
     let root = tempfile::tempdir().unwrap();
     let account = root.path().join("account");
@@ -695,8 +673,8 @@ async fn root_personal_home_repairs_initially_root_owned_native_resources() {
         "ssl/fullchain.crt",
         "db/config.db",
         "db/access.db",
-        "db/contact.db",
-        "logs/access.log",
+        ".volume/sys/contact/.db",
+        "log/access.log",
     ] {
         let metadata = profile.join(relative).metadata().unwrap();
         assert_eq!(
@@ -713,7 +691,7 @@ async fn root_personal_home_repairs_initially_root_owned_native_resources() {
         "contact.db-wal",
         "contact.db-shm",
     ] {
-        if let Ok(metadata) = profile.db_dir().join(name).metadata() {
+        if let Ok(metadata) = profile.join(".volume/sys/setting").join(name).metadata() {
             assert_eq!((metadata.uid(), metadata.gid()), (10001, 10002), "{name}");
         }
     }

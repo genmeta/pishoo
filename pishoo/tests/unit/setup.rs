@@ -7,9 +7,11 @@ use super::*;
 
 fn profile(root: &Path) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join("alice")).unwrap();
-    std::fs::create_dir_all(profile.db_dir()).unwrap();
-    let db = Connection::open(profile.config_db_path()).unwrap();
-    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER); INSERT INTO settings VALUES(1); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
+    std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
+    load_server_config(&profile).unwrap();
+    let db = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
+    db.execute("INSERT INTO setting VALUES('listen','internal')", [])
+        .unwrap();
     profile
 }
 
@@ -17,28 +19,57 @@ fn profile(root: &Path) -> IdentityProfile {
 fn config_api_reads_do_not_initialize_deleted_or_empty_databases() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    std::fs::remove_file(profile.config_db_path()).unwrap();
-    assert!(config_database(&profile, true, None).is_err());
-    assert!(!profile.config_db_path().exists());
-    std::fs::write(profile.config_db_path(), []).unwrap();
-    assert!(config_database(&profile, true, None).is_err());
-    assert_eq!(profile.config_db_path().metadata().unwrap().len(), 0);
+    std::fs::remove_file(profile.join(".volume/sys/setting/.db")).unwrap();
+    assert!(
+        config_database(
+            &profile,
+            &Method::GET,
+            &http::Uri::from_static("/std/sys/listen"),
+            None
+        )
+        .is_err()
+    );
+    assert!(!profile.join(".volume/sys/setting/.db").exists());
+    std::fs::write(profile.join(".volume/sys/setting/.db"), []).unwrap();
+    assert!(
+        config_database(
+            &profile,
+            &Method::GET,
+            &http::Uri::from_static("/std/sys/listen"),
+            None
+        )
+        .is_err()
+    );
+    assert_eq!(
+        profile
+            .join(".volume/sys/setting/.db")
+            .metadata()
+            .unwrap()
+            .len(),
+        0
+    );
 }
 #[test]
 fn persistent_config_connection_reads_external_commits_and_ends_each_transaction() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     let mut reader = open_config(&profile, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    let writer = Connection::open(profile.config_db_path()).unwrap();
+    let writer = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
     assert_eq!(read_server_config(&mut reader).unwrap().listen, "internal");
     assert!(reader.is_autocommit());
-    writer.execute("UPDATE settings SET listen=2", []).unwrap();
+    writer
+        .execute("UPDATE setting SET value='external' WHERE key='listen'", [])
+        .unwrap();
     assert_eq!(read_server_config(&mut reader).unwrap().listen, "external");
     assert!(reader.is_autocommit());
-    writer.execute("UPDATE settings SET listen=99", []).unwrap();
+    writer
+        .execute("UPDATE setting SET value='invalid' WHERE key='listen'", [])
+        .unwrap();
     assert!(read_server_config(&mut reader).is_err());
     assert!(reader.is_autocommit());
-    writer.execute("UPDATE settings SET listen=3", []).unwrap();
+    writer
+        .execute("UPDATE setting SET value='all' WHERE key='listen'", [])
+        .unwrap();
     assert_eq!(read_server_config(&mut reader).unwrap().listen, "all");
     assert!(reader.is_autocommit());
     // Routine reads never run the legacy schema upgrade.
@@ -50,14 +81,14 @@ fn config_requires_one_row_and_local_http_upstreams() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     assert_eq!(load_server_config(&profile).unwrap().listen, "internal");
-    let db = Connection::open(profile.config_db_path()).unwrap();
+    let db = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
     db.execute(
-        "INSERT INTO proxy_locations VALUES('/plain/','http://127.0.0.1:8080')",
+        "INSERT INTO proxy_location VALUES('/plain/','http://127.0.0.1:8080')",
         [],
     )
     .unwrap();
     db.execute(
-        "INSERT INTO proxy_locations VALUES('/replace/','http://127.0.0.1:8080/')",
+        "INSERT INTO proxy_location VALUES('/replace/','http://127.0.0.1:8080/')",
         [],
     )
     .unwrap();
@@ -75,12 +106,12 @@ fn config_requires_one_row_and_local_http_upstreams() {
             .is_some()
     );
     db.execute(
-        "INSERT INTO proxy_locations VALUES('/shorthand','127.0.0.1:8080')",
+        "INSERT INTO proxy_location VALUES('/shorthand','127.0.0.1:8080')",
         [],
     )
     .unwrap();
     db.execute(
-        "INSERT INTO proxy_locations VALUES('/ipv6','http://[::1]:8081/')",
+        "INSERT INTO proxy_location VALUES('/ipv6','http://[::1]:8081/')",
         [],
     )
     .unwrap();
@@ -120,34 +151,38 @@ fn config_requires_one_row_and_local_http_upstreams() {
         "[::1]:8081"
     );
     db.execute(
-        "INSERT INTO proxy_locations VALUES('/bad','https://bob.dhttp.net')",
+        "INSERT INTO proxy_location VALUES('/bad','https://bob.dhttp.net')",
         [],
     )
     .unwrap();
     assert!(load_server_config(&profile).is_err());
-    db.execute("DELETE FROM proxy_locations WHERE location='/bad'", [])
+    db.execute("DELETE FROM proxy_location WHERE location='/bad'", [])
         .unwrap();
     for target in [
         "http://example.com:8080",
         "http://192.168.1.2:8080",
         "https://127.0.0.1:8080",
     ] {
-        db.execute("INSERT INTO proxy_locations VALUES('/bad',?1)", [target])
+        db.execute("INSERT INTO proxy_location VALUES('/bad',?1)", [target])
             .unwrap();
         assert!(load_server_config(&profile).is_err(), "{target}");
-        db.execute("DELETE FROM proxy_locations WHERE location='/bad'", [])
+        db.execute("DELETE FROM proxy_location WHERE location='/bad'", [])
             .unwrap();
     }
-    db.execute("DELETE FROM proxy_locations", []).unwrap();
-    db.execute("INSERT INTO settings(listen) VALUES('internal')", [])
-        .unwrap();
-    assert!(load_server_config(&profile).is_err());
+    db.execute("DELETE FROM proxy_location", []).unwrap();
+    assert!(
+        db.execute(
+            "INSERT INTO setting(key,value) VALUES('listen','internal')",
+            []
+        )
+        .is_err()
+    );
 }
 #[test]
 fn only_std_namespace_is_reserved_for_proxy_locations() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let db = Connection::open(profile.config_db_path()).unwrap();
+    let db = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
     for location in [
         "/file",
         "/file/",
@@ -163,9 +198,9 @@ fn only_std_namespace_is_reserved_for_proxy_locations() {
         "/std-extra",
         "/standard",
     ] {
-        db.execute("DELETE FROM proxy_locations", []).unwrap();
+        db.execute("DELETE FROM proxy_location", []).unwrap();
         db.execute(
-            "INSERT INTO proxy_locations VALUES(?1,'127.0.0.1:8080')",
+            "INSERT INTO proxy_location VALUES(?1,'127.0.0.1:8080')",
             [location],
         )
         .unwrap();
@@ -179,9 +214,9 @@ fn only_std_namespace_is_reserved_for_proxy_locations() {
         "/std/api/note",
         "/std/unknown/",
     ] {
-        db.execute("DELETE FROM proxy_locations", []).unwrap();
+        db.execute("DELETE FROM proxy_location", []).unwrap();
         db.execute(
-            "INSERT INTO proxy_locations VALUES(?1,'127.0.0.1:8080')",
+            "INSERT INTO proxy_location VALUES(?1,'127.0.0.1:8080')",
             [location],
         )
         .unwrap();
@@ -213,7 +248,7 @@ fn only_std_namespace_is_reserved_for_proxy_locations() {
 fn ordinary_api_proxy_locations_are_independent_of_loaded_libs() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let db = Connection::open(profile.config_db_path()).unwrap();
+    let db = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
     for location in [
         "/api",
         "/api/",
@@ -221,9 +256,9 @@ fn ordinary_api_proxy_locations_are_independent_of_loaded_libs() {
         "= /api/websocket",
         "/api/note/",
     ] {
-        db.execute("DELETE FROM proxy_locations", []).unwrap();
+        db.execute("DELETE FROM proxy_location", []).unwrap();
         db.execute(
-            "INSERT INTO proxy_locations VALUES(?1,'127.0.0.1:8080')",
+            "INSERT INTO proxy_location VALUES(?1,'127.0.0.1:8080')",
             [location],
         )
         .unwrap();
@@ -232,113 +267,175 @@ fn ordinary_api_proxy_locations_are_independent_of_loaded_libs() {
 }
 
 #[test]
-fn config_api_updates_resources_independently_and_preserves_upstream_paths() {
+fn listen_resource_preserves_other_rules_and_requires_exact_deletion() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let db = Connection::open(profile.config_db_path()).unwrap();
-    db.execute_batch("ALTER TABLE settings ADD COLUMN exec INTEGER NOT NULL DEFAULT 1;")
+    let uri = http::Uri::from_static("/std/sys/listen");
+    for location in ["/plain", "/replace"] {
+        let saved = config_database(&profile, &Method::PATCH, &uri,
+            Some(json!({"location":location,"proxy_pass":if location == "/plain" {"127.0.0.1:8080"} else {"http://127.0.0.1:8080/"}}))).unwrap();
+        assert_eq!(saved["listen"], "internal");
+    }
+    let saved = config_database(&profile, &Method::GET, &uri, None).unwrap();
+    assert_eq!(saved["forward"][0]["proxy_pass"], "http://127.0.0.1:8080");
+    assert_eq!(saved["forward"][1]["proxy_pass"], "http://127.0.0.1:8080/");
+    let saved = config_database(
+        &profile,
+        &Method::PATCH,
+        &uri,
+        Some(json!({"listen":"all"})),
+    )
+    .unwrap();
+    assert_eq!(saved["forward"].as_array().unwrap().len(), 2);
+    let mismatch = "/std/sys/listen?location=%2Fplain&proxy_pass=http%3A%2F%2F127.0.0.1%3A9090"
+        .parse()
         .unwrap();
-    let proxies = json!([
-        {"location":"/plain", "proxy_pass":"127.0.0.1:8080"},
-        {"location":"/replace", "proxy_pass":"http://127.0.0.1:8080/"}
-    ]);
-    let saved = config_database(&profile, false, Some(proxies)).unwrap();
-    assert_eq!(saved[0]["proxy_pass"], "http://127.0.0.1:8080");
-    assert_eq!(saved[1]["proxy_pass"], "http://127.0.0.1:8080/");
+    assert!(config_database(&profile, &Method::DELETE, &mismatch, None).is_err());
     assert_eq!(
-        config_database(&profile, true, None).unwrap(),
-        json!({"listen":"internal"})
+        config_database(&profile, &Method::GET, &uri, None).unwrap(),
+        saved
     );
-    assert_eq!(
-        config_database(&profile, true, Some(json!({"listen":"all"}))).unwrap(),
-        json!({"listen":"all"})
-    );
-    assert_eq!(config_database(&profile, false, None).unwrap(), saved);
-    assert_eq!(
-        db.query_row(
-            "SELECT count(*) FROM pragma_table_info('settings') WHERE name='exec'",
-            [],
-            |row| row.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
-    );
-    config_database(&profile, false, Some(json!([]))).unwrap();
-    assert!(
-        load_server_config(&profile)
-            .unwrap()
-            .proxy_locations
-            .is_empty()
-    );
+    let deletion = "/std/sys/listen?location=%2Fplain&proxy_pass=127.0.0.1%3A8080"
+        .parse()
+        .unwrap();
+    for _ in 0..2 {
+        assert!(
+            config_database(&profile, &Method::DELETE, &deletion, None)
+                .unwrap()
+                .is_null()
+        );
+    }
+    config_database(&profile, &Method::DELETE, &uri, None).unwrap();
+    let saved = config_database(&profile, &Method::GET, &uri, None).unwrap();
+    assert_eq!(saved["listen"], "off");
+    assert_eq!(saved["forward"].as_array().unwrap().len(), 1);
+    assert_eq!(load_server_config(&profile).unwrap().listen, "off");
+    config_database(
+        &profile,
+        &Method::PATCH,
+        &uri,
+        Some(json!({"location":"/new","proxy_pass":"127.0.0.1:8082"})),
+    )
+    .unwrap();
+    assert_eq!(load_server_config(&profile).unwrap().listen, "off");
 }
 
 #[test]
-fn invalid_config_api_input_never_changes_saved_resources() {
+fn invalid_listen_input_never_changes_saved_resources() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let before = json!([{ "location":"/old", "proxy_pass":"http://127.0.0.1:8080" }]);
-    config_database(&profile, false, Some(before.clone())).unwrap();
+    let uri = http::Uri::from_static("/std/sys/listen");
+    let before = config_database(
+        &profile,
+        &Method::PATCH,
+        &uri,
+        Some(json!({"location":"/old","proxy_pass":"127.0.0.1:8080"})),
+    )
+    .unwrap();
     for payload in [
         json!({}),
         json!(null),
         json!([]),
         json!({"exec":true}),
-        json!({"listen":1.0}),
-        json!({"listen":-1}),
-        json!({"listen":4}),
-        json!({"exec":null}),
-        json!({"listen":"external","extra":true}),
+        json!({"listen":1}),
+        json!({"listen":"off"}),
+        json!({"listen":"auto"}),
+        json!({"listen":"both"}),
+        json!({"listen":"ALL"}),
+        json!({"listen":"all","enabled":false}),
+        json!({"listen":"all","location":"/a","proxy_pass":"127.0.0.1:8080"}),
+        json!({"location":"/a","proxy_pass":null}),
+        json!({"location":"/a","proxy_pass":"127.0.0.1:8080","extra":1}),
+        json!({"location":"/std","proxy_pass":"127.0.0.1:8080"}),
+        json!({"location":"/a","proxy_pass":"http://192.168.1.1:8080"}),
+        json!({"location":"/a","proxy_pass":"https://127.0.0.1:8080"}),
     ] {
         assert!(matches!(
-            config_database(&profile, true, Some(payload)),
+            config_database(&profile, &Method::PATCH, &uri, Some(payload)),
             Err(Error::BadRequest(_))
         ));
         assert_eq!(
-            config_database(&profile, true, None).unwrap(),
-            json!({"listen":"internal"})
+            config_database(&profile, &Method::GET, &uri, None).unwrap(),
+            before
         );
     }
-    for payload in [
-        json!({"proxy_locations": []}),
-        json!([{"location":"/a","proxy_pass":"127.0.0.1:8080","extra":1}]),
-        json!([{"location":"/a","proxy_pass":null}]),
-        json!([{"location":"/a","proxy_pass":"127.0.0.1:8080"},{"location":"/a","proxy_pass":"127.0.0.1:8081"}]),
-        json!([{"location":"/valid","proxy_pass":"127.0.0.1:8080"},{"location":"/std/sys/listen","proxy_pass":"127.0.0.1:8081"}]),
-        json!([{"location":"/std/pishoo","proxy_pass":"127.0.0.1:8080"}]),
-        json!([{"location":"/bad","proxy_pass":"http://192.168.1.1:8080"}]),
-        json!([{"location":"/bad","proxy_pass":"http://127.0.0.1:0"}]),
-        json!([{"location":"/bad","proxy_pass":"https://127.0.0.1:8080"}]),
+    for target in [
+        "/std/sys/listen?location=%2Fold",
+        "/std/sys/listen?proxy_pass=127.0.0.1%3A8080",
+        "/std/sys/listen?extra=x",
+        "/std/sys/listen?location=%2Fold&location=%2Fa&proxy_pass=127.0.0.1%3A8080",
     ] {
         assert!(matches!(
-            config_database(&profile, false, Some(payload)),
+            config_database(&profile, &Method::DELETE, &target.parse().unwrap(), None),
             Err(Error::BadRequest(_))
         ));
-        assert_eq!(config_database(&profile, false, None).unwrap(), before);
+        assert_eq!(
+            config_database(&profile, &Method::GET, &uri, None).unwrap(),
+            before
+        );
     }
-    // /std uses a path-segment boundary, so unrelated /std-extra proxies are valid.
-    assert!(
-        parse_proxy_json(&json!([{"location":"/std-extra","proxy_pass":"127.0.0.1:8080"}])).is_ok()
+}
+
+#[test]
+fn failed_proxy_update_rolls_back_the_previous_rule() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path());
+    let uri = http::Uri::from_static("/std/sys/listen");
+    let before = config_database(
+        &profile,
+        &Method::PATCH,
+        &uri,
+        Some(json!({"location":"/old","proxy_pass":"127.0.0.1:8080"})),
+    )
+    .unwrap();
+    let conn = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
+    conn.execute_batch("CREATE TRIGGER reject_proxy BEFORE INSERT ON proxy_location WHEN NEW.location='/old' BEGIN SELECT RAISE(ABORT,'test failure'); END;").unwrap();
+    assert!(matches!(
+        config_database(
+            &profile,
+            &Method::PATCH,
+            &uri,
+            Some(json!({"location":"/old","proxy_pass":"127.0.0.1:8081"}))
+        ),
+        Err(Error::ConfigDatabase(_))
+    ));
+    assert_eq!(
+        config_database(&profile, &Method::GET, &uri, None).unwrap(),
+        before
     );
 }
 
 #[test]
-fn proxy_replacement_rolls_back_a_database_failure_after_an_insert() {
+fn concurrent_proxy_updates_preserve_both_rules() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let before = json!([{ "location":"/old", "proxy_pass":"http://127.0.0.1:8080" }]);
-    config_database(&profile, false, Some(before.clone())).unwrap();
-    let conn = Connection::open(profile.config_db_path()).unwrap();
-    conn.execute_batch("CREATE TRIGGER reject_proxy BEFORE INSERT ON proxy_locations WHEN NEW.location='/z' BEGIN SELECT RAISE(ABORT,'test failure'); END;").unwrap();
-    let result = config_database(
-        &profile,
-        false,
-        Some(json!([
-            {"location":"/a","proxy_pass":"127.0.0.1:8080"},
-            {"location":"/z","proxy_pass":"127.0.0.1:8081"}
-        ])),
+    std::thread::scope(|scope| {
+        for location in ["/one", "/two"] {
+            let profile = &profile;
+            scope.spawn(move || {
+                config_database(
+                    profile,
+                    &Method::PATCH,
+                    &http::Uri::from_static("/std/sys/listen"),
+                    Some(json!({"location":location,"proxy_pass":"127.0.0.1:8080"})),
+                )
+                .unwrap()
+            });
+        }
+    });
+    assert_eq!(
+        config_database(
+            &profile,
+            &Method::GET,
+            &http::Uri::from_static("/std/sys/listen"),
+            None
+        )
+        .unwrap()["forward"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
     );
-    assert!(matches!(result, Err(Error::ConfigDatabase(_))));
-    assert_eq!(config_database(&profile, false, None).unwrap(), before);
 }
 
 fn api_endpoint(name: &str) -> dhttp::Endpoint {
@@ -400,7 +497,7 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
                 .unwrap()
         )
         .unwrap(),
-        json!({"listen":"internal"})
+        json!({"listen":"internal","forward":[]})
     );
     for path in ["/std/sys/settings", "/std/sys/proxies"] {
         assert_eq!(
@@ -416,7 +513,7 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
         ("v2, v1", StatusCode::OK),
         ("v2", StatusCode::HTTP_VERSION_NOT_SUPPORTED),
     ] {
-        let mut request = api_request(Method::GET, "/std/sys/forward", Body::empty());
+        let mut request = api_request(Method::GET, "/std/sys/listen", Body::empty());
         request
             .headers_mut()
             .insert("accept-versions", versions.parse().unwrap());
@@ -426,8 +523,8 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
         );
     }
     for (method, path, allow) in [
-        (Method::PUT, "/std/sys/listen", "GET, PATCH"),
-        (Method::POST, "/std/sys/forward", "GET, PUT, PATCH, DELETE"),
+        (Method::PUT, "/std/sys/listen", "GET, PATCH, DELETE"),
+        (Method::POST, "/std/sys/listen", "GET, PATCH, DELETE"),
     ] {
         let response = app
             .clone()
@@ -487,8 +584,14 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
         );
     }
     assert_eq!(
-        config_database(&profile, true, None).unwrap(),
-        json!({"listen":"internal"})
+        config_database(
+            &profile,
+            &Method::GET,
+            &http::Uri::from_static("/std/sys/listen"),
+            None
+        )
+        .unwrap(),
+        json!({"listen":"internal","forward":[]})
     );
 }
 
@@ -534,128 +637,13 @@ async fn config_routes_do_not_trust_forged_visitors_after_daccess_authorization(
     );
 }
 
-// Legacy whole-resource cases above now exercise the method/URI storage seam.
-fn config_database(
-    profile: &IdentityProfile,
-    settings: bool,
-    payload: Option<Value>,
-) -> Result<Value> {
-    let method = if payload.is_none() {
-        Method::GET
-    } else if settings {
-        Method::PATCH
-    } else {
-        Method::PUT
-    };
-    super::config_database(
-        profile,
-        &method,
-        &if settings {
-            http::Uri::from_static("/std/sys/listen")
-        } else {
-            http::Uri::from_static("/std/sys/forward")
-        },
-        payload,
-    )
-}
-
-#[test]
-fn single_proxy_updates_are_transactional_and_do_not_lose_other_locations() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = profile(root.path());
-    std::thread::scope(|scope| {
-        for location in ["/one", "/two"] {
-            let profile = &profile;
-            scope.spawn(move || {
-                super::config_database(
-                    profile,
-                    &Method::PATCH,
-                    &http::Uri::from_static("/std/sys/forward"),
-                    Some(json!({"location":location,"proxy_pass":"127.0.0.1:8080"})),
-                )
-                .unwrap()
-            });
-        }
-    });
-    let all = super::config_database(
-        &profile,
-        &Method::GET,
-        &http::Uri::from_static("/std/sys/forward"),
-        None,
-    )
-    .unwrap();
-    assert_eq!(all.as_array().unwrap().len(), 2);
-    assert_eq!(
-        super::config_database(
-            &profile,
-            &Method::GET,
-            &"/std/sys/forward?location=%2Fone".parse().unwrap(),
-            None
-        )
-        .unwrap()["location"],
-        "/one"
-    );
-    for _ in 0..2 {
-        assert!(
-            super::config_database(
-                &profile,
-                &Method::DELETE,
-                &"/std/sys/forward?location=%2Fone".parse().unwrap(),
-                None
-            )
-            .unwrap()
-            .is_null()
-        );
-    }
-    assert_eq!(
-        super::config_database(
-            &profile,
-            &Method::GET,
-            &http::Uri::from_static("/std/sys/forward"),
-            None
-        )
-        .unwrap()[0]["location"],
-        "/two"
-    );
-    for uri in [
-        "/std/sys/forward",
-        "/std/sys/forward?extra=1",
-        "/std/sys/forward?location=%2Ftwo&location=%2Fone",
-    ] {
-        assert!(matches!(
-            super::config_database(&profile, &Method::DELETE, &uri.parse().unwrap(), None),
-            Err(Error::BadRequest(_))
-        ));
-    }
-    // An existing incompatible namespace fails without mutating the old data.
-    let db = Connection::open(profile.config_db_path()).unwrap();
-    db.execute(
-        "INSERT INTO proxy_locations VALUES('/std/pishoo/conflict','127.0.0.1:8080')",
-        [],
-    )
-    .unwrap();
-    assert!(load_server_config(&profile).is_err());
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM proxy_locations", [], |row| row
-            .get::<_, i64>(0))
-            .unwrap(),
-        2
-    );
-    assert!(parse_proxy_json(&json!([{"location":"/pishoo-extra","proxy_pass":"127.0.0.1:8080"},{"location":"/sys","proxy_pass":"127.0.0.1:8080"}])).is_ok());
-}
-
 #[tokio::test]
-async fn proxy_routes_reject_bodies_queries_and_missing_delete_keys() {
+async fn listen_routes_reject_invalid_queries_bodies_and_removed_forward_route() {
     use tower::ServiceExt;
     let root = tempfile::tempdir().unwrap();
     let app = config_router(profile(root.path()), api_endpoint("alice.dhttp.net"));
     for (method, uri, body, status) in [
-        (
-            Method::GET,
-            "/std/sys/forward",
-            "x",
-            StatusCode::BAD_REQUEST,
-        ),
+        (Method::GET, "/std/sys/listen", "x", StatusCode::BAD_REQUEST),
         (
             Method::GET,
             "/std/sys/listen?extra=x",
@@ -664,25 +652,25 @@ async fn proxy_routes_reject_bodies_queries_and_missing_delete_keys() {
         ),
         (
             Method::DELETE,
-            "/std/sys/forward",
+            "/std/sys/listen?location=%2Fgone",
             "",
             StatusCode::BAD_REQUEST,
         ),
         (
             Method::DELETE,
-            "/std/sys/forward?location=%2Fgone",
+            "/std/sys/listen?location=%2Fgone&proxy_pass=127.0.0.1%3A8080",
             "",
             StatusCode::NO_CONTENT,
         ),
         (
-            Method::GET,
-            "/std/sys/forward?location=%2Fgone",
-            "",
-            StatusCode::NOT_FOUND,
+            Method::DELETE,
+            "/std/sys/listen",
+            "x",
+            StatusCode::BAD_REQUEST,
         ),
         (
             Method::PATCH,
-            "/std/sys/forward?location=%2Ftest",
+            "/std/sys/listen?location=%2Ftest",
             "{}",
             StatusCode::BAD_REQUEST,
         ),
@@ -695,67 +683,37 @@ async fn proxy_routes_reject_bodies_queries_and_missing_delete_keys() {
         assert_eq!(response.status(), status, "{uri}");
         assert_eq!(response.headers()["supported-versions"], "v1");
     }
-    assert_eq!(
-        app.oneshot(api_request(Method::GET, "/sys/settings", Body::empty()))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NOT_FOUND
-    );
+    for method in [Method::GET, Method::PUT, Method::PATCH, Method::DELETE] {
+        assert_eq!(
+            app.clone()
+                .oneshot(api_request(method, "/std/sys/forward", Body::empty()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
 }
 
 #[test]
-fn listen_accepts_only_named_modes_and_off_replaces_enabled() {
+fn listen_accepts_only_named_modes_and_preserves_forward_rules() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
+    let uri = http::Uri::from_static("/std/sys/listen");
     config_database(
         &profile,
-        false,
-        Some(json!([{"location":"/keep","proxy_pass":"127.0.0.1:8080"}])),
+        &Method::PATCH,
+        &uri,
+        Some(json!({"location":"/keep","proxy_pass":"127.0.0.1:8080"})),
     )
     .unwrap();
-    for mode in ["loopback", "internal", "external", "all", "off"] {
-        assert_eq!(
-            config_database(&profile, true, Some(json!({"listen":mode}))).unwrap(),
-            json!({"listen":mode})
-        );
+    for mode in ["loopback", "internal", "external", "all"] {
+        let saved =
+            config_database(&profile, &Method::PATCH, &uri, Some(json!({"listen":mode}))).unwrap();
+        assert_eq!(saved["listen"], mode);
+        assert_eq!(saved["forward"].as_array().unwrap().len(), 1);
         assert_eq!(load_server_config(&profile).unwrap().listen, mode);
     }
-    for payload in [
-        json!({"enabled":true}),
-        json!({"listen":"all","enabled":false}),
-        json!({"listen":0}),
-        json!({"listen":1}),
-        json!({"listen":"both"}),
-        json!({"listen":"ALL"}),
-    ] {
-        assert!(matches!(
-            config_database(&profile, true, Some(payload)),
-            Err(Error::BadRequest(_))
-        ));
-        assert_eq!(
-            config_database(&profile, true, None).unwrap(),
-            json!({"listen":"off"})
-        );
-    }
-    assert_eq!(
-        config_database(&profile, false, None)
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    let db = Connection::open(profile.config_db_path()).unwrap();
-    assert!(!has_enabled_column(&db).unwrap());
-    let columns: i64 = db
-        .query_row(
-            "SELECT count(*) FROM pragma_table_info('settings')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(columns, 1);
 }
 
 #[test]
@@ -769,7 +727,8 @@ fn legacy_v1_reads_without_mutation_then_migrates_disabled_to_off() {
     ] {
         let root = tempfile::tempdir().unwrap();
         let profile = profile(root.path());
-        let db = Connection::open(profile.config_db_path()).unwrap();
+        let db = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
+        db.execute_batch("DROP TABLE setting; ALTER TABLE proxy_location RENAME TO proxy_locations; CREATE TABLE settings(listen INTEGER); INSERT INTO settings VALUES(1); PRAGMA user_version=1;").unwrap();
         db.execute("UPDATE settings SET listen=?1", [value])
             .unwrap();
         if let Some(enabled) = enabled {
@@ -779,8 +738,14 @@ fn legacy_v1_reads_without_mutation_then_migrates_disabled_to_off() {
                 .unwrap();
         }
         assert_eq!(
-            config_database(&profile, true, None).unwrap(),
-            json!({"listen":expected})
+            config_database(
+                &profile,
+                &Method::GET,
+                &http::Uri::from_static("/std/sys/listen"),
+                None
+            )
+            .unwrap(),
+            json!({"listen":expected,"forward":[]})
         );
         assert_eq!(has_enabled_column(&db).unwrap(), enabled.is_some());
         assert_eq!(
@@ -792,14 +757,20 @@ fn legacy_v1_reads_without_mutation_then_migrates_disabled_to_off() {
         assert_eq!(load_server_config(&profile).unwrap().listen, expected);
         assert!(!has_enabled_column(&db).unwrap());
         assert_eq!(
-            db.query_row("SELECT typeof(listen) FROM settings", [], |row| row
-                .get::<_, String>(0))
+            db.query_row("SELECT count(*) FROM setting WHERE key='listen'", [], |r| r
+                .get::<_, i64>(0))
                 .unwrap(),
-            "text"
+            if expected == "off" { 0 } else { 1 }
         );
         assert_eq!(
-            config_database(&profile, true, Some(json!({"listen":"loopback"}))).unwrap(),
-            json!({"listen":"loopback"})
+            config_database(
+                &profile,
+                &Method::PATCH,
+                &http::Uri::from_static("/std/sys/listen"),
+                Some(json!({"listen":"loopback"}))
+            )
+            .unwrap(),
+            json!({"listen":"loopback","forward":[]})
         );
     }
 }
@@ -808,12 +779,20 @@ fn legacy_v1_reads_without_mutation_then_migrates_disabled_to_off() {
 fn invalid_legacy_v1_is_not_modified_by_listen_upgrade() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let db = Connection::open(profile.config_db_path()).unwrap();
+    let db = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
     db.execute_batch(
-        "ALTER TABLE settings ADD COLUMN enabled INTEGER; UPDATE settings SET enabled=9",
+        "DROP TABLE setting; ALTER TABLE proxy_location RENAME TO proxy_locations; CREATE TABLE settings(listen INTEGER,enabled INTEGER); INSERT INTO settings VALUES(1,9); PRAGMA user_version=1;",
     )
     .unwrap();
-    assert!(config_database(&profile, true, Some(json!({"listen":"off"}))).is_err());
+    assert!(
+        config_database(
+            &profile,
+            &Method::PATCH,
+            &http::Uri::from_static("/std/sys/listen"),
+            Some(json!({"listen":"off"}))
+        )
+        .is_err()
+    );
     assert!(has_enabled_column(&db).unwrap());
     assert!(load_server_config(&profile).is_err());
     assert_eq!(

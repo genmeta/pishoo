@@ -240,7 +240,13 @@ async fn install_store_artifact(
                         runtime.clone(),
                         id.clone(),
                         &package,
-                        &profile.join("db").join(id.rsplit('/').next().unwrap()),
+                        &profile
+                            .join(".volume")
+                            .join(if id.starts_with("std.dhttp.net/") {
+                                format!("std/{}", id.rsplit('/').next().unwrap())
+                            } else {
+                                id.rsplit('/').next().unwrap().to_owned()
+                            }),
                     )?);
                     sandbox.libs.insert(id.clone(), lib);
                     value
@@ -267,7 +273,7 @@ fn can_reuse_lib(profile: &IdentityProfile, id: &str, version: &str) -> Result<b
     };
     let db = crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let modern: bool = db.query_row(
-        "SELECT count(*)=2 FROM pragma_table_info('libs') WHERE name IN ('author','version')",
+        "SELECT count(*)=2 FROM pragma_table_info('lib') WHERE name IN ('author','version')",
         [],
         |row| row.get(0),
     )?;
@@ -275,7 +281,7 @@ fn can_reuse_lib(profile: &IdentityProfile, id: &str, version: &str) -> Result<b
         return Ok(false);
     }
     Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM libs WHERE author=?1 AND name=?2 AND version=?3)",
+        "SELECT EXISTS(SELECT 1 FROM lib WHERE author=?1 AND name=?2 AND version=?3)",
         [author, name, version],
         |row| row.get(0),
     )?)
