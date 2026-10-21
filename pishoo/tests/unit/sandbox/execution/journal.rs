@@ -336,7 +336,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
         .0,
         403
     );
-    assert!(!data.path().join(".db").exists());
+    assert!(!data.path().join("database").exists());
     let (status, _, context) = journal_call(
         &lib,
         &tasks,
@@ -804,7 +804,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
         .0,
         409
     );
-    let db = rusqlite::Connection::open(data.path().join(".db")).unwrap();
+    let db = rusqlite::Connection::open(data.path().join("database")).unwrap();
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
             .unwrap(),
@@ -1209,7 +1209,7 @@ async fn journal_frontend_is_served_from_package_with_daccess_for_every_file() {
         sandbox.tasks.is_empty(),
         "static files must not invoke WASM"
     );
-    assert!(!data.path().join(".db").exists());
+    assert!(!data.path().join("database").exists());
     let index = std::fs::read_to_string(public.join("index.html")).unwrap();
     assert!(index.contains("./assets/app.js") && index.contains("./assets/app.css"));
     assert!(!index.contains("<script>") && !index.contains("<style>"));

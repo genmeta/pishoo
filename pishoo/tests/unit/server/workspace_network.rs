@@ -521,7 +521,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     .await;
     assert_eq!(status, StatusCode::OK);
     // A disk config change must stay unapplied; no identity/Lib reload occurs.
-    rusqlite::Connection::open(server.profile.join(".volume/sys/setting/.db"))
+    rusqlite::Connection::open(server.profile.join(".volume/sys/setting/database"))
         .unwrap()
         .execute("UPDATE settings SET listen='internal'", [])
         .unwrap();
@@ -636,7 +636,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
     // Browser credentials alone must not enroll an identity in Pishoo, at startup
     // or on subsequent discovery scans. Use valid credentials to catch initialization.
     let browser = IdentityProfile::try_from(root.path().join("valid")).unwrap();
-    assert!(!browser.join(".volume/sys/setting/.db").exists());
+    assert!(!browser.join(".volume/sys/setting/database").exists());
     assert!(
         load_profile(browser.clone(), runtime.clone())
             .await
@@ -681,7 +681,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
     valid.close().await.unwrap();
     // A real empty v1 bootstrap is still supported through the run loop's loader.
     let empty_profile = IdentityProfile::try_from(root.path().join("valid")).unwrap();
-    std::fs::write(empty_profile.join(".volume/sys/setting/.db"), []).unwrap();
+    std::fs::write(empty_profile.join(".volume/sys/setting/database"), []).unwrap();
     let mut recovered = load_profile(empty_profile, runtime.clone())
         .await
         .unwrap()

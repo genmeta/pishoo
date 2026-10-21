@@ -150,6 +150,11 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
             "package name conflicts with the native std namespace",
         ));
     }
+    if metadata["name"] == "app" && metadata["has_lib"] == true
+        && metadata["publisher"] != "std.dhttp.net"
+    {
+        return Err(invalid("ordinary Lib name conflicts with the frontend app namespace"));
+    }
     let mappings = manifest
         .filesystem()
         .map_err(|_| invalid("invalid filesystem mappings"))?

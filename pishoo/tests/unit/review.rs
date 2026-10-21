@@ -46,7 +46,7 @@ async fn package_registry_records_both_resources_dates_and_capabilities() {
     let next = installed_packages(&profile, Some(id)).unwrap();
     assert_eq!(next["installed_at"], value["installed_at"]);
     assert!(next["upgraded_at"].as_i64().is_some());
-    assert!(profile.join(".volume/sys/pkg/.db").is_file());
+    assert!(profile.join(".volume/sys/pkg/database").is_file());
     assert!(!profile.join(".volume/sys/lib").exists());
     assert!(!profile.join(".volume/sys/app").exists());
 }
@@ -54,7 +54,7 @@ async fn package_registry_records_both_resources_dates_and_capabilities() {
 fn split_v2(profile: &IdentityProfile, conflict: bool) {
     for name in ["lib", "app"] {
         std::fs::create_dir_all(profile.join(format!(".volume/sys/{name}"))).unwrap();
-        std::fs::File::create(profile.join(format!(".volume/sys/{name}/.db"))).unwrap();
+        std::fs::File::create(profile.join(format!(".volume/sys/{name}/database"))).unwrap();
     }
     let db =
         crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
@@ -62,7 +62,7 @@ fn split_v2(profile: &IdentityProfile, conflict: bool) {
         db.execute(
             &format!("ATTACH DATABASE ?1 AS {schema}"),
             [profile
-                .join(format!(".volume/sys/{name}/.db"))
+                .join(format!(".volume/sys/{name}/database"))
                 .to_str()
                 .unwrap()],
         )
@@ -106,7 +106,7 @@ async fn conflicting_v2_resources_preserve_old_rows_and_can_retry() {
     let profile = identity(root.path()).await;
     split_v2(&profile, true);
     assert!(load_server_config(&profile).is_err());
-    let db = rusqlite::Connection::open(profile.join(".volume/sys/app/.db")).unwrap();
+    let db = rusqlite::Connection::open(profile.join(".volume/sys/app/database")).unwrap();
     assert_eq!(
         db.query_row("SELECT author FROM app", [], |r| r.get::<_, String>(0))
             .unwrap(),

@@ -9,7 +9,7 @@ fn profile(root: &Path) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join("alice")).unwrap();
     std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
     load_server_config(&profile).unwrap();
-    let db = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
+    let db = Connection::open(profile.join(".volume/sys/setting/database")).unwrap();
     db.execute("INSERT INTO setting VALUES('listen','internal')", [])
         .unwrap();
     profile
@@ -19,7 +19,7 @@ fn profile(root: &Path) -> IdentityProfile {
 fn config_api_reads_do_not_initialize_deleted_or_empty_databases() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    std::fs::remove_file(profile.join(".volume/sys/setting/.db")).unwrap();
+    std::fs::remove_file(profile.join(".volume/sys/setting/database")).unwrap();
     assert!(
         config_database(
             &profile,
@@ -29,8 +29,8 @@ fn config_api_reads_do_not_initialize_deleted_or_empty_databases() {
         )
         .is_err()
     );
-    assert!(!profile.join(".volume/sys/setting/.db").exists());
-    std::fs::write(profile.join(".volume/sys/setting/.db"), []).unwrap();
+    assert!(!profile.join(".volume/sys/setting/database").exists());
+    std::fs::write(profile.join(".volume/sys/setting/database"), []).unwrap();
     assert!(
         config_database(
             &profile,
@@ -42,7 +42,7 @@ fn config_api_reads_do_not_initialize_deleted_or_empty_databases() {
     );
     assert_eq!(
         profile
-            .join(".volume/sys/setting/.db")
+            .join(".volume/sys/setting/database")
             .metadata()
             .unwrap()
             .len(),
@@ -54,7 +54,7 @@ fn persistent_config_connection_reads_external_commits_and_ends_each_transaction
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     let mut reader = open_config(&profile, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    let writer = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
+    let writer = Connection::open(profile.join(".volume/sys/setting/database")).unwrap();
     assert_eq!(read_server_config(&mut reader).unwrap().listen, "internal");
     assert!(reader.is_autocommit());
     writer
@@ -81,7 +81,7 @@ fn config_requires_one_row_and_local_http_upstreams() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     assert_eq!(load_server_config(&profile).unwrap().listen, "internal");
-    let db = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
+    let db = Connection::open(profile.join(".volume/sys/setting/database")).unwrap();
     db.execute(
         "INSERT INTO proxy_location VALUES('/plain/','http://127.0.0.1:8080')",
         [],
@@ -182,7 +182,7 @@ fn config_requires_one_row_and_local_http_upstreams() {
 fn only_std_namespace_is_reserved_for_proxy_locations() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let db = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
+    let db = Connection::open(profile.join(".volume/sys/setting/database")).unwrap();
     for location in [
         "/file",
         "/file/",
@@ -190,7 +190,7 @@ fn only_std_namespace_is_reserved_for_proxy_locations() {
         "/contact",
         "/contacts",
         "/acl",
-        "/workspace",
+        "/app/workspace",
         "/workspace-api",
         "/chat-api",
         "/pishoo",
@@ -248,7 +248,7 @@ fn only_std_namespace_is_reserved_for_proxy_locations() {
 fn ordinary_api_proxy_locations_are_independent_of_loaded_libs() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let db = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
+    let db = Connection::open(profile.join(".volume/sys/setting/database")).unwrap();
     for location in [
         "/api",
         "/api/",
@@ -420,7 +420,7 @@ fn failed_proxy_update_rolls_back_the_previous_rule() {
         Some(json!({"location":"/old","proxy_pass":"127.0.0.1:8080"})),
     )
     .unwrap();
-    let conn = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
+    let conn = Connection::open(profile.join(".volume/sys/setting/database")).unwrap();
     conn.execute_batch("CREATE TRIGGER reject_proxy BEFORE INSERT ON proxy_location WHEN NEW.location='/old' BEGIN SELECT RAISE(ABORT,'test failure'); END;").unwrap();
     assert!(matches!(
         config_database(
@@ -824,7 +824,7 @@ fn legacy_v1_reads_without_mutation_then_migrates_disabled_to_off() {
     ] {
         let root = tempfile::tempdir().unwrap();
         let profile = profile(root.path());
-        let db = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
+        let db = Connection::open(profile.join(".volume/sys/setting/database")).unwrap();
         db.execute_batch("DROP TABLE setting; ALTER TABLE proxy_location RENAME TO proxy_locations; CREATE TABLE settings(listen INTEGER); INSERT INTO settings VALUES(1); PRAGMA user_version=1;").unwrap();
         db.execute("UPDATE settings SET listen=?1", [value])
             .unwrap();
@@ -876,7 +876,7 @@ fn legacy_v1_reads_without_mutation_then_migrates_disabled_to_off() {
 fn invalid_legacy_v1_is_not_modified_by_listen_upgrade() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let db = Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
+    let db = Connection::open(profile.join(".volume/sys/setting/database")).unwrap();
     db.execute_batch(
         "DROP TABLE setting; ALTER TABLE proxy_location RENAME TO proxy_locations; CREATE TABLE settings(listen INTEGER,enabled INTEGER); INSERT INTO settings VALUES(1,9); PRAGMA user_version=1;",
     )

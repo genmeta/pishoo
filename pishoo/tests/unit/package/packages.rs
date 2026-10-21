@@ -540,7 +540,7 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
                 .oneshot(
                     Request::builder()
                         .method(method.clone())
-                        .uri(format!("/{}/?view=1", id.rsplit('/').next().unwrap()))
+                        .uri(format!("/app/{}/?view=1", id.rsplit('/').next().unwrap()))
                         .body(axum::body::Body::empty())
                         .unwrap(),
                 )
@@ -568,7 +568,7 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/{}?value=1", id.rsplit('/').next().unwrap()))
+                .uri(format!("/app/{}?value=1", id.rsplit('/').next().unwrap()))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -577,7 +577,7 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
     assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
     assert_eq!(
         response.headers()["location"],
-        format!("/{}/?value=1", id.rsplit('/').next().unwrap())
+        format!("/app/{}/?value=1", id.rsplit('/').next().unwrap())
     );
     for (method, path, status) in [
         (Method::POST, "/", StatusCode::METHOD_NOT_ALLOWED),
@@ -596,7 +596,7 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
             .oneshot(
                 Request::builder()
                     .method(method)
-                    .uri(format!("/{}{path}", id.rsplit('/').next().unwrap()))
+                    .uri(format!("/app/{}{path}", id.rsplit('/').next().unwrap()))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -610,7 +610,7 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
     let response = old
         .oneshot(
             Request::builder()
-                .uri(format!("/{}/", id.rsplit('/').next().unwrap()))
+                .uri(format!("/app/{}/", id.rsplit('/').next().unwrap()))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -784,11 +784,11 @@ fn app_installation_and_proxy_writes_check_mount_conflicts_in_transaction() {
     let app = frontend_package("1.0.0", "installed");
     let id = "alice.dhttp.net/hello";
     for location in [
-        "/hello",
-        "/hello/",
-        "/hello/assets",
-        "= /hello",
-        "= /hello/assets",
+        "/app/hello",
+        "/app/hello/",
+        "/app/hello/assets",
+        "= /app/hello",
+        "= /app/hello/assets",
     ] {
         crate::setup::config_database(
             &profile,
@@ -819,8 +819,8 @@ fn app_installation_and_proxy_writes_check_mount_conflicts_in_transaction() {
     }
     let ancestors = json!([
         {"location":"/","proxy_pass":"127.0.0.1:8080"},
-        {"location":"/hel","proxy_pass":"127.0.0.1:8080"},
-        {"location":"/hello-adjacent","proxy_pass":"127.0.0.1:8080"}
+        {"location":"/app","proxy_pass":"127.0.0.1:8080"},
+        {"location":"/app/hello-adjacent","proxy_pass":"127.0.0.1:8080"}
     ]);
     for rule in ancestors.as_array().unwrap() {
         crate::setup::config_database(&profile, &http::Method::PATCH, &uri, Some(rule.clone()))
@@ -829,11 +829,11 @@ fn app_installation_and_proxy_writes_check_mount_conflicts_in_transaction() {
     let expected = crate::setup::config_database(&profile, &http::Method::GET, &uri, None).unwrap();
     install_app(&profile, id, &app).unwrap();
     for location in [
-        "/hello",
-        "/hello/",
-        "/hello/assets",
-        "= /hello",
-        "= /hello/assets",
+        "/app/hello",
+        "/app/hello/",
+        "/app/hello/assets",
+        "= /app/hello",
+        "= /app/hello/assets",
     ] {
         assert!(
             crate::setup::config_database(
@@ -853,7 +853,7 @@ fn app_installation_and_proxy_writes_check_mount_conflicts_in_transaction() {
     let db =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
     db.execute(
-        "INSERT INTO proxy_location(location,proxy_pass) VALUES('/hello','127.0.0.1:8080')",
+        "INSERT INTO proxy_location(location,proxy_pass) VALUES('/app/hello','127.0.0.1:8080')",
         [],
     )
     .unwrap();
@@ -906,7 +906,7 @@ async fn legacy_capability_prefixes_are_projected_then_migrated_without_changing
     db.execute_batch("INSERT INTO package(has_lib,has_app,name,author,version) VALUES(1,0,'journal','alice.dhttp.net','1.0.0'),(1,0,'message','std.dhttp.net','1.0.0');
         INSERT INTO lib_capability VALUES('journal','write','Journal'),('message','write','Message');
         INSERT INTO lib_capability_operation VALUES('journal','write','POST','/std/entries'),('message','write','POST','/std/message');").unwrap();
-    let acl = rusqlite::Connection::open(profile.join(".volume/sys/access/.db")).unwrap();
+    let acl = rusqlite::Connection::open(profile.join(".volume/sys/access/database")).unwrap();
     acl.execute_batch("CREATE TABLE preserved_rules(api TEXT); INSERT INTO preserved_rules VALUES('/std/entries')").unwrap();
     for migrated in [false, true] {
         if migrated {
@@ -1126,12 +1126,12 @@ async fn ordinary_lib_mounts_bind_signatures_capabilities_and_proxy_conflicts() 
     .unwrap();
     sandbox.load_libs(&profile).unwrap();
     let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
-    // The same URL may serve an App GET and a declared Lib POST.
+    // App pages and the same package's backend use separate namespaces.
     let page = router
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/journal/std/xxxx")
+                .uri("/app/journal/std/xxxx")
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -1382,7 +1382,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     sandbox.load_libs(&profile).unwrap();
     let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
     for (method, path, status) in [
-        (Method::GET, "/message/", StatusCode::OK),
+        (Method::GET, "/app/message/", StatusCode::OK),
         (
             Method::POST,
             "/std/message",
@@ -1430,7 +1430,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     let access = access_control::AccessService::load_from_db(
         &format!(
             "sqlite://{}?mode=rwc",
-            profile.join(".volume/sys/access/.db").display()
+            profile.join(".volume/sys/access/database").display()
         ),
         "std.dhttp.net",
         &access_control::SubjectId::new(b"owner").unwrap(),
@@ -1502,7 +1502,7 @@ async fn combined_package_serves_pages_and_backend_methods_and_is_one_identity()
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/hello/")
+                .uri("/app/hello/")
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )

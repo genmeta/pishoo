@@ -201,7 +201,7 @@ pub(super) async fn load_profile(
     let name = profile.name().to_owned();
     // Credentials alone do not opt a browser/client identity into hosting.
     // Startup and runtime discovery share this check before any identity loading.
-    if !profile.join(".volume/sys/setting/.db").try_exists()?
+    if !profile.join(".volume/sys/setting/database").try_exists()?
         && !profile.config_db_path().try_exists()?
     {
         return Ok(None);
@@ -218,8 +218,8 @@ pub(super) async fn load_profile(
         Err(error) => {
             // Preserve startup recovery of a genuinely empty database, but do not
             // initialize it before validating this identity's credentials.
-            let empty = profile.join(".volume/sys/setting/.db").symlink_metadata()?.file_type().is_file()
-                && rusqlite::Connection::open_with_flags(profile.join(".volume/sys/setting/.db"),
+            let empty = profile.join(".volume/sys/setting/database").symlink_metadata()?.file_type().is_file()
+                && rusqlite::Connection::open_with_flags(profile.join(".volume/sys/setting/database"),
                     rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
                     .ok().is_some_and(|conn| conn.query_row(
                         "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%') AND (SELECT user_version FROM pragma_user_version) = 0",

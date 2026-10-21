@@ -51,7 +51,7 @@ pub(crate) fn load_server_config(profile: &IdentityProfile) -> Result<ServerConf
         .map_err(|error| {
             Error::InvalidConfig(format!(
                 "configuration database {}: {error}",
-                profile.join(".volume/sys/setting/.db").display()
+                profile.join(".volume/sys/setting/database").display()
             ))
         })
 }
@@ -98,7 +98,7 @@ fn initialize_legacy_config(profile: &IdentityProfile) -> Result<()> {
             ));
         }
     }
-    let path = profile.join(".volume/sys/setting/.db");
+    let path = profile.join(".volume/sys/setting/database");
     if !path.try_exists()? {
         let old = profile.config_db_path();
         let staging = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
@@ -119,7 +119,7 @@ fn initialize_legacy_config(profile: &IdentityProfile) -> Result<()> {
         }
     }
     for name in ["lib", "app", "access"] {
-        let path = profile.join(format!(".volume/sys/{name}/.db"));
+        let path = profile.join(format!(".volume/sys/{name}/database"));
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -361,7 +361,7 @@ fn initialize_legacy_config(profile: &IdentityProfile) -> Result<()> {
 }
 
 fn open_legacy_config(profile: &IdentityProfile, flags: OpenFlags) -> Result<Connection> {
-    let current = profile.join(".volume/sys/setting/.db");
+    let current = profile.join(".volume/sys/setting/database");
     let db = if !current.try_exists()? && flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
         profile.config_db_path()
     } else {
@@ -375,13 +375,13 @@ fn open_legacy_config(profile: &IdentityProfile, flags: OpenFlags) -> Result<Con
     let conn = Connection::open_with_flags(&db, flags)?;
     conn.busy_timeout(std::time::Duration::from_secs(3))?;
     conn.pragma_update(None, "foreign_keys", true)?;
-    if db == profile.join(".volume/sys/setting/.db") {
+    if db == profile.join(".volume/sys/setting/database") {
         for (schema, name) in [
             ("lib_registry", "lib"),
             ("app_registry", "app"),
             ("acl", "access"),
         ] {
-            let path = profile.join(format!(".volume/sys/{name}/.db"));
+            let path = profile.join(format!(".volume/sys/{name}/database"));
             if !path.try_exists()? && flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
                 let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
                 if version < 2 {
@@ -419,8 +419,8 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
             "identity must be a real directory".into(),
         ));
     }
-    let existing = if profile.join(".volume/sys/setting/.db").try_exists()? {
-        profile.join(".volume/sys/setting/.db")
+    let existing = if profile.join(".volume/sys/setting/database").try_exists()? {
+        profile.join(".volume/sys/setting/database")
     } else {
         profile.config_db_path()
     };
@@ -467,7 +467,7 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
         }
     }
     for name in ["setting", "pkg", "access"] {
-        let path = profile.join(format!(".volume/sys/{name}/.db"));
+        let path = profile.join(format!(".volume/sys/{name}/database"));
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -514,7 +514,7 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
     // same-name resources; ambiguous author/version pairs require explicit resolution.
     if version == 2 {
         for (schema, name) in [("old_lib", "lib"), ("old_app", "app")] {
-            let path = profile.join(format!(".volume/sys/{name}/.db"));
+            let path = profile.join(format!(".volume/sys/{name}/database"));
             if !path.symlink_metadata()?.file_type().is_file() {
                 return Err(Error::InvalidConfig(
                     "legacy package database must be a regular file".into(),
@@ -567,7 +567,7 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
 }
 
 pub(crate) fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result<Connection> {
-    let current = profile.join(".volume/sys/setting/.db");
+    let current = profile.join(".volume/sys/setting/database");
     let db = if !current.try_exists()? && flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
         profile.config_db_path()
     } else {
@@ -581,9 +581,9 @@ pub(crate) fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result
     let conn = Connection::open_with_flags(&db, flags)?;
     conn.busy_timeout(std::time::Duration::from_secs(3))?;
     conn.pragma_update(None, "foreign_keys", true)?;
-    if db == profile.join(".volume/sys/setting/.db") {
+    if db == profile.join(".volume/sys/setting/database") {
         for (schema, name) in [("pkg_registry", "pkg"), ("acl", "access")] {
-            let path = profile.join(format!(".volume/sys/{name}/.db"));
+            let path = profile.join(format!(".volume/sys/{name}/database"));
             if !path.try_exists()? && flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
                 let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
                 if version < 3 {
@@ -634,7 +634,12 @@ fn inherit_config_files(profile: &IdentityProfile) -> Result<()> {
             )
             .map_err(std::io::Error::from)?,
         );
-        for file in [".db", ".db-wal", ".db-shm", ".db-journal"] {
+        for file in [
+            "database",
+            "database-wal",
+            "database-shm",
+            "database-journal",
+        ] {
             let file = match rustix::fs::openat(
                 &directory,
                 file,
@@ -762,7 +767,7 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
     })
 }
 
-// /std is reserved independently of installed packages. Old /api and /app remain proxyable.
+// /std is reserved; App and ordinary Lib mounts are checked independently.
 fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()> {
     if proxies.iter().any(|proxy| {
         crate::routes::reserved(proxy.location.strip_prefix("= ").unwrap_or(&proxy.location))
@@ -777,7 +782,7 @@ fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()
     if has_apps {
         let mut names = conn.prepare("SELECT name FROM app ORDER BY name")?;
         for name in names.query_map([], |row| row.get::<_, String>(0))? {
-            let mount = format!("/{}", name?);
+            let mount = format!("/app/{}", name?);
             if let Some(proxy) = proxies.iter().find(|proxy| {
                 let path = proxy.location.strip_prefix("= ").unwrap_or(&proxy.location);
                 path == mount || path.starts_with(&format!("{mount}/"))

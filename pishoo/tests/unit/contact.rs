@@ -126,7 +126,7 @@ fn contact_storage_does_not_adopt_unknown_or_incomplete_databases() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     std::fs::create_dir_all(profile.join(".volume/sys/contact")).unwrap();
-    let db = Connection::open(profile.join(".volume/sys/contact/.db")).unwrap();
+    let db = Connection::open(profile.join(".volume/sys/contact/database")).unwrap();
     db.execute_batch("CREATE TABLE unrelated(id INTEGER)")
         .unwrap();
     assert!(database(&profile).is_err());
@@ -198,7 +198,7 @@ async fn background_jobs_reuse_the_supplied_connection_and_release_transactions(
     assert_eq!(outcome.0, 1);
     assert_eq!(outcome.1, None);
     assert!(outcome.2.is_some_and(|error| !error.is_empty()));
-    assert!(!profile.join(".volume/sys/contact/.db").exists());
+    assert!(!profile.join(".volume/sys/contact/database").exists());
 }
 
 #[tokio::test]
@@ -347,7 +347,7 @@ async fn contact_routes_follow_acl_and_accept_an_authorized_manager() {
         router.clone().oneshot(request()).await.unwrap().status(),
         StatusCode::FORBIDDEN
     );
-    assert!(!profile.join(".volume/sys/contact/.db").exists());
+    assert!(!profile.join(".volume/sys/contact/database").exists());
     access
         .set_policy(
             access_control::Method::Specified(Method::GET),
@@ -361,7 +361,7 @@ async fn contact_routes_follow_acl_and_accept_an_authorized_manager() {
         router.clone().oneshot(request()).await.unwrap().status(),
         StatusCode::OK
     );
-    assert!(profile.join(".volume/sys/contact/.db").exists());
+    assert!(profile.join(".volume/sys/contact/database").exists());
     let mut cross_site = Request::builder()
         .method(Method::POST)
         .uri("/std/contact")
@@ -416,7 +416,7 @@ async fn contact_submission_without_capabilities_queues_without_contacting_the_p
             .is_err()
     );
     assert!(
-        !profile.join(".volume/sys/setting/.db").exists(),
+        !profile.join(".volume/sys/setting/database").exists(),
         "no capability catalog is needed"
     );
     for uri in ["/std/contact?name=offline.dhttp.net", "/std/contact/list"] {
@@ -456,7 +456,7 @@ fn contact_v1_upgrade_preserves_delivery_jobs_and_removes_only_saved_collection(
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     std::fs::create_dir_all(profile.join(".volume/sys/contact")).unwrap();
-    let old = Connection::open(profile.join(".volume/sys/contact/.db")).unwrap();
+    let old = Connection::open(profile.join(".volume/sys/contact/database")).unwrap();
     old.execute_batch(include_str!("../fixtures/contact-v1.sql"))
         .unwrap();
     old.execute("INSERT INTO outbound_contact_requests(id,target_name,description,application_id,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES(41,'peer.dhttp.net','Keep request',?1,'pending',2000000000,2000000000,100,100,100)", ["a".repeat(64)]).unwrap();
@@ -501,7 +501,7 @@ fn contact_v2_upgrade_preserves_bindings_sequence_and_pending_target_constraint(
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     std::fs::create_dir_all(profile.join(".volume/sys/contact")).unwrap();
-    let old = Connection::open(profile.join(".volume/sys/contact/.db")).unwrap();
+    let old = Connection::open(profile.join(".volume/sys/contact/database")).unwrap();
     old.execute_batch(include_str!("../fixtures/contact-v1.sql"))
         .unwrap();
     old.execute_batch("ALTER TABLE outbound_contact_requests ADD COLUMN contact_id INTEGER;
@@ -545,7 +545,7 @@ fn contact_v3_migration_failure_rolls_back_rename_and_version() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     std::fs::create_dir_all(profile.join(".volume/sys/contact")).unwrap();
-    let old = Connection::open(profile.join(".volume/sys/contact/.db")).unwrap();
+    let old = Connection::open(profile.join(".volume/sys/contact/database")).unwrap();
     old.execute_batch(include_str!("../fixtures/contact-v1.sql"))
         .unwrap();
     // A pre-existing target index makes the migration fail after ALTER TABLE.

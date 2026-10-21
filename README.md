@@ -118,7 +118,7 @@ account that owns the identity**, replacing `alice.smith` with its name:
 genmeta install workspace --id alice.smith
 ```
 
-The command calls the running identity's Pishoo installation API. Pishoo downloads and verifies the Workspace package and its exact Profile and Message dependencies. The page is available at `https://<identity>/workspace/` after installation. Selected versions must already be published to the store. Installation and updates use `POST /std/sys/pkg/install` with exactly `author`, `name` and `version`; there is no local-package upload fallback.
+The command calls the running identity's Pishoo installation API. Pishoo downloads and verifies the Workspace package and its exact Profile and Message dependencies. The page is available at `https://<identity>/app/workspace/` after installation. Selected versions must already be published to the store. Installation and updates use `POST /std/sys/pkg/install` with exactly `author`, `name` and `version`; there is no local-package upload fallback.
 
 Pishoo package installation and startup initialize native services and databases
 without downloading business Apps or invoking gmutils. Store unavailability does
@@ -127,7 +127,7 @@ for each identity; it preserves the normal ACL and dependency rules.
 
 ### Configuration
 
-Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's home. Listening is stored in `<identity>/.volume/sys/setting/.db` as the `setting` key `listen`; an absent key keeps the identity stopped across discovery and restarts. `genmeta listen --id NAME internal` opts in, `all` selects both internal and external scopes, and `genmeta listen --id NAME off` deletes the key after confirmation. Proxy rows use `proxy_location`. Existing `db/config.db` remains a migration input and backup. Endpoint and shared Network lifetimes are unchanged. See [Review implementation](REVIEW-IMPLEMENTATION-2026-10-21.md).
+Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's home. Listening is stored in `<identity>/.volume/sys/setting/database` as the `setting` key `listen`; an absent key keeps the identity stopped across discovery and restarts. `genmeta listen --id NAME internal` opts in, `all` selects both internal and external scopes, and `genmeta listen --id NAME off` deletes the key after confirmation. Proxy rows use `proxy_location`. Existing `db/config.db` remains a migration input and backup. Endpoint and shared Network lifetimes are unchanged. See [Review implementation](REVIEW-IMPLEMENTATION-2026-10-21.md).
 
 Local proxies support HTTP/3 WebSocket extended CONNECT (`:protocol=websocket`, version 13), translating the upstream HTTP/1.1 upgrade into an H3 200 and streaming opaque frames in both directions. Handshake attempts have bounded timeouts; established sessions have no 30-second lifetime limit. All system HTTP routes are reserved under `/std`, including Lib execution for authenticated publisher `std.dhttp.net` at its declared path prefixed with `/std`. Other Libs use `/<name>` plus their declared path; a nonstandard journal declaring `/std/xxxx` is exposed only at `/journal/std/xxxx`. Missing system paths return 404 and unsupported Lib methods return 405 without reaching proxies. Ordinary `/api/*` and `/file/*` belong to configured proxies independently of loaded Libs. Home Assistant and OpenCode can use their native upstream paths.
 
@@ -197,7 +197,7 @@ Rust components can use the [Pishoo SDK](wit/README.md) for verified identity an
 
 Online installation/update/removal publishes runtime changes immediately. `pishoo reload` is for identity/configuration reconciliation and is not an extra package activation step.
 
-A `.pkg` uses the WEBC v3 container and one signature for its metadata, dependencies, optional backend and optional static pages. Installation validates and expands runtime files to `lib/<name>.wasm` (or `lib/std/<name>.wasm`) and `app/<name>/`. One package registration in `.volume/sys/pkg/.db` records metadata, timestamps and the installed resource parts. Business data stays private in its `.volume` namespace. Updates and removals commit the package's runtime files and registration together.
+A `.pkg` uses the WEBC v3 container and one signature for its metadata, dependencies, optional backend and optional static pages. Installation validates and expands runtime files to `lib/<name>.wasm` (or `lib/std/<name>.wasm`) and `app/<name>/`. One package registration in `.volume/sys/pkg/database` records metadata, timestamps and the installed resource parts. App pages, assets and deep links use `/app/<name>/`; Lib APIs keep their existing mounts. Business data stays private in its `.volume` namespace. Updates and removals commit the package's runtime files and registration together.
 
 Lib compilation uses Wasmtime's persistent machine-code cache. Installation validation, runtime loading, and later service starts reuse compiled code when the WASM content, compiler version, and engine settings match. Each load reads and prepares installed runtime resources, including necessary compilation/linking; source signature and package-policy checks occur at installation/update. Wasmtime uses its platform cache directory and optional standard `wasmtime/config.toml` configuration; no cache setup is required. Cache initialization failures log a warning and fall back to ordinary compilation. A newly built WASM still needs its first compilation. Development builds optimize Cranelift and its register allocator to reduce this first-compilation cost while retaining Pishoo debug information and the normal WASM execution optimization level. Building these dependencies initially takes longer; release builds already optimize them.
 
@@ -229,3 +229,5 @@ Identity settings update the local database. Proxy and package commands use the
 running host's existing authenticated APIs. Manage process start/stop/restart/status
 with systemctl or brew services. For a foreground process, use `pishoo reload --pid PID`.
 Run `genmeta --help` for the available management commands.
+
+App pages, assets and deep links share one `GET /app/<name>` access rule, including HEAD requests. Workspace exposes a public/closed control for this root. Backend methods and paths retain their independent ACL rules.

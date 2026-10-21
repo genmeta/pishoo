@@ -48,13 +48,27 @@ pub(crate) async fn authorize(
     if let Some(visitor) = &visitor {
         request.extensions_mut().insert(visitor.clone());
     }
+    // A frontend is one read-only resource. Keep the original URI for routing,
+    // while pages, assets and deep links share its root GET authorization.
+    let app = matches!(request.method(), &http::Method::GET | &http::Method::HEAD)
+        .then(|| request.uri().path().strip_prefix("/app/"))
+        .flatten()
+        .and_then(|tail| tail.split('/').next())
+        .filter(|name| !name.is_empty())
+        .map(|name| format!("/app/{name}"));
     let headers = Headers {
-        method: request.method().clone(),
-        path: request
-            .uri()
-            .path_and_query()
-            .map_or("/", |p| p.as_str())
-            .to_string(),
+        method: if app.is_some() {
+            http::Method::GET
+        } else {
+            request.method().clone()
+        },
+        path: app.unwrap_or_else(|| {
+            request
+                .uri()
+                .path_and_query()
+                .map_or("/", |p| p.as_str())
+                .to_owned()
+        }),
         fields: request.headers().clone(),
     };
     let allowed = match access

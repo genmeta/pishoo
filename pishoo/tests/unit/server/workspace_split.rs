@@ -183,7 +183,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
             .unwrap()
             .libs
             .keys()
-            .any(|id| id.ends_with("/workspace"))
+            .any(|id| id.ends_with("/app/workspace"))
     );
     assert_eq!(
         call(
@@ -315,7 +315,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         .0,
         204
     );
-    let db = rusqlite::Connection::open(profile.join(".volume/sys/contact/.db")).unwrap();
+    let db = rusqlite::Connection::open(profile.join(".volume/sys/contact/database")).unwrap();
     db.execute("UPDATE outbound_contact_request SET next_attempt_at=0", [])
         .unwrap();
     drop(db);
@@ -389,7 +389,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
     remove_lib(profile, &id).unwrap();
     sandbox.write().unwrap().libs.remove(&id);
     assert!(profile_db.exists());
-    assert!(profile.join(".volume/sys/contact/.db").exists());
+    assert!(profile.join(".volume/sys/contact/database").exists());
     assert!(sandbox.read().unwrap().libs.contains_key(chat_id));
     assert_eq!(
         call(
