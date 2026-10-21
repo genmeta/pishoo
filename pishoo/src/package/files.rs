@@ -591,7 +591,7 @@ fn check_existing_rules(
 }
 
 fn save_registration(
-    conn: &rusqlite::Connection,
+    conn: &rusqlite::Transaction<'_>,
     id: &str,
     api: &serde_json::Value,
     package: &webc::Container,
@@ -637,29 +637,24 @@ fn save_registration(
             rusqlite::params![name, dependency_name, version],
         )?;
     }
-    // PUT /std/acl/permissions has the same full-replacement semantics. Keep
-    // package-driven replacement inside this existing install transaction.
-    conn.execute("DELETE FROM acl.lib_capability WHERE lib_name=?1", [name])?;
-    if api["has_lib"] == true {
+    let mut groups = if api["has_lib"] == true {
+        capability_rows(package)?
+    } else {
+        Vec::new()
+    };
+    if !groups.is_empty() {
         let prefix = if author == Some("std.dhttp.net") {
             "/std".to_owned()
         } else {
             format!("/{name}")
         };
-        for (capability, title, endpoints) in capability_rows(package)? {
-            conn.execute(
-                "INSERT INTO acl.lib_capability VALUES(?1,?2,?3)",
-                rusqlite::params![name, capability, title],
-            )?;
-            for (method, path) in endpoints {
-                conn.execute(
-                    "INSERT INTO acl.lib_capability_operation VALUES(?1,?2,?3,?4)",
-                    rusqlite::params![name, capability, method, format!("{prefix}{path}")],
-                )?;
+        for (_, _, endpoints) in &mut groups {
+            for (_, path) in endpoints {
+                *path = format!("{prefix}{path}");
             }
         }
     }
-    Ok(())
+    crate::routes::permissions(conn, name, &groups)
 }
 
 fn declared_dependencies(api: &serde_json::Value) -> Vec<(String, String)> {
@@ -1526,9 +1521,9 @@ pub(crate) fn remove_package(profile: &IdentityProfile, id: &str) -> Result<()> 
             "package is required by installed dependencies",
         )));
     }
-    // DELETE /std/acl/permissions semantics, committed atomically with removal.
+    // Use the same permissions operation as HTTP DELETE, within this removal.
     // Existing access_rules and the Lib's private business data are retained.
-    tx.execute("DELETE FROM acl.lib_capability WHERE lib_name=?1", [short])?;
+    crate::routes::permissions(&tx, short, &[])?;
     tx.execute("DELETE FROM package WHERE name=?1", [short])?;
     commit_package_files(profile, id, &parent, &stage, &name, tx)
 }
