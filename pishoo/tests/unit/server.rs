@@ -41,9 +41,15 @@ async fn system_static_files_are_separate_from_ordinary_proxy_paths() {
     });
     let root = tempfile::tempdir().unwrap();
     let mut server = server(root.path()).await;
-    std::fs::create_dir_all(server.profile.join("file/content")).unwrap();
+    std::fs::create_dir_all(server.profile.join(".volume/sys/file/.file/content")).unwrap();
     for path in ["local.txt", "content/local.txt", "contentish"] {
-        std::fs::write(server.profile.join(&format!("file/{path}")), "static").unwrap();
+        std::fs::write(
+            server
+                .profile
+                .join(&format!(".volume/sys/file/.file/{path}")),
+            "static",
+        )
+        .unwrap();
     }
     server
         .access
@@ -311,12 +317,16 @@ fn component(version: &str) -> Vec<u8> {
 }
 async fn server(root: &std::path::Path) -> Server {
     let profile = IdentityProfile::try_from(root.join("alice")).unwrap();
-    std::fs::create_dir_all(profile.db_dir()).unwrap();
+    std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
     std::fs::create_dir_all(profile.join("ssl")).unwrap();
-    std::fs::create_dir_all(profile.join("logs")).unwrap();
-    std::fs::create_dir_all(profile.join("libs/echo")).unwrap();
-    let db = rusqlite::Connection::open(profile.db_dir().join("config.db")).unwrap();
-    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen TEXT); INSERT INTO settings(listen) VALUES('loopback'); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
+    std::fs::create_dir_all(profile.join("log")).unwrap();
+    std::fs::create_dir_all(profile.join("lib/echo")).unwrap();
+    initialize_directories(&profile).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let db =
+        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+    db.execute("INSERT INTO setting VALUES('listen','loopback')", [])
+        .unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     crate::setup::load_server_config(&profile).unwrap();
     crate::package::install_lib(
@@ -510,7 +520,7 @@ async fn close_clears_router_and_execution_resources() {
 async fn lib_root_symlink_does_not_grant_a_foreign_directory() {
     let root = tempfile::tempdir().unwrap();
     let server = server(root.path()).await;
-    let path = server.profile.join("libs");
+    let path = server.profile.join("lib");
     std::fs::rename(&path, server.profile.join("real-lib")).unwrap();
     std::os::unix::fs::symlink(server.profile.join("real-lib"), &path).unwrap();
     assert!(
@@ -539,10 +549,10 @@ async fn disabled_listener_is_rejected_before_network_registration() {
 async fn disabled_profile_skips_credentials_libs_and_workers() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("disabled")).unwrap();
-    std::fs::create_dir_all(profile.db_dir()).unwrap();
-    std::fs::create_dir_all(profile.join("libs/broken")).unwrap();
-    std::fs::write(profile.join("libs/broken/.webc-proof"), b"broken").unwrap();
-    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
+    std::fs::create_dir_all(profile.join("lib/broken")).unwrap();
+    std::fs::write(profile.join("lib/broken/.webc-proof"), b"broken").unwrap();
+    let db = rusqlite::Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER); INSERT INTO settings VALUES(2, 0); CREATE TABLE proxy_locations(location TEXT, proxy_pass TEXT);").unwrap();
     assert!(
         load_profile(profile.clone(), Arc::new(WasmRuntime::new().unwrap()))
@@ -551,7 +561,7 @@ async fn disabled_profile_skips_credentials_libs_and_workers() {
             .is_none()
     );
     for name in ["access.db", "workspace.db", "chat.db"] {
-        assert!(!profile.db_dir().join(name).exists());
+        assert!(!profile.join(".volume/sys/setting").join(name).exists());
     }
 }
 
@@ -579,7 +589,7 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     crate::setup::config_database(
         &profile,
         &http::Method::PATCH,
-        &"/std/sys/forward".parse().unwrap(),
+        &"/std/sys/listen".parse().unwrap(),
         Some(serde_json::json!({"location":"/live", "proxy_pass":"127.0.0.1:8080"})),
     )
     .unwrap();
@@ -617,8 +627,10 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
             .next()
             .unwrap()
     ));
-    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
-    db.execute("UPDATE settings SET listen=99", []).unwrap();
+    let db =
+        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+    db.execute("UPDATE setting SET value='invalid' WHERE key='listen'", [])
+        .unwrap();
     reconcile_profiles(
         &ddns::mdns::MdnsResolverSet::new("pishoo-test.local"),
         &home,
@@ -631,7 +643,8 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     assert_eq!(servers[&name].config.listen, "loopback");
     // Invalid SQL contents keep the loaded configuration; a repaired row is
     // visible through the same long-lived connection on the next scan.
-    db.execute("DELETE FROM settings", []).unwrap();
+    db.execute("UPDATE setting SET value='off' WHERE key='listen'", [])
+        .unwrap();
     assert!(
         !reconcile_profiles(
             &ddns::mdns::MdnsResolverSet::new("pishoo-test.local"),
@@ -646,7 +659,7 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     assert!(servers.contains_key(&name));
     assert_ne!(servers[&name].config.listen, "off");
     assert!(servers[&name].config_db.lock().unwrap().is_autocommit());
-    db.execute("INSERT INTO settings(listen) VALUES('off')", [])
+    db.execute("DELETE FROM setting WHERE key='listen'", [])
         .unwrap();
     reconcile_profiles(
         &ddns::mdns::MdnsResolverSet::new("pishoo-test.local"),
@@ -708,16 +721,23 @@ async fn discovery_failure_retains_servers_and_deleted_identity_is_removed() {
 async fn unloaded_empty_configuration_waits_for_credential_validation_before_initializing() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("empty")).unwrap();
-    std::fs::create_dir_all(profile.db_dir()).unwrap();
-    std::fs::write(profile.config_db_path(), []).unwrap();
+    std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
+    std::fs::write(profile.join(".volume/sys/setting/.db"), []).unwrap();
     assert!(
         load_profile(profile.clone(), Arc::new(WasmRuntime::new().unwrap()))
             .await
             .unwrap()
             .is_none()
     );
-    assert_eq!(profile.config_db_path().metadata().unwrap().len(), 0);
-    assert!(!profile.access_db_path().exists());
+    assert_eq!(
+        profile
+            .join(".volume/sys/setting/.db")
+            .metadata()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert!(!profile.join(".volume/sys/access/.db").exists());
 }
 
 #[tokio::test]
@@ -734,8 +754,9 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
     .unwrap();
     *server.router.write().unwrap() = current_router(&server);
     let doc = json!({"openapi":"3.1.0","info":{"title":"Message","version":"1.0.0","description":"test","license":{"name":"MIT"}},
-        "x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"message","dependencies":[],"host":{"request-identity":"identity"},"access-groups":{"message":{"title":"1v1聊天","operations":["receive"]}}},
-        "paths":{"/message":{"post":{"operationId":"receive","summary":"receive","x-pishoo":{"access-group":"message"},"responses":{"200":{"description":"ok"}}}}}});
+        "x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"message","dependencies":[],"host":{"request-identity":"identity"}},
+        "x-access-groups":{"message":{"title":"1v1聊天","operations":["receive"]}},
+        "paths":{"/message":{"post":{"operationId":"receive","summary":"receive","x-access-group":"message","responses":{"200":{"description":"ok"}}}}}});
     let package = crate::package::tests::package_fixture(
         &doc,
         include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm"),
@@ -752,7 +773,7 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
     .unwrap();
     let request = || {
         let mut request = Request::builder()
-            .uri("/std/acl/promissions")
+            .uri("/std/acl/permissions")
             .body(AxumBody::empty())
             .unwrap();
         request.extensions_mut().insert(dhttp::HandshakeSummary {
@@ -778,7 +799,7 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
         .access
         .set_policy(
             access_control::Method::Specified(Method::GET),
-            "/std/acl/promissions",
+            "/std/acl/permissions",
             access_control::Effect::Deny,
             access_control::Grantee::All,
         )
@@ -800,7 +821,7 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
         .access
         .set_policy(
             access_control::Method::Specified(Method::GET),
-            "/std/acl/promissions",
+            "/std/acl/permissions",
             access_control::Effect::Allow,
             access_control::Grantee::All,
         )
@@ -845,8 +866,10 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
             .unwrap(),
         "{}"
     );
-    let db = rusqlite::Connection::open(server.profile.config_db_path()).unwrap();
-    db.execute_batch("DROP TABLE lib_capability_operations; DROP TABLE lib_capabilities;")
+    let db =
+        crate::setup::open_config(&server.profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .unwrap();
+    db.execute_batch("DROP TABLE lib_capability_operation; DROP TABLE lib_capability;")
         .unwrap();
     let response = server
         .router
@@ -1257,12 +1280,12 @@ async fn stopping_identity_removes_all_mdns_records_before_waiting_for_tasks() {
             }
             operation => {
                 let sql = match operation {
-                    "disable" => "UPDATE settings SET listen='off'",
-                    "off" => "UPDATE settings SET listen='off'",
+                    "disable" => "DELETE FROM setting WHERE key='listen'",
+                    "off" => "DELETE FROM setting WHERE key='listen'",
                     "external" => "UPDATE settings SET listen='external'",
                     _ => unreachable!(),
                 };
-                rusqlite::Connection::open(server.profile.config_db_path())
+                rusqlite::Connection::open(server.profile.join(".volume/sys/setting/.db"))
                     .unwrap()
                     .execute_batch(sql)
                     .unwrap();
@@ -1327,37 +1350,40 @@ async fn permission_catalog_qualifies_group_titles_and_preserves_legacy_registra
     for legacy in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-        std::fs::create_dir_all(profile.db_dir()).unwrap();
-        let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+        std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
+        crate::setup::load_server_config(&profile).unwrap();
+        let db = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .unwrap();
         if legacy {
-            db.execute_batch("CREATE TABLE libs (id TEXT PRIMARY KEY, name TEXT, version TEXT);
-                CREATE TABLE lib_capabilities (lib_id TEXT, capability_id TEXT, title TEXT);
-                CREATE TABLE lib_capability_operations (lib_id TEXT, capability_id TEXT, path TEXT, method TEXT);
-                INSERT INTO libs VALUES ('dev.dhttp.net/message', 'message', '1.0.0');
-                INSERT INTO lib_capabilities VALUES ('dev.dhttp.net/message', 'read', 'read message'), ('dev.dhttp.net/message', 'details', 'read message'), ('dev.dhttp.net/message', 'empty', 'empty');
-                INSERT INTO lib_capability_operations VALUES ('dev.dhttp.net/message', 'read', '/std/message', 'GET'), ('dev.dhttp.net/message', 'read', '/std/message', 'HEAD'), ('dev.dhttp.net/message', 'details', '/std/message', 'GET'), ('dev.dhttp.net/message', 'details', '/std/message/history', 'GET');").unwrap();
+            db.execute_batch("DROP TABLE acl.lib_capability_operation; DROP TABLE acl.lib_capability; DROP TABLE lib_registry.lib_dependency; DROP TABLE lib_registry.lib;").unwrap();
+            db.execute_batch("CREATE TABLE lib (id TEXT PRIMARY KEY, name TEXT, version TEXT);
+                CREATE TABLE lib_capability (lib_id TEXT, capability_id TEXT, title TEXT);
+                CREATE TABLE lib_capability_operation (lib_id TEXT, capability_id TEXT, path TEXT, method TEXT);
+                INSERT INTO lib VALUES ('dev.dhttp.net/message', 'message', '1.0.0');
+                INSERT INTO lib_capability VALUES ('dev.dhttp.net/message', 'read', 'read message'), ('dev.dhttp.net/message', 'details', 'read message'), ('dev.dhttp.net/message', 'empty', 'empty');
+                INSERT INTO lib_capability_operation VALUES ('dev.dhttp.net/message', 'read', '/std/message', 'GET'), ('dev.dhttp.net/message', 'read', '/std/message', 'HEAD'), ('dev.dhttp.net/message', 'details', '/std/message', 'GET'), ('dev.dhttp.net/message', 'details', '/std/message/history', 'GET');").unwrap();
         } else {
             db.execute_batch(include_str!("../../src/package/packages.sql"))
                 .unwrap();
-            db.execute_batch("INSERT INTO libs (name, author, version) VALUES ('message', 'dev.dhttp.net', '1.0.0');
-                INSERT INTO lib_capabilities VALUES ('message', 'read', 'read message'), ('message', 'details', 'read message'), ('message', 'empty', 'empty');
-                INSERT INTO lib_capability_operations VALUES ('message', 'read', 'GET', '/std/message'), ('message', 'read', 'HEAD', '/std/message'), ('message', 'details', 'GET', '/std/message/history');").unwrap();
+            db.execute_batch("INSERT INTO lib (name, author, version) VALUES ('message', 'dev.dhttp.net', '1.0.0');
+                INSERT INTO lib_capability VALUES ('message', 'read', 'read message'), ('message', 'details', 'read message'), ('message', 'empty', 'empty');
+                INSERT INTO lib_capability_operation VALUES ('message', 'read', 'GET', '/std/message'), ('message', 'read', 'HEAD', '/std/message'), ('message', 'details', 'GET', '/std/message/history');").unwrap();
         }
         if legacy {
-            db.execute_batch("INSERT INTO libs VALUES ('other.dhttp.net/archive', 'archive', '1.0.0');
-                INSERT INTO lib_capabilities VALUES ('other.dhttp.net/archive', 'read', 'read message');
-                INSERT INTO lib_capability_operations VALUES ('other.dhttp.net/archive', 'read', '/archive/entries', 'GET');").unwrap();
+            db.execute_batch("INSERT INTO lib VALUES ('other.dhttp.net/archive', 'archive', '1.0.0');
+                INSERT INTO lib_capability VALUES ('other.dhttp.net/archive', 'read', 'read message');
+                INSERT INTO lib_capability_operation VALUES ('other.dhttp.net/archive', 'read', '/archive/entries', 'GET');").unwrap();
         } else {
-            db.execute_batch("INSERT INTO libs (name, author, version) VALUES ('archive', 'other.dhttp.net', '1.0.0');
-                INSERT INTO lib_capabilities VALUES ('archive', 'read', 'read message');
-                INSERT INTO lib_capability_operations VALUES ('archive', 'read', 'GET', '/archive/entries');").unwrap();
+            db.execute_batch("INSERT INTO lib (name, author, version) VALUES ('archive', 'other.dhttp.net', '1.0.0');
+                INSERT INTO lib_capability VALUES ('archive', 'read', 'read message');
+                INSERT INTO lib_capability_operation VALUES ('archive', 'read', 'GET', '/archive/entries');").unwrap();
         }
         let router = capabilities_router(profile.clone());
         let response = router
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/std/acl/promissions")
+                    .uri("/std/acl/permissions")
                     .body(AxumBody::empty())
                     .unwrap(),
             )

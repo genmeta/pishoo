@@ -178,7 +178,7 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
         .unwrap();
     let _listener = scopeguard::guard(tokio::spawn(listener), |task| task.abort());
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("libs")).unwrap();
+    std::fs::create_dir_all(profile.join("lib")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let sandbox = Arc::new(RwLock::new(Sandbox::new(runtime)));
@@ -227,8 +227,9 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
             .get_volume("pishoo-signature")
             .is_none()
     );
-    let conn = rusqlite::Connection::open(profile.config_db_path()).unwrap();
-    let counts:(i64,i64,i64,i64)=conn.query_row("SELECT (SELECT count(*) FROM libs),(SELECT count(*) FROM apps),(SELECT count(*) FROM lib_dependencies),(SELECT count(*) FROM app_dependencies)",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    let conn =
+        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+    let counts:(i64,i64,i64,i64)=conn.query_row("SELECT (SELECT count(*) FROM lib),(SELECT count(*) FROM app),(SELECT count(*) FROM lib_dependency),(SELECT count(*) FROM app_dependency)",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
     assert_eq!(counts, (2, 1, 1, 2));
     assert_eq!(
         requests
@@ -240,7 +241,7 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
         1
     );
     let before = conn
-        .prepare("SELECT name,author,version FROM libs ORDER BY name")
+        .prepare("SELECT name,author,version FROM lib ORDER BY name")
         .unwrap()
         .query_map([], |row| {
             Ok((
@@ -253,9 +254,7 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
     let edges = conn
-        .prepare(
-            "SELECT app_name,lib_name,version FROM app_dependencies ORDER BY app_name,lib_name",
-        )
+        .prepare("SELECT app_name,lib_name,version FROM app_dependency ORDER BY app_name,lib_name")
         .unwrap()
         .query_map([], |row| {
             Ok((
@@ -279,7 +278,7 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
     assert_eq!(repeated["version"], installed["version"]);
     assert_eq!(repeated["dependencies"], installed["dependencies"]);
     let after = conn
-        .prepare("SELECT name,author,version FROM libs ORDER BY name")
+        .prepare("SELECT name,author,version FROM lib ORDER BY name")
         .unwrap()
         .query_map([], |row| {
             Ok((
@@ -292,9 +291,7 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
     let repeated_edges = conn
-        .prepare(
-            "SELECT app_name,lib_name,version FROM app_dependencies ORDER BY app_name,lib_name",
-        )
+        .prepare("SELECT app_name,lib_name,version FROM app_dependency ORDER BY app_name,lib_name")
         .unwrap()
         .query_map([], |row| {
             Ok((
@@ -311,12 +308,12 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
     assert_eq!(sandbox.read().unwrap().libs.len(), 2);
     assert_eq!(sandbox.read().unwrap().apps.len(), 1);
     assert_eq!(
-        conn.query_row("SELECT count(*) FROM apps", [], |row| row.get::<_, i64>(0))
+        conn.query_row("SELECT count(*) FROM app", [], |row| row.get::<_, i64>(0))
             .unwrap(),
         1
     );
     assert_eq!(
-        conn.query_row("SELECT count(*) FROM lib_dependencies", [], |row| row
+        conn.query_row("SELECT count(*) FROM lib_dependency", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
         1
@@ -373,17 +370,15 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
         "the conflict must follow a real signed store download"
     );
     assert!(!profile.join("db/blocked").exists());
-    assert!(!profile.join("libs/blocked.wasm").exists());
+    assert!(!profile.join("lib/blocked.wasm").exists());
     assert_eq!(
         std::fs::read(legacy.join("keep.db")).unwrap(),
         b"legacy blocked data"
     );
     assert_eq!(
-        conn.query_row(
-            "SELECT count(*) FROM libs WHERE name='blocked'",
-            [],
-            |row| row.get::<_, i64>(0)
-        )
+        conn.query_row("SELECT count(*) FROM lib WHERE name='blocked'", [], |row| {
+            row.get::<_, i64>(0)
+        })
         .unwrap(),
         0
     );
@@ -403,7 +398,7 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
     crate::package::remove_app(&profile, "alice.dhttp.net/workspace").unwrap();
     assert!(crate::package::remove_lib(&profile, "alice.dhttp.net/chat").is_err());
     crate::package::remove_lib(&profile, "alice.dhttp.net/workspace").unwrap();
-    assert!(profile.join("libs/chat.wasm").is_file());
+    assert!(profile.join("lib/chat.wasm").is_file());
     sandbox.write().unwrap().load_libs(&profile).unwrap();
     assert_eq!(sandbox.read().unwrap().libs.len(), 1);
 }

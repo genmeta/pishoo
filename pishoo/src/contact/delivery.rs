@@ -33,7 +33,9 @@ pub(super) async fn remote(
         let uri: http::Uri = format!("https://{target}{path}")
             .parse()
             .map_err(|_| fail(400, "invalid contact URI"))?;
-        let mut request = endpoint.request(method, uri);
+        let mut request = endpoint
+            .request(method, uri)
+            .header("if-reviewed".parse().unwrap(), "break".parse().unwrap());
         if let Some(expected) = expected {
             let hash = dhttp_home::certificate::OwnerHash::try_from(expected)
                 .map_err(|_| fail(409, "invalid contact identity"))?;
@@ -95,7 +97,17 @@ pub(super) async fn remote(
             bytes.extend_from_slice(&data);
         }
         if status != 200 && status != 201 {
-            return Err(fail(status, "remote contact operation rejected"));
+            let reviewing = status == 400
+                && serde_json::from_slice::<Value>(&bytes)
+                    .is_ok_and(|body| body["error"] == "need_review");
+            return Err(fail(
+                status,
+                if reviewing {
+                    "need_review"
+                } else {
+                    "remote contact operation rejected"
+                },
+            ));
         }
         let value = serde_json::from_slice(&bytes).map_err(|_| fail(502, "invalid remote JSON"))?;
         Ok((status, value, sid))
@@ -124,12 +136,22 @@ async fn deliver(
         let mut db=job_db.lock().map_err(|_|fail(500,"contact database lock poisoned"))?;
         let tx=db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
         expire_requests(&tx)?;
-        let job:Option<(i64,String,String,String,String,String,String)>=tx.query_row("SELECT id,target_name,application_id,description,requested_capabilities,offered_capabilities,status FROM outbound_contact_requests WHERE status IN ('queued','pending','active') AND next_attempt_at<=?1 AND (status='active' OR expired_after>?1) AND (lease_until IS NULL OR lease_until<=?1) ORDER BY next_attempt_at,id LIMIT 1",[now()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(storage)?;
+        let job:Option<(i64,String,String,String,String,String,String,Option<i64>,Option<String>)>=tx.query_row("SELECT id,target_name,application_id,description,requested_capabilities,offered_capabilities,status,contact_id,contact_subject FROM outbound_contact_request WHERE status IN ('queued','pending','active') AND next_attempt_at<=?1 AND (status='active' OR expired_after>?1) AND (lease_until IS NULL OR lease_until<=?1) ORDER BY next_attempt_at,id LIMIT 1",[now()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).optional().map_err(storage)?;
         let lease=now()+120;
-        if let Some((id,..))=&job {tx.execute("UPDATE outbound_contact_requests SET lease_until=?1 WHERE id=?2",params![lease,id]).map_err(storage)?;}
+        if let Some((id,..))=&job {tx.execute("UPDATE outbound_contact_request SET lease_until=?1 WHERE id=?2",params![lease,id]).map_err(storage)?;}
         tx.commit().map_err(storage)?;Ok::<_,Failure>((job,lease))
     }).await.map_err(|e|fail(500,e.to_string()))??;
-    let Some((id, target, application_id, description, requested_caps, offered_caps, status)) = job
+    let Some((
+        id,
+        target,
+        application_id,
+        description,
+        requested_caps,
+        offered_caps,
+        status,
+        contact_id,
+        contact_subject,
+    )) = job
     else {
         return Ok(());
     };
@@ -139,28 +161,59 @@ async fn deliver(
         let selected_requests=selected(profile,endpoint,&requests,&target).await?;
         let selected_offers=selected(profile,endpoint,&offers,endpoint.name()).await?;
         let existing=match contact(access,endpoint,&target).await {Ok(c)=>Some(c),Err((404,_))=>None,Err(e)=>return Err(e)};
+        if let Some(id) = contact_id {
+            if existing.as_ref().is_none_or(|c| c["id"] != id || c["subject_id"].as_str() != contact_subject.as_deref()
+                || matches!(c["status"].as_str(), Some("blocked" | "expired"))) {
+                return Err(fail(410, "local contact was removed, replaced or blocked"));
+            }
+        }
         let expected=existing.as_ref().and_then(|c|c["subject_id"].as_str());
         let (method,path,body)=if status=="queued" {
-            (Method::POST,"/std/contact".to_owned(),Some(json!({"application_id":application_id,"description":description,"class":"Human","requested_access":requested(&selected_requests),"offers":offered(&selected_offers)})))
-        } else {(Method::GET,format!("/std/contact/self?application_id={application_id}"),None)};
-        let (_,receipt,sid)=remote(endpoint,&target,method,&path,body.as_ref(),expected).await?;
+            (Method::POST,"/std/contact".to_owned(),Some(json!({"from":endpoint.name(),"to":target,"application_id":application_id,"description":description,"class":"Human","requested_access":requested(&selected_requests),"offers":offered(&selected_offers)})))
+        } else {(Method::GET,format!("/std/contact?name={}",encoded(endpoint.name())),None)};
+        let (_,mut receipt,sid)=remote(endpoint,&target,method,&path,body.as_ref(),expected).await?;
+        if status != "queued" {
+            let visitor=super::access::owner(endpoint)?;
+            if receipt["name"]!=endpoint.name() || receipt["subject_id"].as_str()!=std::str::from_utf8(visitor.subject_id().as_bytes()).ok() {
+                return Err(fail(502,"remote contact state belongs to a different subject"));
+            }
+            receipt["application_id"]=application_id.clone().into();
+            receipt["name"]=target.clone().into();
+            receipt["subject_id"]=sid.clone().into();
+            if receipt["status"]=="blocked" {receipt["status"]="revoked".into();}
+            if receipt["status"]=="transfered" {receipt["status"]="pending".into();}
+        }
         if receipt["application_id"]!=application_id || receipt["name"]!=target || receipt["subject_id"]!=sid {return Err(fail(502,"contact receipt identity does not match authenticated peer"));}
+        if contact_id.is_none() && existing.is_none() && matches!(receipt["status"].as_str(), Some("pending" | "active")) {
+            local_api(access,endpoint,Method::PUT,&format!("/std/contact?name={}",encoded(&target)),Some(&json!({"subject_id":sid,"class":"Human","description":"","status":"pending","requested_access":requested(&selected_requests),"offers":offered(&selected_offers)}))).await?;
+        }
+        let current = contact(access, endpoint, &target).await?;
+        if let Some(id) = contact_id {
+            if current["id"] != id || current["subject_id"].as_str() != contact_subject.as_deref() {
+                return Err(fail(410, "local contact changed during delivery"));
+            }
+        }
+        let binding_db = db.clone();
+        let local_id = current["id"].as_i64().ok_or_else(|| fail(502, "missing contact ID"))?;
+        let local_subject = string(&current, "subject_id")?.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let db = binding_db.lock().map_err(|_| fail(500, "contact database lock poisoned"))?;
+            db.execute("UPDATE outbound_contact_request SET contact_id=?1,contact_subject=?2 WHERE id=?3 AND lease_until=?4 AND contact_id IS NULL",params![local_id,local_subject,id,lease]).map_err(storage)?;
+            Ok::<_, Failure>(())
+        }).await.map_err(|e| fail(500, e.to_string()))??;
         if receipt["status"]=="active" {
             let c=match contact(access,endpoint,&target).await {
                 Ok(c)=>c,
-                Err((404,_))=> {
-                    local_api(access,endpoint,Method::PUT,&format!("/std/contact/{}",encoded(&target)),Some(&json!({"subject_id":sid,"class":"Human","description":"","status":"active","requested_access":requested(&selected_requests),"offers":offered(&selected_offers)}))).await?;
-                    contact(access,endpoint,&target).await?
-                }
+                Err((404,_))=> return Err(fail(410,"local contact was removed")),
                 Err(e)=>return Err(e),
             };
             if c["subject_id"]!=sid || matches!(c["status"].as_str(),Some("blocked"|"expired")) {return Err(fail(409,"local contact blocks reconciliation"));}
-            if matches!(c["status"].as_str(),Some("pending"|"transfered")) {local_api(access,endpoint,Method::PATCH,&format!("/std/contact/{}",encoded(&target)),Some(&json!({"status":"active"}))).await?;}
+            if matches!(c["status"].as_str(),Some("pending"|"transfered")) {local_api(access,endpoint,Method::PATCH,&format!("/std/contact?name={}",encoded(&target)),Some(&json!({"status":"active"}))).await?;}
         }
-        if receipt["status"]=="pending" && receipt["expired_after"].as_i64().is_none_or(|expires|expires<=now()) {return Err(fail(410,"remote contact request expired"));}
+        if receipt["status"]=="pending" && receipt["valid_before"].as_i64().is_none_or(|expires|expires<=now()) {return Err(fail(410,"remote contact request expired"));}
         let state=string(&receipt,"status")?;
         if !matches!(state,"pending"|"active"|"denied"|"expired"|"revoked") {return Err(fail(502,"unknown contact status"));}
-        if receipt["expired_after"].as_i64().is_none() {return Err(fail(502,"missing contact expiry"));}
+        if receipt["valid_before"].as_i64().is_none() {return Err(fail(502,"missing contact expiry"));}
         Ok(receipt)
     }.await;
     let db = db.clone();
@@ -168,10 +221,10 @@ async fn deliver(
         let db=db.lock().map_err(|_|fail(500,"contact database lock poisoned"))?;
         match outcome {
             Ok(receipt)=> {
-                db.execute("UPDATE outbound_contact_requests SET status=?1,remote_expired_after=?2,expired_after=CASE WHEN ?1='pending' THEN min(delivery_deadline,?2) ELSE expired_after END,last_checked_at=?3,next_attempt_at=?4,attempt_count=attempt_count+1,error_message=NULL,lease_until=NULL,updated_at=?3 WHERE id=?5 AND lease_until=?6",params![string(&receipt,"status")?,receipt["expired_after"].as_i64().unwrap(),now(),now()+if receipt["status"]=="active" {30}else{3},id,lease]).map_err(storage)?;
+                db.execute("UPDATE outbound_contact_request SET status=?1,remote_expired_after=?2,expired_after=CASE WHEN ?1='pending' THEN min(delivery_deadline,?2) ELSE expired_after END,last_checked_at=?3,next_attempt_at=?4,attempt_count=attempt_count+1,error_message=NULL,lease_until=NULL,updated_at=?3 WHERE id=?5 AND lease_until=?6",params![string(&receipt,"status")?,receipt["valid_before"].as_i64().unwrap(),now(),now()+if receipt["status"]=="active" {30}else{3},id,lease]).map_err(storage)?;
             }
             Err((code,error))=> {
-                db.execute("UPDATE outbound_contact_requests SET status=CASE WHEN ?1 THEN 'failed' ELSE status END,attempt_count=attempt_count+1,error_message=?2,next_attempt_at=?3,lease_until=NULL,last_checked_at=?4,updated_at=?4 WHERE id=?5 AND lease_until=?6",params![matches!(code,400|403|404|410),error,now()+5,now(),id,lease]).map_err(storage)?;
+                db.execute("UPDATE outbound_contact_request SET status=CASE WHEN ?1 THEN 'failed' ELSE status END,attempt_count=attempt_count+CASE WHEN ?2='need_review' THEN 0 ELSE 1 END,error_message=?2,next_attempt_at=?3,lease_until=NULL,last_checked_at=?4,updated_at=?4 WHERE id=?5 AND lease_until=?6",params![error != "need_review" && matches!(code,400|403|404|410),error,now()+if error == "need_review" {30} else {5},now(),id,lease]).map_err(storage)?;
             }
         }
         Ok(())

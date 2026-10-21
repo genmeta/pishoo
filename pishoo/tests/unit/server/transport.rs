@@ -44,9 +44,9 @@ async fn transport_public_peer() {
         .try_init();
     let profile = profile(&home, &role);
     std::fs::create_dir_all(profile.join("file")).unwrap();
-    std::fs::create_dir_all(profile.join("libs/echo")).unwrap();
+    std::fs::create_dir_all(profile.join("lib/echo")).unwrap();
     std::fs::write(
-        profile.join("libs/echo/lib.wasm"),
+        profile.join("lib/echo/lib/component.wasm"),
         include_bytes!("../../../assets/tcp-demo-echo.wasm"),
     )
     .unwrap();
@@ -81,10 +81,10 @@ async fn transport_public_peer() {
         }
     });
     let _upstream = scopeguard::guard(upstream, |task| task.abort());
-    rusqlite::Connection::open(profile.config_db_path())
+    crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
         .unwrap()
         .execute(
-            "INSERT INTO proxy_locations VALUES('/transport/',?1)",
+            "INSERT INTO proxy_location VALUES('/transport/',?1)",
             [format!("http://{address}/")],
         )
         .unwrap();
@@ -874,9 +874,9 @@ async fn transport_cross_process_acceptance() {
     );
     let receiver = profile(root.path(), "receiver");
     std::fs::create_dir_all(receiver.join("file")).unwrap();
-    std::fs::create_dir_all(receiver.join("libs/echo")).unwrap();
+    std::fs::create_dir_all(receiver.join("lib/echo")).unwrap();
     std::fs::write(
-        receiver.join("libs/echo/lib.wasm"),
+        receiver.join("lib/echo/lib/component.wasm"),
         include_bytes!("../../../assets/tcp-demo-echo.wasm"),
     )
     .unwrap();
@@ -1047,9 +1047,9 @@ async fn transport_large_duplex_concurrency_acceptance() {
 
     let receiver_profile = profile(root.path(), "receiver");
     std::fs::create_dir_all(receiver_profile.join("file")).unwrap();
-    std::fs::create_dir_all(receiver_profile.join("libs/echo")).unwrap();
+    std::fs::create_dir_all(receiver_profile.join("lib/echo")).unwrap();
     std::fs::write(
-        receiver_profile.join("libs/echo/lib.wasm"),
+        receiver_profile.join("lib/echo/lib/component.wasm"),
         include_bytes!("../../../assets/tcp-demo-echo.wasm"),
     )
     .unwrap();
@@ -1115,9 +1115,13 @@ async fn transport_large_duplex_concurrency_acceptance() {
         }
     });
     let _upstream = scopeguard::guard(upstream, |task| task.abort());
-    let db = rusqlite::Connection::open(receiver_profile.config_db_path()).unwrap();
+    let db = crate::setup::open_config(
+        &receiver_profile,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .unwrap();
     db.execute(
-        "INSERT INTO proxy_locations VALUES('/transport/',?1)",
+        "INSERT INTO proxy_location VALUES('/transport/',?1)",
         [format!("http://{upstream_address}/")],
     )
     .unwrap();

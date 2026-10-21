@@ -82,7 +82,12 @@ impl WasiHttpHooks for Outgoing {
         }
         clean_headers(request.headers_mut());
         request.extensions_mut().clear();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let waiting = request
+            .headers()
+            .get("if-reviewed")
+            .is_some_and(|value| value == "waiting");
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(if waiting { 300 } else { 15 });
         let (parts, mut body) = request.into_parts();
         let frames = async_stream::try_stream! {
             let mut bytes = 0usize;

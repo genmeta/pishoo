@@ -13,8 +13,8 @@ async fn access_logs_append_per_identity_and_record_all_response_statuses() {
     ));
     for identity in ["alice", "bob"] {
         let profile = IdentityProfile::try_from(root.path().join(identity)).unwrap();
-        std::fs::create_dir_all(profile.join("logs")).unwrap();
-        let path = profile.join("logs/access.log");
+        std::fs::create_dir_all(profile.join("log")).unwrap();
+        let path = profile.join("log/access.log");
         {
             let log = std::sync::Mutex::new(open_access_log(&profile).unwrap());
             let requests = (0..24).map(|index| {
@@ -74,12 +74,12 @@ async fn access_logs_append_per_identity_and_record_all_response_statuses() {
 fn access_log_open_failure_reports_the_identity_path() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("logs/access.log")).unwrap();
+    std::fs::create_dir_all(profile.join("log/access.log")).unwrap();
     let error = open_access_log(&profile).unwrap_err();
     assert!(
         error
             .to_string()
-            .contains(profile.join("logs/access.log").to_str().unwrap())
+            .contains(profile.join("log/access.log").to_str().unwrap())
     );
 }
 

@@ -10,7 +10,7 @@ fn runtime_errors_and_warnings_append_to_the_global_error_log() {
             tracing::warn!("test runtime warning");
         });
     }
-    let path = home.join("logs/error.log");
+    let path = home.join("log/error.log");
     let contents = std::fs::read_to_string(&path).unwrap();
     assert_eq!(contents.matches("test runtime error").count(), 2);
     assert_eq!(contents.matches("test runtime warning").count(), 2);
@@ -24,7 +24,7 @@ fn runtime_errors_and_warnings_append_to_the_global_error_log() {
             0o600
         );
         assert_eq!(
-            std::fs::metadata(home.join("logs"))
+            std::fs::metadata(home.join("log"))
                 .unwrap()
                 .permissions()
                 .mode()
@@ -38,7 +38,7 @@ fn runtime_errors_and_warnings_append_to_the_global_error_log() {
 fn global_error_log_open_failure_is_returned_with_its_path() {
     let root = tempfile::tempdir().unwrap();
     let home = dhttp_home::DhttpHome::for_user_home_dir(root.path());
-    let path = home.join("logs/error.log");
+    let path = home.join("log/error.log");
     std::fs::create_dir_all(&path).unwrap();
     let error = match logging(&home) {
         Ok(_) => panic!("a directory cannot be opened as error.log"),

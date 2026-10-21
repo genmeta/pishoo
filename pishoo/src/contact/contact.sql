@@ -1,6 +1,8 @@
-CREATE TABLE outbound_contact_requests (
+CREATE TABLE outbound_contact_request (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     target_name TEXT NOT NULL CHECK (length(target_name) > 0),
+    contact_id INTEGER,
+    contact_subject TEXT,
     description TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 80),
     requested_capabilities TEXT NOT NULL DEFAULT '[]'
         CHECK (json_valid(requested_capabilities) AND json_type(requested_capabilities) = 'array'),
@@ -20,12 +22,5 @@ CREATE TABLE outbound_contact_requests (
     updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer')
 );
 
-CREATE UNIQUE INDEX outbound_contact_requests_pending_target
-    ON outbound_contact_requests (target_name) WHERE status IN ('queued', 'pending');
-
-CREATE TABLE saved_contacts (
-    contact_name TEXT PRIMARY KEY CHECK (length(contact_name) > 0),
-    contact_id INTEGER NOT NULL CHECK (contact_id > 0),
-    subject_id BLOB NOT NULL CHECK (length(subject_id) BETWEEN 1 AND 64),
-    saved_at INTEGER NOT NULL CHECK (typeof(saved_at) = 'integer')
-);
+CREATE UNIQUE INDEX outbound_contact_request_pending_target
+    ON outbound_contact_request (target_name) WHERE status IN ('queued', 'pending');

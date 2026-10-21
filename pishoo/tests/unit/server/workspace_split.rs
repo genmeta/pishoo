@@ -139,7 +139,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         )
         .unwrap();
         std::fs::create_dir_all(profile.join("db")).unwrap();
-        std::fs::create_dir_all(profile.join("libs")).unwrap();
+        std::fs::create_dir_all(profile.join("lib")).unwrap();
         crate::setup::load_server_config(&profile).unwrap();
         install_lib(&profile, chat_id, &chat_package, &runtime).unwrap();
         install_lib(&profile, &id, &package, &runtime).unwrap();
@@ -232,7 +232,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         .0,
         403
     );
-    let requests = "/std/contact/local/requests";
+    let requests = "/std/contact/requests";
     assert_eq!(
         call(
             &bob,
@@ -245,14 +245,14 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         .0,
         403
     );
-    let (status,queued)=call(&alice,http::Method::POST,"alice.dhttp.net",requests,json!({"target_name":"bob.dhttp.net","description":"Friend","requested_capabilities":["message"],"offered_capabilities":["message"]})).await;
+    let (status,queued)=call(&alice,http::Method::POST,"alice.dhttp.net","/std/contact",json!({"target_name":"bob.dhttp.net","description":"Friend","requested_capabilities":["message"],"offered_capabilities":["message"]})).await;
     assert_eq!(status, 201, "{queued}");
     assert_eq!(queued["status"], "queued");
     let (_, local) = call(
         &alice,
         http::Method::GET,
         "alice.dhttp.net",
-        "/std/contact/bob.dhttp.net",
+        "/std/contact?name=bob.dhttp.net",
         Value::Null,
     )
     .await;
@@ -285,7 +285,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         &bob,
         http::Method::GET,
         "bob.dhttp.net",
-        "/std/contact/alice.dhttp.net",
+        "/std/contact?name=alice.dhttp.net",
         Value::Null,
     )
     .await;
@@ -308,15 +308,15 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
             &bob,
             http::Method::PATCH,
             "bob.dhttp.net",
-            "/std/contact/alice.dhttp.net",
+            "/std/contact?name=alice.dhttp.net",
             json!({"status":"active"})
         )
         .await
         .0,
         204
     );
-    let db = rusqlite::Connection::open(profile.join("db/contact.db")).unwrap();
-    db.execute("UPDATE outbound_contact_requests SET next_attempt_at=0", [])
+    let db = rusqlite::Connection::open(profile.join(".volume/sys/contact/.db")).unwrap();
+    db.execute("UPDATE outbound_contact_request SET next_attempt_at=0", [])
         .unwrap();
     drop(db);
     crate::contact::contact_jobs(profile, &alice, access, &contact_db)
@@ -335,7 +335,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         &alice,
         http::Method::GET,
         "alice.dhttp.net",
-        "/std/contact/bob.dhttp.net",
+        "/std/contact?name=bob.dhttp.net",
         Value::Null,
     )
     .await;
@@ -346,19 +346,6 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
             .is_none_or(|methods| !methods.contains(&json!("POST"))),
         "activation must not authorize Message"
     );
-    let saved = "/std/contact/local/saved?name=bob.dhttp.net";
-    assert_eq!(
-        call(
-            &alice,
-            http::Method::PUT,
-            "alice.dhttp.net",
-            saved,
-            Value::Null
-        )
-        .await
-        .0,
-        204
-    );
     assert_eq!(
         call(
             &alice,
@@ -368,32 +355,20 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
             Value::Null
         )
         .await
-        .1,
-        json!(["bob.dhttp.net"])
+        .0,
+        404
     );
     assert_eq!(
         call(
             &alice,
             http::Method::DELETE,
             "alice.dhttp.net",
-            "/std/contact/bob.dhttp.net",
+            "/std/contact?name=bob.dhttp.net",
             Value::Null
         )
         .await
         .0,
         204
-    );
-    assert_eq!(
-        call(
-            &alice,
-            http::Method::GET,
-            "alice.dhttp.net",
-            "/std/contact/local/saved",
-            Value::Null
-        )
-        .await
-        .1,
-        json!([])
     );
     let profile_db = profile
         .join("db")
@@ -409,12 +384,12 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         .unwrap(),
         "Alice profile"
     );
-    assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('saved_contacts','outbound_contact_requests','chat_messages')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('saved_contacts','outbound_contact_request','chat_messages')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
     drop(db);
     remove_lib(profile, &id).unwrap();
     sandbox.write().unwrap().libs.remove(&id);
     assert!(profile_db.exists());
-    assert!(profile.join("db/contact.db").exists());
+    assert!(profile.join(".volume/sys/contact/.db").exists());
     assert!(sandbox.read().unwrap().libs.contains_key(chat_id));
     assert_eq!(
         call(

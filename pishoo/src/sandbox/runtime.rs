@@ -131,50 +131,56 @@ impl Lib {
                 .map_err(|error| Error::InvalidComponent(error.to_string()))?;
         let openapi = serde_json::from_slice(&package_file(&package, "/metadata/openapi.json")?)
             .map_err(|error| Error::InvalidComponent(error.to_string()))?;
+        // Each Lib gets one private volume; the signed publisher selects std/.
+        // Move legacy data only when its new destination does not exist.
         let parent = data_dir
             .parent()
-            .ok_or_else(|| Error::InvalidComponent("Lib data has no database directory".into()))?;
-        // New callers use db/<name>. Existing author directories remain readable
-        // so changing the layout never silently replaces a user's stored data.
-        let database_root = if id
-            .split_once('/')
-            .is_some_and(|(author, _)| parent.file_name().is_some_and(|name| name == author))
-        {
-            parent.parent().ok_or_else(|| {
-                Error::InvalidComponent("Lib data has no database directory".into())
-            })?
-        } else {
-            parent
-        };
-        let legacy_data = id
-            .split_once('/')
-            .map(|(author, name)| database_root.join(author).join(name));
-        let data_dir = if parent == database_root
-            && matches!(data_dir.symlink_metadata(), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
-        {
-            match legacy_data.as_deref() {
-                Some(legacy) => match legacy.symlink_metadata() {
-                    Ok(_) => legacy,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => data_dir,
-                    Err(error) => return Err(Error::Io(error)),
-                },
-                None => data_dir,
+            .ok_or_else(|| Error::InvalidComponent("Lib data has no parent".into()))?;
+        let volume = data_dir
+            .ancestors()
+            .find(|p| p.file_name().is_some_and(|n| n == ".volume"));
+        if let Some(volume) = volume {
+            let identity = volume.parent().unwrap();
+            let short = id.rsplit('/').next().unwrap();
+            if !data_dir.try_exists()? {
+                let mut legacy = vec![identity.join("db").join(short)];
+                if let Some((author, _)) = id.split_once('/') {
+                    legacy.push(identity.join("db").join(author).join(short));
+                }
+                let existing = legacy
+                    .into_iter()
+                    .filter(|p| p.try_exists().unwrap_or(true))
+                    .collect::<Vec<_>>();
+                if existing.len() > 1 {
+                    return Err(Error::InvalidConfig(
+                        "multiple legacy Lib data directories require reconciliation".into(),
+                    ));
+                }
+                std::fs::create_dir_all(parent)?;
+                if let Some(source) = existing.first() {
+                    if !source.symlink_metadata()?.file_type().is_dir() {
+                        return Err(Error::InvalidConfig(
+                            "legacy Lib data must be a real directory".into(),
+                        ));
+                    }
+                    std::fs::rename(source, data_dir)?;
+                    std::fs::File::open(parent)?.sync_all()?;
+                }
             }
-        } else {
-            data_dir
-        };
-        for directory in [data_dir.parent().unwrap(), data_dir] {
+        }
+        for directory in [parent, data_dir] {
             match directory.symlink_metadata() {
-                Ok(metadata) if metadata.is_dir() => {}
+                Ok(metadata) if metadata.file_type().is_dir() => {}
                 Ok(_) => {
                     return Err(Error::InvalidComponent(
                         "Lib data must be a real directory".into(),
                     ));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(Error::Io(error)),
+                Err(error) => return Err(error.into()),
             }
         }
+        let database_root = parent;
         let component = runtime.compile(&package.get_atom("backend").ok_or_else(|| {
             Error::InvalidComponent("expected a backend lib, received a frontend app".into())
         })?)?;
@@ -192,7 +198,12 @@ impl Lib {
                 ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir_all(data_dir).map_err(Error::Io)?;
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(data_dir)
+                    .map_err(Error::Io)?;
             }
             Err(error) => return Err(Error::Io(error)),
         }
@@ -240,7 +251,7 @@ impl Lib {
         let mut builder = WasiCtx::builder();
         builder
             .preopened_dir(
-                data,
+                &data,
                 "/db",
                 wasmtime_wasi::DirPerms::all(),
                 wasmtime_wasi::FilePerms::all(),
@@ -536,8 +547,9 @@ fn repair_guest_ownership(
 }
 
 fn repair_guest_directory(directory: &cap_std::fs::Dir, owner: &std::fs::Metadata) -> Result<()> {
-    use rustix::fs::{Mode, OFlags};
     use std::os::unix::fs::MetadataExt;
+
+    use rustix::fs::{Mode, OFlags};
     let mut directories = vec![directory.try_clone()?];
     while let Some(directory) = directories.pop() {
         for entry in directory.entries()? {

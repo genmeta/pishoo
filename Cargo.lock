@@ -1152,8 +1152,7 @@ dependencies = [
 [[package]]
 name = "daccess"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20cabdd2286923b303d1279cd17f4226b2d6ed702f971af69d07d3f1428d98d6"
+source = "git+https://github.com/genmeta/daccess.git?rev=41b8462524c1f85dec8abcd59b63fa59fb029c3c#41b8462524c1f85dec8abcd59b63fa59fb029c3c"
 dependencies = [
  "axum",
  "chrono",
@@ -1991,10 +1990,6 @@ dependencies = [
  "serde_derive",
  "serde_json",
 ]
-
-[[package]]
-name = "gateway"
-version = "0.8.2"
 
 [[package]]
 name = "generic-array"

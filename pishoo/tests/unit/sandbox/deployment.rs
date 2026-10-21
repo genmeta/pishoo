@@ -40,7 +40,7 @@ fn component(id: &str, version: &str) -> Vec<u8> {
 
 fn profile(root: &Path) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("libs")).unwrap();
+    std::fs::create_dir_all(profile.join("lib")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = WasmRuntime::new().unwrap();
     for id in ["alpha", "beta"] {
@@ -110,7 +110,7 @@ fn invalid_candidate_rejects_reload_and_retains_the_published_version() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     sandbox.load_libs(&profile).unwrap();
     let original = sandbox.libs["alpha"].clone();
-    std::fs::write(profile.join("libs/alpha.wasm"), b"invalid wasm").unwrap();
+    std::fs::write(profile.join("lib/alpha.wasm"), b"invalid wasm").unwrap();
     assert!(matches!(
         sandbox.load_libs(&profile),
         Err(Error::InvalidComponent(_))
@@ -124,7 +124,7 @@ fn missing_registered_files_reject_reload_and_keep_loaded_libs() {
     let profile = profile(directory.path());
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     sandbox.load_libs(&profile).unwrap();
-    std::fs::remove_dir_all(profile.join("libs")).unwrap();
+    std::fs::remove_dir_all(profile.join("lib")).unwrap();
     assert!(sandbox.load_libs(&profile).is_err());
     assert_eq!(sandbox.libs.len(), 2);
 }
@@ -135,25 +135,25 @@ fn database_registration_controls_loading_without_revalidating_versions() {
     let profile = profile(directory.path());
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let mut sandbox = Sandbox::new(runtime);
-    std::fs::create_dir_all(profile.join("libs/extra")).unwrap();
+    std::fs::create_dir_all(profile.join("lib/extra")).unwrap();
     std::fs::write(
-        profile.join("libs/extra/.webc-proof"),
+        profile.join("lib/extra/.webc-proof"),
         component("extra", "1"),
     )
     .unwrap();
-    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
-    db.execute("DELETE FROM libs WHERE name='beta'", [])
-        .unwrap();
+    let db =
+        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+    db.execute("DELETE FROM lib WHERE name='beta'", []).unwrap();
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs.len(), 1);
     assert!(sandbox.libs.contains_key("alpha"));
-    assert!(profile.join("libs/beta.wasm").is_file());
-    db.execute("UPDATE libs SET version='2.0.0' WHERE name='alpha'", [])
+    assert!(profile.join("lib/beta.wasm").is_file());
+    db.execute("UPDATE lib SET version='2.0.0' WHERE name='alpha'", [])
         .unwrap();
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs["alpha"].openapi.info.version, "1.0.0");
     assert_eq!(
-        db.query_row("SELECT version FROM libs WHERE name='alpha'", [], |r| {
+        db.query_row("SELECT version FROM lib WHERE name='alpha'", [], |r| {
             r.get::<_, String>(0)
         })
         .unwrap(),
@@ -192,7 +192,7 @@ fn startup_uses_current_runtime_files_without_integrity_comparison_or_repair() {
         ),
     )
     .unwrap();
-    let wasm = profile.join("libs/hello.wasm");
+    let wasm = profile.join("lib/hello.wasm");
     let mut changed = std::fs::read(&wasm).unwrap();
     let name = b"local-note";
     let mut payload = vec![name.len() as u8];
@@ -207,7 +207,7 @@ fn startup_uses_current_runtime_files_without_integrity_comparison_or_repair() {
     changed.push(size as u8);
     changed.extend_from_slice(&payload);
     std::fs::write(&wasm, &changed).unwrap();
-    let page = profile.join("apps/hello/public/index.html");
+    let page = profile.join("app/hello/index.html");
     std::fs::write(&page, b"locally edited page").unwrap();
     let mut sandbox = Sandbox::new(runtime);
     sandbox.load_libs(&profile).unwrap();
@@ -221,8 +221,8 @@ fn startup_uses_current_runtime_files_without_integrity_comparison_or_repair() {
         package_file(&sandbox.apps[id], "/public/index.html").unwrap(),
         b"locally edited page".as_slice()
     );
-    assert!(profile.join("db/hello").is_dir());
+    assert!(profile.join(".volume/hello").is_dir());
     assert!(!profile.join("db/alice.dhttp.net").exists());
-    assert!(!profile.join("libs/alice.dhttp.net").exists());
-    assert!(!profile.join("apps/alice.dhttp.net").exists());
+    assert!(!profile.join("lib/alice.dhttp.net").exists());
+    assert!(!profile.join("app/alice.dhttp.net").exists());
 }
