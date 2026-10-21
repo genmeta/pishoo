@@ -81,7 +81,7 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
         ("std.dhttp.net", "message", "/message", "receive"),
         ("alice.dhttp.net", "notes", "/entries", "read"),
     ] {
-        let method = if name == "message" { "post" } else { "get" };
+        let method = if name == "message" { "put" } else { "get" };
         let document = json!({"openapi":"3.1.0","info":{"title":"Test","version":"1.0.0","description":"test","license":{"name":"MIT"}},
             "x-pishoo":{"kind":"lib","publisher":publisher,"name":name,"dependencies":[],"host":{"request-identity":"identity"}},
             "x-access-groups":{group:{"title":"Original","operations":["operation"]}},
@@ -104,11 +104,11 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
     assert_eq!(
         original,
         json!({
-            "std.dhttp.net/message · Original":{"/std/message":["POST"]},
+            "std.dhttp.net/message · Original":{"/std/message":["PUT"]},
             "alice.dhttp.net/notes · Original":{"/notes/entries":["GET"]}
         })
     );
-    let replacement = json!([{"id":"message","title":"Receive","endpoints":[{"method":"POST","path":"/std/message"}]}]);
+    let replacement = json!([{"id":"message","title":"Receive","endpoints":[{"method":"PUT","path":"/std/message"}]}]);
     for method in ["PUT", "DELETE"] {
         let body = (method == "PUT").then(|| replacement.clone());
         let response = call(
@@ -165,12 +165,17 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
         ),
         (
             "/std/acl/permissions?name=message",
-            json!([{"id":"message","title":"Wrong","endpoints":[{"method":"POST","path":"/std/contact"}]}]),
+            json!([{"id":"message","title":"Wrong","endpoints":[{"method":"PUT","path":"/std/contact"}]}]),
             StatusCode::BAD_REQUEST,
         ),
         (
             "/std/acl/permissions?name=message",
             json!([{"id":"message","title":"Wrong","endpoints":[{"method":"GET","path":"/std/message"}]}]),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/std/acl/permissions?name=message",
+            json!([{"id":"message","title":"Old method","endpoints":[{"method":"POST","path":"/std/message"}]}]),
             StatusCode::BAD_REQUEST,
         ),
         (
@@ -186,7 +191,7 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
     }
     access
         .set_policy(
-            access_control::Method::Specified(Method::POST),
+            access_control::Method::Specified(Method::PUT),
             "/std/message",
             access_control::Effect::Allow,
             access_control::Grantee::All,
@@ -230,7 +235,7 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
     assert!(changed.get("std.dhttp.net/message · Original").is_none());
     assert_eq!(
         changed["std.dhttp.net/message · Receive"],
-        json!({"/std/message":["POST"]})
+        json!({"/std/message":["PUT"]})
     );
     assert_eq!(
         changed["alice.dhttp.net/notes · Original"],
@@ -340,7 +345,7 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
         access
             .auth(
                 Headers {
-                    method: Method::POST,
+                    method: Method::PUT,
                     path: "/std/message".into(),
                     fields: http::HeaderMap::new()
                 },
