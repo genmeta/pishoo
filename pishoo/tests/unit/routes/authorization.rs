@@ -1,6 +1,77 @@
 use super::*;
 
 #[tokio::test]
+async fn app_head_exposes_verified_viewer_without_a_new_endpoint() {
+    use access_control::{Effect, Grantee};
+    use tower::ServiceExt;
+
+    let (access, _) = authorization_app(Effect::Deny).await;
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            "/app/workspace",
+            Effect::Allow,
+            Grantee::All,
+        )
+        .await
+        .unwrap();
+    let app = Router::new()
+        .fallback(axum::routing::any(|| async {
+            // Any stale upstream value must be replaced with the current caller.
+            (
+                [
+                    ("pishoo-viewer-name", "stale.dhttp.net"),
+                    ("cache-control", "public, max-age=3600"),
+                ],
+                "page",
+            )
+        }))
+        .layer(axum::middleware::from_fn_with_state(
+            access.clone(),
+            authorize,
+        ));
+
+    for caller in [None, Some("bob.dhttp.net")] {
+        let mut request = anonymous_request();
+        *request.method_mut() = Method::HEAD;
+        *request.uri_mut() = "/app/workspace/intro".parse().unwrap();
+        request
+            .headers_mut()
+            .insert("pishoo-viewer-name", "forged.dhttp.net".parse().unwrap());
+        if let Some(name) = caller {
+            request.extensions_mut().remove::<dhttp::HandshakeSummary>();
+            request.extensions_mut().insert(
+                crate::test_identity::endpoint(name)
+                    .local_authority()
+                    .unwrap(),
+            );
+        }
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["pishoo-viewer-name"],
+            caller.unwrap_or("")
+        );
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            "/app/workspace",
+            Effect::Deny,
+            Grantee::All,
+        )
+        .await
+        .unwrap();
+    let mut request = anonymous_request();
+    *request.method_mut() = Method::HEAD;
+    *request.uri_mut() = "/app/workspace/intro".parse().unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(!response.headers().contains_key("pishoo-viewer-name"));
+}
+
+#[tokio::test]
 async fn frontend_pages_assets_and_head_share_the_root_get_rule_without_opening_backend_apis() {
     use access_control::{Effect, Grantee};
     use tower::ServiceExt;
