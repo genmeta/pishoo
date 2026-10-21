@@ -129,7 +129,7 @@ pub(super) async fn load_access(
     profile: &IdentityProfile,
     subject: &access_control::SubjectId,
 ) -> Result<Arc<access_control::AccessService>> {
-    let path = profile.join(".volume/sys/access/.db");
+    let path = profile.join(".volume/sys/access/database");
     let version = access_version(&path)?;
     let load = || async {
         let uri = format!("sqlite://{}?mode=rw", path.display());
@@ -184,9 +184,8 @@ pub(super) async fn load_access(
     for (method, path) in [
         (http::Method::GET, "/std/acl/permissions"),
         (http::Method::GET, "/std/profile"),
-        // The public /workspace/intro page and assets are served by Workspace.
-        (http::Method::GET, "/workspace"),
-        (http::Method::HEAD, "/workspace"),
+        // The public /app/workspace/intro page and assets are served by Workspace.
+        (http::Method::GET, "/app/workspace"),
     ] {
         access
             .set_policy(

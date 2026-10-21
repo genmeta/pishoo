@@ -128,7 +128,7 @@ impl Sandbox {
         // Startup selects registered IDs, then reads each executable once.
         // Package integrity, dependencies and route conflicts were checked when
         // installation committed these rows and files together.
-        let database = profile.join(".volume/sys/setting/.db");
+        let database = profile.join(".volume/sys/setting/database");
         if !database.symlink_metadata()?.file_type().is_file() {
             return Err(Error::InvalidConfig(
                 "config.db must be a regular file".into(),
@@ -277,43 +277,7 @@ impl Sandbox {
             let sandbox = frontend_sandbox.clone();
             let api = lib_api.clone();
             async move {
-                // App and Lib operations may share a short-name mount. Dispatch
-                // declared Lib methods first; App GET/HEAD retains its fallback.
-                let route_lib = {
-                    let sandbox = sandbox.read().unwrap();
-                    let name = request
-                        .uri()
-                        .path()
-                        .trim_start_matches('/')
-                        .split('/')
-                        .next()
-                        .unwrap_or("");
-                    let app = sandbox
-                        .apps
-                        .keys()
-                        .any(|id| id.rsplit('/').next() == Some(name));
-                    sandbox.libs.iter().any(|(id, lib)| {
-                        if id.starts_with("std.dhttp.net/") || id.rsplit('/').next() != Some(name) {
-                            return false;
-                        }
-                        let path = request
-                            .uri()
-                            .path()
-                            .strip_prefix(&format!("/{name}"))
-                            .unwrap();
-                        !app || lib
-                            .openapi
-                            .paths
-                            .as_ref()
-                            .and_then(|paths| paths.get(path))
-                            .is_some_and(|item| {
-                                item.methods()
-                                    .into_iter()
-                                    .any(|(method, _)| method == *request.method())
-                            })
-                    })
-                };
-                if route_lib {
+                if !request.uri().path().starts_with("/app/") {
                     return api.oneshot(request).await.expect("route is infallible");
                 }
                 let result: Result<axum::response::Response> = (|| {
@@ -322,7 +286,7 @@ impl Sandbox {
                     let tail = request
                         .uri()
                         .path()
-                        .strip_prefix('/')
+                        .strip_prefix("/app/")
                         .ok_or(Error::RouteNotFound)?;
                     let name = tail.split('/').next().unwrap();
                     let package = {

@@ -417,14 +417,14 @@ fn package_routes(
                 } else {
                     let suffix = child.strip_prefix(root).unwrap();
                     let suffix = if suffix == "/index.html" { "/" } else { suffix };
-                    let path = format!("/{}{suffix}", id.rsplit('/').next().unwrap());
+                    let path = format!("/app/{}{suffix}", id.rsplit('/').next().unwrap());
                     routes.insert(path, vec!["GET".into(), "HEAD".into()]);
                 }
             }
         }
         // The canonical root's redirect is also an actual static operation.
         routes.insert(
-            format!("/{}", id.rsplit('/').next().unwrap()),
+            format!("/app/{}", id.rsplit('/').next().unwrap()),
             vec!["GET".into(), "HEAD".into()],
         );
     }
@@ -439,7 +439,11 @@ fn check_routes(
     package: &webc::Container,
 ) -> Result<()> {
     if kind == "app" || !id.starts_with("std.dhttp.net/") {
-        let mount = format!("/{}", id.rsplit('/').next().unwrap());
+        let mount = if kind == "app" {
+            format!("/app/{}", id.rsplit('/').next().unwrap())
+        } else {
+            format!("/{}", id.rsplit('/').next().unwrap())
+        };
         let locations = conn
             .prepare("SELECT location FROM proxy_location")?
             .query_map([], |row| row.get::<_, String>(0))?
@@ -527,7 +531,7 @@ fn check_existing_rules(
         Err(Error::RouteNotFound) => std::collections::BTreeMap::new(),
         Err(e) => return Err(e),
     };
-    let path = profile.join(".volume/sys/access/.db");
+    let path = profile.join(".volume/sys/access/database");
     if !path.try_exists()? {
         return Ok(());
     }
@@ -565,9 +569,9 @@ fn check_existing_rules(
                     "/std/profile/context"
                 }
                 ("std.dhttp.net/workspace", "app", "GET" | "HEAD", route)
-                    if route == "/workspace" || route.starts_with("/workspace/") =>
+                    if route == "/app/workspace" || route.starts_with("/app/workspace/") =>
                 {
-                    "/workspace"
+                    "/app/workspace"
                 }
                 _ => "",
             };
@@ -636,7 +640,9 @@ fn save_registration(
             rusqlite::params![name, dependency_name, version],
         )?;
     }
-    conn.execute("DELETE FROM lib_capability WHERE lib_name=?1", [name])?;
+    // PUT /std/acl/permissions has the same full-replacement semantics. Keep
+    // package-driven replacement inside this existing install transaction.
+    conn.execute("DELETE FROM acl.lib_capability WHERE lib_name=?1", [name])?;
     if api["has_lib"] == true {
         let prefix = if author == Some("std.dhttp.net") {
             "/std".to_owned()
@@ -645,12 +651,12 @@ fn save_registration(
         };
         for (capability, title, endpoints) in capability_rows(package)? {
             conn.execute(
-                "INSERT INTO lib_capability VALUES(?1,?2,?3)",
+                "INSERT INTO acl.lib_capability VALUES(?1,?2,?3)",
                 rusqlite::params![name, capability, title],
             )?;
             for (method, path) in endpoints {
                 conn.execute(
-                    "INSERT INTO lib_capability_operation VALUES(?1,?2,?3,?4)",
+                    "INSERT INTO acl.lib_capability_operation VALUES(?1,?2,?3,?4)",
                     rusqlite::params![name, capability, method, format!("{prefix}{path}")],
                 )?;
             }
@@ -1523,7 +1529,9 @@ pub(crate) fn remove_package(profile: &IdentityProfile, id: &str) -> Result<()> 
             "package is required by installed dependencies",
         )));
     }
-    tx.execute("DELETE FROM lib_capability WHERE lib_name=?1", [short])?;
+    // DELETE /std/acl/permissions semantics, committed atomically with removal.
+    // Existing access_rules and the Lib's private business data are retained.
+    tx.execute("DELETE FROM acl.lib_capability WHERE lib_name=?1", [short])?;
     tx.execute("DELETE FROM package WHERE name=?1", [short])?;
     commit_package_files(profile, id, &parent, &stage, &name, tx)
 }

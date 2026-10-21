@@ -126,7 +126,7 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
         StatusCode::METHOD_NOT_ALLOWED
     );
     let router = router.fallback(|| async { StatusCode::IM_A_TEAPOT });
-    for path in ["/api/test/run", "/app/workspace/", "/api/websocket"] {
+    for path in ["/api/test/run", "/workspace/", "/api/websocket"] {
         assert_eq!(
             status(&router, Method::GET, path).await,
             StatusCode::IM_A_TEAPOT

@@ -84,6 +84,8 @@ async fn authorization_app(effect: access_control::Effect) -> (Arc<AccessService
 mod authorization;
 #[path = "routes/routing.rs"]
 mod routing;
+#[path = "routes/capabilities.rs"]
+mod capabilities;
 
 #[path = "routes/websocket.rs"]
 pub(crate) mod websocket;

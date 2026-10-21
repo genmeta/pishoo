@@ -190,9 +190,9 @@ async fn system_static_files_are_separate_from_ordinary_proxy_paths() {
         ),
         (
             "/",
-            "/workspace/",
+            "/app/workspace/",
             http::StatusCode::OK,
-            "upstream /workspace/",
+            "upstream /app/workspace/",
         ),
         (
             "/",
@@ -552,7 +552,7 @@ async fn disabled_profile_skips_credentials_libs_and_workers() {
     std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
     std::fs::create_dir_all(profile.join("lib/broken")).unwrap();
     std::fs::write(profile.join("lib/broken/.webc-proof"), b"broken").unwrap();
-    let db = rusqlite::Connection::open(profile.join(".volume/sys/setting/.db")).unwrap();
+    let db = rusqlite::Connection::open(profile.join(".volume/sys/setting/database")).unwrap();
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER); INSERT INTO settings VALUES(2, 0); CREATE TABLE proxy_locations(location TEXT, proxy_pass TEXT);").unwrap();
     assert!(
         load_profile(profile.clone(), Arc::new(WasmRuntime::new().unwrap()))
@@ -722,7 +722,7 @@ async fn unloaded_empty_configuration_waits_for_credential_validation_before_ini
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("empty")).unwrap();
     std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
-    std::fs::write(profile.join(".volume/sys/setting/.db"), []).unwrap();
+    std::fs::write(profile.join(".volume/sys/setting/database"), []).unwrap();
     assert!(
         load_profile(profile.clone(), Arc::new(WasmRuntime::new().unwrap()))
             .await
@@ -731,13 +731,13 @@ async fn unloaded_empty_configuration_waits_for_credential_validation_before_ini
     );
     assert_eq!(
         profile
-            .join(".volume/sys/setting/.db")
+            .join(".volume/sys/setting/database")
             .metadata()
             .unwrap()
             .len(),
         0
     );
-    assert!(!profile.join(".volume/sys/access/.db").exists());
+    assert!(!profile.join(".volume/sys/access/database").exists());
 }
 
 #[tokio::test]
@@ -1093,7 +1093,7 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
         .access
         .set_policy(
             access_control::Method::Specified(Method::GET),
-            "/workspace",
+            "/app/workspace",
             access_control::Effect::Deny,
             access_control::Grantee::Named,
         )
@@ -1111,7 +1111,7 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
         .access
         .set_policy(
             access_control::Method::Specified(Method::GET),
-            "/workspace",
+            "/app/workspace",
             access_control::Effect::Allow,
             access_control::Grantee::All,
         )
@@ -1160,8 +1160,8 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
     };
     for method in [Method::GET, Method::HEAD] {
         for (path, expected) in [
-            ("/workspace/", b"public introduction".as_slice()),
-            ("/workspace/assets/app.js", b"export {}".as_slice()),
+            ("/app/workspace/", b"public introduction".as_slice()),
+            ("/app/workspace/assets/app.js", b"export {}".as_slice()),
         ] {
             let response = server
                 .router
@@ -1186,8 +1186,8 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
         }
     }
     for (method, path) in [
-        (Method::POST, "/workspace/"),
-        (Method::GET, "/workspace-other/"),
+        (Method::POST, "/app/workspace/"),
+        (Method::GET, "/app/workspace-other/"),
         (Method::GET, "/std/contacts"),
         (Method::GET, "/std/acl/access"),
         (Method::GET, "/std/sys/listen"),
@@ -1285,7 +1285,7 @@ async fn stopping_identity_removes_all_mdns_records_before_waiting_for_tasks() {
                     "external" => "UPDATE settings SET listen='external'",
                     _ => unreachable!(),
                 };
-                rusqlite::Connection::open(server.profile.join(".volume/sys/setting/.db"))
+                rusqlite::Connection::open(server.profile.join(".volume/sys/setting/database"))
                     .unwrap()
                     .execute_batch(sql)
                     .unwrap();
