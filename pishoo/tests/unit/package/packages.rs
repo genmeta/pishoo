@@ -898,10 +898,12 @@ async fn legacy_capability_prefixes_are_projected_then_migrated_without_changing
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
     db.execute_batch("DROP TABLE lib_capability_operation")
         .unwrap();
-    db.execute_batch(&include_str!("../../../src/package/packages.sql").replace(
-        "substr(path, 1, 1) = '/' AND length(path) > 1",
-        "substr(path, 1, 5) = '/std/'",
-    ))
+    db.execute_batch(
+        &include_str!("../../../src/package/sql/schema-v3.sql").replace(
+            "substr(path, 1, 1) = '/' AND length(path) > 1",
+            "substr(path, 1, 5) = '/std/'",
+        ),
+    )
     .unwrap();
     db.execute_batch("INSERT INTO package(has_lib,has_app,name,author,version) VALUES(1,0,'journal','alice.dhttp.net','1.0.0'),(1,0,'message','std.dhttp.net','1.0.0');
         INSERT INTO lib_capability VALUES('journal','write','Journal'),('message','write','Message');
@@ -1484,7 +1486,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     )
     .await
     .unwrap();
-    db.execute_batch(include_str!("../../../src/package/packages.sql"))
+    db.execute_batch(include_str!("../../../src/package/sql/schema-v3.sql"))
         .unwrap();
     let grantee = access_control::Grantee::Named;
     access

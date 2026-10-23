@@ -1,6 +1,7 @@
 //! Inspect, preserve and initialize the identity authorization database.
 use std::sync::Arc;
 
+use access_control::{Effect, Grantee, Method};
 use dhttp_home::identity::IdentityProfile;
 
 use super::files::{inherit_identity_owner, repair_identity_ownership};
@@ -157,36 +158,43 @@ pub(super) async fn load_access(
     inherit_identity_owner(working.as_file(), profile)?;
     let uri = format!("sqlite://{}?mode=rw", working.path().display());
     let access = access_control::AccessService::load_from_db(&uri, profile.name(), subject).await?;
-    // Defaults seed a new database only. All subsequent decisions use saved ACLs.
-    let defaults_path = profile.join(".volume/sys/access/defaults.json");
-    let defaults = match defaults_path.symlink_metadata() {
-        Ok(metadata) if metadata.is_file() => std::fs::read_to_string(&defaults_path)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            include_str!("access-defaults.json").to_owned()
-        }
-        Err(error) => return Err(error.into()),
-        Ok(_) => {
-            return Err(Error::InvalidConfig(
-                "access defaults must be a regular file".into(),
-            ));
-        }
-    };
-    let defaults: std::collections::BTreeMap<String, Vec<[String; 4]>> =
-        serde_json::from_str(&defaults)
-            .map_err(|error| Error::InvalidConfig(format!("access defaults: {error}")))?;
-    for [method, path, effect, grantee] in defaults.into_values().flatten() {
-        let invalid = |error| Error::InvalidConfig(format!("access defaults: {error}"));
-        let method = method.parse::<access_control::Method>().map_err(invalid)?;
-        let effect = effect.parse::<access_control::Effect>().map_err(invalid)?;
-        let grantee = grantee
-            .parse::<access_control::Grantee>()
-            .map_err(invalid)?;
-        if !path.starts_with('/') || path.contains(['?', '#', '*', '{', '}']) {
-            return Err(Error::InvalidConfig(format!(
-                "invalid access default path {path:?}"
-            )));
-        }
-        access.set_policy(method, &path, effect, grantee).await?;
+    // Seed native discovery/contact entry points only; business ACLs are configured
+    // after installation. Existing databases never have defaults reapplied.
+    for (method, path, effect, grantee) in [
+        (
+            http::Method::POST,
+            "/std/contact",
+            Effect::Allow,
+            Grantee::Named,
+        ),
+        (
+            http::Method::GET,
+            "/std/contact",
+            Effect::Allow,
+            Grantee::Named,
+        ),
+        (
+            http::Method::GET,
+            "/std/acl/status",
+            Effect::Allow,
+            Grantee::Named,
+        ),
+        (
+            http::Method::GET,
+            "/std/contact/list",
+            Effect::Deny,
+            Grantee::All,
+        ),
+        (
+            http::Method::GET,
+            "/std/acl/permissions",
+            Effect::Allow,
+            Grantee::All,
+        ),
+    ] {
+        access
+            .set_policy(Method::Specified(method), path, effect, grantee)
+            .await?;
     }
     if path.try_exists()? {
         let pending = rusqlite::Connection::open_with_flags(
@@ -208,7 +216,7 @@ pub(super) async fn load_access(
                     .ok_or_else(|| Error::InvalidConfig("invalid ACL path".into()))?],
             )?;
             let tx = db.transaction()?;
-            let schema = include_str!("../package/packages.sql")
+            let schema = include_str!("../package/sql/schema-v3.sql")
                 .split("CREATE TABLE IF NOT EXISTS acl.lib_capability (")
                 .nth(1)
                 .unwrap();

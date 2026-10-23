@@ -235,7 +235,7 @@ fn migrate_registration(conn: &mut rusqlite::Connection) -> Result<()> {
         tx.execute_batch(
             "ALTER TABLE acl.lib_capability_operation RENAME TO pishoo_legacy_operation",
         )?;
-        tx.execute_batch(include_str!("packages.sql"))?;
+        tx.execute_batch(include_str!("sql/schema-v3.sql"))?;
         tx.execute_batch("INSERT INTO acl.lib_capability_operation SELECT * FROM acl.pishoo_legacy_operation; DROP TABLE acl.pishoo_legacy_operation;")?;
     }
 
@@ -553,22 +553,6 @@ fn check_existing_rules(
     if !rules {
         return Ok(());
     }
-    let defaults_path = profile.join(".volume/sys/access/defaults.json");
-    let defaults = match defaults_path.symlink_metadata() {
-        Ok(metadata) if metadata.is_file() => std::fs::read_to_string(&defaults_path)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            include_str!("../server/access-defaults.json").to_owned()
-        }
-        Err(error) => return Err(error.into()),
-        Ok(_) => {
-            return Err(Error::InvalidConfig(
-                "access defaults must be a regular file".into(),
-            ));
-        }
-    };
-    let defaults: std::collections::BTreeMap<String, Vec<[String; 4]>> =
-        serde_json::from_str(&defaults)
-            .map_err(|error| Error::InvalidConfig(format!("access defaults: {error}")))?;
     for (path, methods) in package_routes(package, id, kind)? {
         for method in methods {
             if previous.get(&path).is_some_and(|m| m.contains(&method)) {
@@ -585,26 +569,12 @@ fn check_existing_rules(
             } else {
                 path.trim_end_matches('/').to_owned()
             };
-            let mut query = access.prepare(
-                "SELECT method,api,effect,grantee FROM access_rules WHERE (api='/' OR api=?1 OR substr(?1,1,length(api)+1)=api||'/') AND method IN (?2,'*')",
+            let exists: bool = access.query_row(
+                "SELECT EXISTS(SELECT 1 FROM access_rules WHERE (api='/' OR api=?1 OR substr(?1,1,length(api)+1)=api||'/') AND method IN (?2,'*'))",
+                rusqlite::params![path, method],
+                |row| row.get(0),
             )?;
-            let rules = query.query_map(rusqlite::params![path, method], |row| {
-                Ok([
-                    row.get::<_, String>(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                ])
-            })?;
-            for rule in rules {
-                let rule = rule?;
-                // Only an exact configured read rule for this signed provider
-                // may predate installation. Broad legacy grants still conflict.
-                if matches!(method, "GET" | "HEAD")
-                    && defaults.get(id).is_some_and(|rules| rules.contains(&rule))
-                {
-                    continue;
-                }
+            if exists {
                 return Err(Error::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!(
@@ -1440,9 +1410,11 @@ fn commit_package_files(
         resources.push(serde_json::json!({"kind":kind,"old":old,"new":new}));
         targets.push((target, leaf, old, new));
     }
-    let facts: String = tx.query_row(include_str!("registration-facts.sql"), [short], |r| {
-        r.get(0)
-    })?;
+    let facts: String = tx.query_row(
+        include_str!("sql/registration-facts-v3.sql"),
+        [short],
+        |r| r.get(0),
+    )?;
     write_component(
         stage,
         ".transaction.json",

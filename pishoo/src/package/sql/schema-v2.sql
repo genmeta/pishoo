@@ -1,3 +1,4 @@
+-- Package registration schema v2: separate Lib/App registries, retained for migration.
 -- These schemas share one rollback-journal transaction via setup::open_config.
 CREATE TABLE IF NOT EXISTS lib_registry.lib (
     name TEXT PRIMARY KEY NOT NULL,

@@ -1,7 +1,7 @@
 //! Identity provenance and persistence checks against the actual Journal component.
 use super::*;
 use crate::package::{
-    install_app, remove_app,
+    install_package, remove_package,
     tests::{package_fixture, publisher},
 };
 
@@ -187,15 +187,8 @@ fn journal_package(kind: &str) -> Vec<u8> {
         std::env::var_os("PISHOO_JOURNAL_REPO")
             .expect("set PISHOO_JOURNAL_REPO to the independent Journal checkout"),
     );
-    let manifest: toml::Value = toml::from_str(
-        &std::fs::read_to_string(root.join(if kind == "app" {
-            "app.toml"
-        } else {
-            "wasmer.toml"
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    let manifest: toml::Value =
+        toml::from_str(&std::fs::read_to_string(root.join("wasmer.toml")).unwrap()).unwrap();
     let package = &manifest["package"];
     let (publisher_name, name) = package["name"].as_str().unwrap().split_once('/').unwrap();
     let mut document: Value = if kind == "app" {
@@ -213,6 +206,9 @@ fn journal_package(kind: &str) -> Vec<u8> {
         .remove("title");
     document["x-pishoo"]["publisher"] = publisher_name.into();
     document["x-pishoo"]["name"] = name.into();
+    if kind == "app" {
+        document["x-pishoo"]["kind"] = "app".into();
+    }
     if let Some(groups) = groups {
         document["x-pishoo"]["access-groups"] = groups;
     }
@@ -222,7 +218,7 @@ fn journal_package(kind: &str) -> Vec<u8> {
         std::fs::read(root.join("target/wasm32-wasip2/release/journal.wasm"))
             .expect("build Journal backend first")
     };
-    let public = if kind == "app" {
+    let public = if kind != "lib" {
         webc::v3::write::Directory::from_path(root.join("public")).unwrap()
     } else {
         webc::v3::write::Directory::default()
@@ -388,6 +384,50 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
         .0,
         404
     );
+    for (method, path, expected) in [
+        ("GET", "/entries", 404),
+        ("POST", "/entries", 404),
+        ("GET", "/comments", 404),
+        ("POST", "/comments", 404),
+        ("POST", "/entry/list", 405),
+        ("POST", "/comment/list", 405),
+        ("GET", "/comment", 405),
+    ] {
+        assert_eq!(
+            journal_call(
+                &lib,
+                &tasks,
+                &local,
+                Some(&owner),
+                method,
+                path,
+                Value::Null,
+                None,
+                &[],
+            )
+            .await
+            .0,
+            expected,
+            "{method} {path}"
+        );
+    }
+    let (status, _, list) = journal_call(
+        &lib,
+        &tasks,
+        &local,
+        Some(&owner),
+        "GET",
+        "/entry/list?offset=0",
+        Value::Null,
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&list).unwrap(),
+        json!({"entries":[],"next_offset":null})
+    );
     let id = "a".repeat(32);
     let doc = json!({"id":id,"title":"周末","body":"中文与 <script> 内容按文字保存"});
     assert_eq!(
@@ -395,9 +435,9 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
             &lib,
             &tasks,
             &local,
-            Some(&bob),
+            None,
             "POST",
-            "/entries",
+            "/entry",
             doc.clone(),
             None,
             &spoof
@@ -406,23 +446,6 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
         .0,
         403
     );
-    let replacement = journal_authority("alice.dhttp.net", 'c');
-    assert_eq!(
-        journal_call(
-            &lib,
-            &tasks,
-            &replacement,
-            Some(&owner),
-            "POST",
-            "/entries",
-            doc.clone(),
-            None,
-            &[]
-        )
-        .await
-        .0,
-        403
-    );
     assert_eq!(
         journal_call(
             &lib,
@@ -430,7 +453,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
             &local,
             Some(&owner),
             "POST",
-            "/entries",
+            "/entry",
             doc.clone(),
             None,
             &[("origin", "https://evil.example")]
@@ -446,7 +469,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
             &local,
             Some(&owner),
             "POST",
-            "/entries",
+            "/entry",
             doc.clone(),
             None,
             &[("x-journal-write", "0")]
@@ -455,13 +478,14 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
         .0,
         403
     );
+    // The host ACL authorizes named callers; the guest does not require ownership.
     let (status, headers, created) = journal_call(
         &lib,
         &tasks,
         &local,
-        Some(&owner),
+        Some(&bob),
         "POST",
-        "/entries",
+        "/entry",
         doc.clone(),
         None,
         &[],
@@ -473,6 +497,23 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
         serde_json::from_slice::<Value>(&created).unwrap()["body"],
         doc["body"]
     );
+    let (status, _, list) = journal_call(
+        &lib,
+        &tasks,
+        &local,
+        Some(&owner),
+        "GET",
+        "/entry/list?offset=0",
+        Value::Null,
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, 200);
+    let list: Value = serde_json::from_slice(&list).unwrap();
+    assert_eq!(list["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(list["entries"][0]["id"], id);
+    assert_eq!(list["next_offset"], Value::Null);
     let comment_id = "b".repeat(32);
     let comment = json!({"id":comment_id,"entry_id":id,"body":"好看的手记"});
     let mut fake = comment.clone();
@@ -484,7 +525,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
             &local,
             Some(&bob),
             "POST",
-            "/comments",
+            "/comment",
             fake,
             None,
             &[]
@@ -499,7 +540,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
         &local,
         Some(&bob),
         "POST",
-        "/comments",
+        "/comment",
         comment.clone(),
         None,
         &spoof,
@@ -517,7 +558,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
             &local,
             Some(&bob),
             "POST",
-            "/comments",
+            "/comment",
             comment,
             None,
             &[]
@@ -535,7 +576,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
             &local,
             Some(&owner),
             "POST",
-            "/comments",
+            "/comment",
             reply,
             None,
             &[]
@@ -544,7 +585,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
         .0,
         201
     );
-    assert_eq!(journal_call(&lib,&tasks,&local,Some(&owner),"POST","/comments",json!({"id":"d".repeat(32),"entry_id":id,"parent_id":reply_id,"body":"不能回复到第二层"}),None,&[]).await.0,400);
+    assert_eq!(journal_call(&lib,&tasks,&local,Some(&owner),"POST","/comment",json!({"id":"d".repeat(32),"entry_id":id,"parent_id":reply_id,"body":"不能回复到第二层"}),None,&[]).await.0,400);
     let update = json!({"title":"更新","body":"已经修改"});
     let path = format!("/entry?id={id}");
     assert_eq!(
@@ -690,7 +731,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
             &lib,
             &tasks,
             &local,
-            Some(&bob),
+            None,
             "DELETE",
             &comment_path,
             Value::Null,
@@ -706,7 +747,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
             &lib,
             &tasks,
             &local,
-            Some(&owner),
+            Some(&bob),
             "DELETE",
             &comment_path,
             Value::Null,
@@ -723,7 +764,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
         &local,
         Some(&bob),
         "GET",
-        &format!("/comments?entry_id={id}"),
+        &format!("/comment/list?entry_id={id}"),
         Value::Null,
         None,
         &[],
@@ -795,7 +836,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
             &local,
             Some(&owner),
             "POST",
-            "/entries",
+            "/entry",
             doc,
             None,
             &[]
@@ -829,7 +870,7 @@ async fn journal_component_origin_shorthand_preserves_cross_site_rejection() {
             &local,
             Some(&owner),
             "POST",
-            "/entries",
+            "/entry",
             json!({"id":id,"title":"Origin 回归","body":"同源简写"}),
             None,
             &[("origin", "https://alice~")]
@@ -853,7 +894,7 @@ async fn journal_component_origin_shorthand_preserves_cross_site_rejection() {
             &local,
             Some(&owner),
             "POST",
-            "/comments",
+            "/comment",
             json!({"id":format!("{:032x}",index+100),"entry_id":id,"body":"同源留言"}),
             None,
             &[("origin", origin), ("sec-fetch-site", "same-origin")],
@@ -877,7 +918,7 @@ async fn journal_component_origin_shorthand_preserves_cross_site_rejection() {
             &local,
             Some(&bob),
             "POST",
-            "/comments",
+            "/comment",
             json!({"id":"e".repeat(32),"entry_id":id,"body":"获准具名读者也可同源留言"}),
             None,
             &[("origin", "https://alice~")]
@@ -904,7 +945,7 @@ async fn journal_component_origin_shorthand_preserves_cross_site_rejection() {
             &local,
             Some(&owner),
             "POST",
-            "/comments",
+            "/comment",
             json!({"id":"d".repeat(32),"entry_id":id,"body":"不得写入"}),
             None,
             &[("origin", origin)],
@@ -928,7 +969,7 @@ async fn journal_component_origin_shorthand_preserves_cross_site_rejection() {
             &local,
             Some(&bob),
             "POST",
-            "/comments",
+            "/comment",
             json!({"id":"c".repeat(32),"entry_id":id,"body":"裸简写属于 Bob，不能当作 Alice"}),
             None,
             &[("origin", "https://~")]
@@ -944,7 +985,7 @@ async fn journal_component_origin_shorthand_preserves_cross_site_rejection() {
             &local,
             Some(&owner),
             "POST",
-            "/comments",
+            "/comment",
             json!({"id":"b".repeat(32),"entry_id":id,"body":"跨站标记仍拒绝"}),
             None,
             &[
@@ -963,7 +1004,7 @@ async fn journal_component_origin_shorthand_preserves_cross_site_rejection() {
             &local,
             Some(&owner),
             "POST",
-            "/comments",
+            "/comment",
             json!({"id":"a".repeat(32),"entry_id":id,"body":"重复 Origin 拒绝"}),
             None,
             &[("origin", "https://alice~"), ("origin", "https://alice~")]
@@ -992,7 +1033,7 @@ async fn journal_component_concurrent_updates_only_accept_one_version() {
             &local,
             Some(&owner),
             "POST",
-            "/entries",
+            "/entry",
             json!({"id":id,"title":"并发","body":"原始版本"}),
             None,
             &[]
@@ -1217,7 +1258,7 @@ async fn journal_frontend_is_served_from_package_with_daccess_for_every_file() {
 
 #[tokio::test]
 #[ignore = "set PISHOO_JOURNAL_REPO and build its build.sh before testing the release packages"]
-async fn journal_release_registers_capabilities_and_pins_backend() {
+async fn journal_release_registers_capabilities_and_both_runtime_resources() {
     use tower::ServiceExt;
 
     let root = tempfile::tempdir().unwrap();
@@ -1226,33 +1267,32 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let id = "alice.smith.dhttp.net/journal";
-    let backend = journal_package("lib");
-    let frontend = journal_package("app");
-    let app_package = read_package(&frontend).unwrap();
-    assert!(app_package.atoms().is_empty());
-    assert!(app_package.get_volume("metadata").is_none());
-    assert!(
-        read_package(&backend)
-            .unwrap()
-            .get_volume("public")
-            .is_none()
-    );
-    assert!(
-        install_app(&profile, id, &frontend).is_err(),
-        "missing pinned Lib must fail"
-    );
-    install_lib(&profile, id, &backend, &runtime).unwrap();
-    install_app(&profile, id, &frontend).unwrap();
+    let bytes = journal_package("pkg");
+    let package = read_package(&bytes).unwrap();
+    assert_eq!(package.atoms().len(), 1);
+    assert!(package.get_volume("public").is_some());
+    let installed = install_package(&profile, id, &bytes, &runtime).unwrap();
+    assert_eq!(installed["has_lib"], true);
+    assert_eq!(installed["has_app"], true);
     let db =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
     let groups = db.prepare("SELECT capability_id,title FROM lib_capability WHERE lib_name=?1 ORDER BY capability_id")
         .unwrap().query_map([id.rsplit('/').next().unwrap()], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?)))
         .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
     assert_eq!(
-        groups,
+        groups
+            .into_iter()
+            .map(|(id, title)| (id, serde_json::from_str::<Value>(&title).unwrap()))
+            .collect::<Vec<_>>(),
         [
-            ("comment".into(), "评论".into()),
-            ("read".into(), "阅读".into())
+            (
+                "comment".into(),
+                json!({"zh-CN":"留言互动","en":"Post comments and replies"})
+            ),
+            (
+                "read".into(),
+                json!({"zh-CN":"阅读手记","en":"Read journal"})
+            )
         ]
     );
     let operations = db.prepare("SELECT capability_id,method,path FROM lib_capability_operation WHERE lib_name=?1 ORDER BY capability_id,method,path")
@@ -1261,22 +1301,23 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
     assert_eq!(
         operations,
         vec![
-            ("comment".into(), "POST".into(), "/journal/comments".into()),
-            ("read".into(), "GET".into(), "/journal/comments".into()),
+            ("comment".into(), "POST".into(), "/journal/comment".into()),
+            ("read".into(), "GET".into(), "/journal/comment/list".into()),
             ("read".into(), "GET".into(), "/journal/context".into()),
-            ("read".into(), "GET".into(), "/journal/entries".into()),
             ("read".into(), "GET".into(), "/journal/entry".into()),
+            ("read".into(), "GET".into(), "/journal/entry/list".into()),
             ("read".into(), "GET".into(), "/journal/photo".into()),
         ]
     );
     assert_eq!(
         db.query_row(
-            "SELECT lib_name,version FROM app_dependency WHERE app_name=?1",
+            "SELECT count(*) FROM package_dependency WHERE package_name=?1",
             [id.rsplit('/').next().unwrap()],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            |r| r.get::<_, i64>(0)
         )
         .unwrap(),
-        (id.rsplit('/').next().unwrap().into(), "0.1.0".into())
+        0,
+        "one combined package has no dependency on itself"
     );
     let mut sandbox = Sandbox::new(runtime);
     sandbox.load_libs(&profile).unwrap();
@@ -1284,9 +1325,9 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
     assert_eq!(sandbox.apps.len(), 1);
     let router = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net"));
     for path in [
-        "/journal/",
-        "/journal/assets/app.js",
-        "/journal/assets/app.css",
+        "/app/journal/",
+        "/app/journal/assets/app.js",
+        "/app/journal/assets/app.css",
     ] {
         let response = router
             .clone()
@@ -1301,10 +1342,10 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
         assert_eq!(response.status(), 200);
     }
     for (method, path, status) in [
-        ("GET", "/journal/missing.js", 404),
-        ("POST", "/journal/assets/app.js", 405),
+        ("GET", "/app/journal/missing.js", 404),
+        ("POST", "/app/journal/assets/app.js", 405),
         ("GET", "/journal/context", 500),
-        ("POST", "/journal/entries", 500),
+        ("POST", "/journal/entry", 500),
     ] {
         let response = router
             .clone()
@@ -1319,18 +1360,9 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
             .unwrap();
         assert_eq!(response.status(), status);
     }
-    assert!(
-        remove_lib(&profile, id).is_err(),
-        "installed App protects its Lib"
-    );
-    remove_app(&profile, id).unwrap();
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM lib_capability", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        2
-    );
-    remove_lib(&profile, id).unwrap();
+    remove_package(&profile, id).unwrap();
+    assert!(!profile.join("lib/journal.wasm").exists());
+    assert!(!profile.join("app/journal").exists());
     assert_eq!(
         db.query_row("SELECT count(*) FROM lib_capability", [], |r| r
             .get::<_, i64>(0))

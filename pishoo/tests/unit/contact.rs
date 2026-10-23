@@ -178,7 +178,7 @@ async fn background_jobs_reuse_the_supplied_connection_and_release_transactions(
     ));
     // No database exists at the profile path. Both rounds must use this connection.
     let db = Connection::open_in_memory().unwrap();
-    db.execute_batch(include_str!("../../src/contact/contact.sql"))
+    db.execute_batch(include_str!("../../src/contact/sql/schema-v4.sql"))
         .unwrap();
     let db = Arc::new(Mutex::new(db));
     for expected in 1..=2 {
@@ -689,7 +689,7 @@ async fn queued_legacy_capabilities_fail_without_network_or_new_grants() {
         .unwrap(),
     );
     let db = Connection::open_in_memory().unwrap();
-    db.execute_batch(include_str!("../../src/contact/contact.sql"))
+    db.execute_batch(include_str!("../../src/contact/sql/schema-v4.sql"))
         .unwrap();
     db.execute("INSERT INTO outbound_contact_request(target_name,application_id,requested_capabilities,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES('bob.dhttp.net',?1,'[\"Receive messages\"]','queued',?2,?2,0,0,0)", params!["a".repeat(64), now()+120]).unwrap();
     let db = Arc::new(Mutex::new(db));
