@@ -47,7 +47,7 @@ async fn download_release(
             .map_err(|_| Error::InvalidComponent("invalid store metadata".into()))?;
     let download = format!("{path}/package.waz");
     if metadata["id"] != id
-        || metadata["publisher"] != publisher
+        || metadata["author"] != publisher
         || metadata["name"] != name
         || metadata["version"] != version
         || metadata["status"] != "published"
@@ -336,10 +336,20 @@ fn verify_release(
         .unwrap();
     let envelope: Value =
         serde_json::from_slice(&data).map_err(|_| invalid("invalid signature envelope"))?;
+    let dependencies = document["dependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|dependency| serde_json::json!({
+            "author":dependency["publisher"],"name":dependency["name"],"version":dependency["version"]
+        }))
+        .collect::<Vec<_>>();
     if document["publisher"] != publisher
+        || metadata["author"] != publisher
         || document["name"] != name
         || document["version"] != version
-        || ["dependencies", "title", "description", "changelog"]
+        || metadata["dependencies"] != serde_json::json!(dependencies)
+        || ["title", "description", "changelog"]
             .iter()
             .any(|key| metadata[*key] != document[*key])
         || metadata
@@ -375,7 +385,7 @@ fn verify_release(
         .collect::<Result<Vec<_>>>()?;
     let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(&certificates)
         .map_err(|_| invalid("invalid publisher owner_hash"))?;
-    if metadata["publisher_owner_hash"] != ski.owner_hash().as_str() {
+    if metadata["author_owner_hash"] != ski.owner_hash().as_str() {
         return Err(invalid(
             "publisher owner_hash differs from the authenticated store proof",
         ));
