@@ -7,6 +7,63 @@ use serde_json::json;
 use webc::v3::write::Directory;
 
 #[tokio::test]
+async fn app_upgrades_preserve_root_rules_when_asset_names_change() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
+    std::fs::create_dir_all(profile.join(".volume/sys/access")).unwrap();
+    let access = access_control::AccessService::load_from_db(
+        &format!(
+            "sqlite://{}?mode=rwc",
+            profile.join(".volume/sys/access/database").display()
+        ),
+        profile.name(),
+        &access_control::SubjectId::new(b"owner").unwrap(),
+    )
+    .await
+    .unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let authority = publisher("alice.dhttp.net", 'a');
+    let bytes = package_fixture(
+        &frontend_document("1.0.0"),
+        &[],
+        frontend_files("old page"),
+        &authority,
+    );
+    install_app(&profile, "alice.dhttp.net/hello", &bytes).unwrap();
+    for (version, effect, expected) in [
+        ("2.0.0", access_control::Effect::Allow, "allow"),
+        ("3.0.0", access_control::Effect::Deny, "deny"),
+    ] {
+        access
+            .set_policy(
+                access_control::Method::Specified(Method::GET),
+                "/app/hello",
+                effect,
+                access_control::Grantee::All,
+            )
+            .await
+            .unwrap();
+        let mut files = frontend_files("new page");
+        files.children.insert(
+            format!("chunk-{version}.js").parse().unwrap(),
+            b"new asset".to_vec().into(),
+        );
+        let bytes = package_fixture(&frontend_document(version), &[], files, &authority);
+        let installed = install_app(&profile, "alice.dhttp.net/hello", &bytes).unwrap();
+        assert_eq!(installed["version"], version);
+        let db = rusqlite::Connection::open(profile.join(".volume/sys/access/database")).unwrap();
+        let rules: Vec<String> = db
+            .prepare("SELECT effect FROM access_rules")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rules, [expected]);
+    }
+}
+
+#[tokio::test]
 async fn business_read_rules_have_no_implicit_provider_exemptions() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
