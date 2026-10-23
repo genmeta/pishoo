@@ -262,12 +262,11 @@ async fn deliver(
             (operation_snapshot(requested_access.as_deref(), &requested_caps)?, operation_snapshot(offered_access.as_deref(), &offered_caps)?)
         } else { (json!({}), json!({})) };
         let existing=match contact(access,endpoint,&target).await {Ok(c)=>Some(c),Err((404,_))=>None,Err(e)=>return Err(e)};
-        if let Some(id) = contact_id {
-            if existing.as_ref().is_none_or(|c| c["id"] != id || c["subject_id"].as_str() != contact_subject.as_deref()
+        if let Some(id) = contact_id
+            && existing.as_ref().is_none_or(|c| c["id"] != id || c["subject_id"].as_str() != contact_subject.as_deref()
                 || matches!(c["status"].as_str(), Some("blocked" | "expired"))) {
                 return Err(fail(410, "local contact was removed, replaced or blocked"));
             }
-        }
         let expected=existing.as_ref().and_then(|c|c["subject_id"].as_str());
         let (method,path,body)=if status=="queued" {
             (Method::POST,"/std/contact".to_owned(),Some(json!({"from":endpoint.name(),"to":target,"application_id":application_id,"description":description,"class":"Human","requested_access":requests,"offers":offers})))
@@ -307,11 +306,10 @@ async fn deliver(
             record_outbound(access, &target, &sid, requests, offers, valid_before, started_at).await?;
         }
         let current = contact(access, endpoint, &target).await?;
-        if let Some(id) = contact_id {
-            if current["id"] != id || current["subject_id"].as_str() != contact_subject.as_deref() {
+        if let Some(id) = contact_id
+            && (current["id"] != id || current["subject_id"].as_str() != contact_subject.as_deref()) {
                 return Err(fail(410, "local contact changed during delivery"));
             }
-        }
         let binding_db = db.clone();
         let local_id = current["id"].as_i64().ok_or_else(|| fail(502, "missing contact ID"))?;
         let local_subject = string(&current, "subject_id")?.to_owned();

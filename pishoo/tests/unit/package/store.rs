@@ -45,7 +45,7 @@ fn release(owner: char, version: &str) -> (Vec<u8>, Value) {
     )
     .unwrap();
     let document = serde_json::json!({"openapi":"3.1.0","info":{"title":"Store test","version":version,"description":"Test","license":{"name":"MIT"}},
-        "x-pishoo":{"publisher":publisher,"name":"note","host":{}},
+        "x-pishoo":{"publisher":publisher,"name":"note"},
         "paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload","responses":{"200":{"description":"ok"}}}}}});
     let bytes = super::super::tests::package_fixture(
         &document,
@@ -97,11 +97,12 @@ fn authenticated_release_rejects_tampered_bytes_metadata_signers_and_identity() 
     assert!(verify_release(&bytes, &metadata, "alice.dhttp.net", "other", "1.2.3").is_err());
     assert!(verify_release(&bytes, &metadata, "alice.dhttp.net", "note", "1.2.4").is_err());
     let mut tampered = bytes.clone();
-    let index = tampered
-        .windows(b"Store test".len())
-        .position(|b| b == b"Store test")
-        .unwrap();
-    tampered[index] = b'X';
+    let index = zip::ZipArchive::new(std::io::Cursor::new(&bytes))
+        .unwrap()
+        .by_name("manifest.json")
+        .unwrap()
+        .data_start() as usize;
+    tampered[index] ^= 0x80;
     let mut forged = metadata.clone();
     forged["package_sha256"] = format!("{:x}", Sha256::digest(&tampered)).into();
     assert!(verify_release(&tampered, &forged, "alice.dhttp.net", "note", "1.2.3").is_err());
@@ -191,7 +192,7 @@ fn dependency_tree_orders_transitive_libs_and_rejects_cycles() {
     let authority = publisher("alice.dhttp.net", 'a');
     let package = |name: &str, names: &[&str]| {
         let dependencies=names.iter().map(|name|serde_json::json!({"publisher":"alice.dhttp.net","name":name,"version":"1.0.0"})).collect::<Vec<_>>();
-        let document = serde_json::json!({"openapi":"3.1.0","info":{"title":name,"description":"Dependency graph fixture","version":"1.0.0","license":{"name":"MIT"}},"x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":name,"host":{},"dependencies":dependencies},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload"}}}});
+        let document = serde_json::json!({"openapi":"3.1.0","info":{"title":name,"description":"Dependency graph fixture","version":"1.0.0","license":{"name":"MIT"}},"x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":name,"dependencies":dependencies},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload"}}}});
         let bytes = package_fixture(
             &document,
             include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
@@ -287,6 +288,10 @@ fn published_std_release_proofs_match_signed_packages() {
     }
 }
 
+#[allow(
+    clippy::type_complexity,
+    reason = "This test adapts the established release tuple fixtures."
+)]
 fn order_releases(
     resources: Vec<(String, String, Vec<u8>, bool)>,
 ) -> Result<Vec<(String, String, Vec<u8>, bool)>> {

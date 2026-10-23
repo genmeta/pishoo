@@ -58,7 +58,7 @@ async fn transport_public_peer() {
     let mut files = Vec::new();
     for length in lengths {
         let name = format!("bytes-{length}.bin");
-        let digest = fixture(&profile.join(&format!("file/{name}")), length);
+        let digest = fixture(&profile.join(format!("file/{name}")), length);
         files.push(serde_json::json!({"name":name,"bytes":length,"sha256":digest}));
     }
     let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1071,7 +1071,7 @@ async fn transport_large_duplex_concurrency_acceptance() {
         files.push((
             name.clone(),
             length,
-            fixture(&receiver_profile.join(&format!("file/{name}")), length),
+            fixture(&receiver_profile.join(format!("file/{name}")), length),
         ));
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1532,7 +1532,7 @@ async fn transport_large_duplex_concurrency_acceptance() {
                 maximum = maximum.max(value["elapsed_s"].as_f64().unwrap());
             }
             requests += 8;
-            if requests % 80 == 0 {
+            if requests.is_multiple_of(80) {
                 println!(
                     "TRANSPORT_PROGRESS requests={requests} elapsed_s={:.1}",
                     started.elapsed().as_secs_f64()

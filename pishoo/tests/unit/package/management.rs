@@ -10,7 +10,7 @@ use super::*;
 fn component(version: &str) -> Vec<u8> {
     let mut bytes =
         include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm").to_vec();
-    let document = serde_json::json!({"openapi":"3.1.0","info":{"title":"Test","version":version},"x-pishoo":{"publisher":"alice.dhttp.net","name":"note","host":{}},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload","responses":{"200":{"description":"ok"}}}}}}).to_string();
+    let document = serde_json::json!({"openapi":"3.1.0","info":{"title":"Test","version":version},"x-pishoo":{"publisher":"alice.dhttp.net","name":"note"},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload","responses":{"200":{"description":"ok"}}}}}}).to_string();
     let mut section = vec![14];
     section.extend_from_slice(b"pishoo:openapi");
     section.extend_from_slice(document.as_bytes());
@@ -64,7 +64,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     let before = std::fs::read(profile.join("lib/note.wasm")).unwrap();
     // A manifest-only component passes metadata validation, but has no incoming handler.
     let metadata_only = package_fixture(
-        &serde_json::json!({"openapi":"3.1.0","info":{"title":"Test","version":"1.0.0","description":"Test","license":{"name":"MIT"}},"x-pishoo":{"publisher":"alice.dhttp.net","name":"note","host":{}},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload","responses":{"200":{"description":"ok"}}}}}}),
+        &serde_json::json!({"openapi":"3.1.0","info":{"title":"Test","version":"1.0.0","description":"Test","license":{"name":"MIT"}},"x-pishoo":{"publisher":"alice.dhttp.net","name":"note"},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload","responses":{"200":{"description":"ok"}}}}}}),
         b"\0asm\x0d\0\x01\0",
         webc::v3::write::Directory::default(),
         &publisher("alice.dhttp.net", 'a'),
@@ -479,7 +479,7 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
         assert_eq!(response.headers()["supported-versions"], "v1");
     }
     for content_type in [
-        "application/webc",
+        "application/zip",
         "application/octet-stream",
         "application/wasm",
         "text/plain",

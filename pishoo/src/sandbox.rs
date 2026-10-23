@@ -134,7 +134,7 @@ impl Sandbox {
                 "config.db must be a regular file".into(),
             ));
         }
-        let conn = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let conn = crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(Duration::from_secs(3))?;
         let exists: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type IN ('table','view') AND name='lib')",
@@ -162,7 +162,7 @@ impl Sandbox {
                 rustix::fs::flock(&root, rustix::fs::FlockOperation::LockShared)
                     .map_err(std::io::Error::from)?;
                 for id in &registered {
-                    let bytes = disk_bytes(profile, &root, &id)?;
+                    let bytes = disk_bytes(profile, &root, id)?;
                     let lib = Lib::load(
                         self.runtime.clone(),
                         id.clone(),

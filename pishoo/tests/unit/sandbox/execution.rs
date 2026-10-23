@@ -30,7 +30,7 @@ fn component(bytes: &[u8]) -> Vec<u8> {
     bytes.push(0);
     leb(section.len(), &mut bytes);
     bytes.extend(section);
-    package_component(&bytes)
+    runtime_fixture(&package_component(&bytes))
 }
 
 fn authority(name: &str) -> dhttp::LocalAuthority {

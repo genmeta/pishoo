@@ -13,9 +13,7 @@ use super::{
     run::{apply_ocsp, load_profile, reconcile_profiles},
     *,
 };
-
-#[path = "../../support/network_credentials.rs"]
-mod credentials;
+use crate::test_credentials as credentials;
 
 #[path = "transport.rs"]
 mod transport;
@@ -1317,19 +1315,15 @@ async fn wait_live_body(endpoint: &dhttp::Endpoint, path: &str, expected: &[u8])
             .unwrap();
         if let Ok(Ok(response)) =
             tokio::time::timeout(Duration::from_secs(2), endpoint.get(uri)).await
+            && response.status() == StatusCode::OK
+            && let Ok(Ok(bytes)) = tokio::time::timeout(
+                Duration::from_secs(2),
+                axum::body::to_bytes(AxumBody::new(response.into_body()), 64 * 1024),
+            )
+            .await
+            && bytes.as_ref() == expected
         {
-            if response.status() == StatusCode::OK {
-                if let Ok(Ok(bytes)) = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    axum::body::to_bytes(AxumBody::new(response.into_body()), 64 * 1024),
-                )
-                .await
-                {
-                    if bytes.as_ref() == expected {
-                        return;
-                    }
-                }
-            }
+            return;
         }
         assert!(
             Instant::now() < deadline,

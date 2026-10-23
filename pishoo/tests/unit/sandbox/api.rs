@@ -31,7 +31,7 @@ fn load(sandbox: &Sandbox, directory: &Path, paths: &str) -> Arc<Lib> {
     let mut lib = Lib::load(
         sandbox.runtime.clone(),
         "test".into(),
-        &package_component(&bytes),
+        &runtime_fixture(&package_component(&bytes)),
         directory,
     )
     .unwrap();

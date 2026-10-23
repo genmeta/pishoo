@@ -84,7 +84,7 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
     ] {
         let method = if name == "message" { "put" } else { "get" };
         let document = json!({"openapi":"3.1.0","info":{"title":"Test","version":"1.0.0","description":"test","license":{"name":"MIT"}},
-            "x-pishoo":{"kind":"lib","publisher":publisher,"name":name,"dependencies":[],"host":{"request-identity":"identity"}},
+            "x-pishoo":{"kind":"lib","publisher":publisher,"name":name,"dependencies":[]},
             "x-access-groups":{group:{"title":"Original","operations":["operation"]}},
             "paths":{path:{method:{"operationId":"operation","summary":"Test","x-access-group":group,"responses":{"200":{"description":"ok"}}}}}});
         let bytes = crate::package::tests::package_fixture(

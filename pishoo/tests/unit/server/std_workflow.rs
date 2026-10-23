@@ -237,7 +237,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             );
             let (status, body) = tokio::time::timeout(
                 Duration::from_secs(90),
-                owner_bytes(&server, Method::PUT, &path, bytes, "application/webc"),
+                owner_bytes(&server, Method::PUT, &path, bytes, "application/zip"),
             )
             .await
             .expect("package installation timed out");

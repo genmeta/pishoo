@@ -10,7 +10,8 @@ use super::{host::identity, *};
 use crate::{
     Body,
     package::{
-        install_lib, installed_libs, read_package, remove_lib, tests::package_component,
+        install_lib, installed_libs, read_package, remove_lib,
+        tests::{package_component, runtime_fixture},
         validate_lib,
     },
 };

@@ -46,7 +46,7 @@ async fn system_static_files_are_separate_from_ordinary_proxy_paths() {
         std::fs::write(
             server
                 .profile
-                .join(&format!(".volume/sys/file/.file/{path}")),
+                .join(format!(".volume/sys/file/.file/{path}")),
             "static",
         )
         .unwrap();
@@ -837,7 +837,7 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
     .unwrap();
     *server.router.write().unwrap() = current_router(&server);
     let doc = json!({"openapi":"3.1.0","info":{"title":"Message","version":"1.0.0","description":"test","license":{"name":"MIT"}},
-        "x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"message","dependencies":[],"host":{"request-identity":"identity"}},
+        "x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"message","dependencies":[]},
         "x-access-groups":{"message":{"title":"1v1聊天","operations":["receive"]}},
         "paths":{"/message":{"post":{"operationId":"receive","summary":"receive","x-access-group":"message","responses":{"200":{"description":"ok"}}}}}});
     let package = crate::package::tests::package_fixture(
@@ -866,16 +866,9 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
         });
         request
     };
+    let router = server.router.read().unwrap().clone();
     assert_eq!(
-        server
-            .router
-            .read()
-            .unwrap()
-            .clone()
-            .oneshot(request())
-            .await
-            .unwrap()
-            .status(),
+        router.oneshot(request()).await.unwrap().status(),
         StatusCode::OK
     );
     server
@@ -888,16 +881,9 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
         )
         .await
         .unwrap();
+    let router = server.router.read().unwrap().clone();
     assert_eq!(
-        server
-            .router
-            .read()
-            .unwrap()
-            .clone()
-            .oneshot(request())
-            .await
-            .unwrap()
-            .status(),
+        router.oneshot(request()).await.unwrap().status(),
         StatusCode::FORBIDDEN
     );
     server
@@ -910,14 +896,8 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
         )
         .await
         .unwrap();
-    let response = server
-        .router
-        .read()
-        .unwrap()
-        .clone()
-        .oneshot(request())
-        .await
-        .unwrap();
+    let router = server.router.read().unwrap().clone();
+    let response = router.oneshot(request()).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[http::header::CACHE_CONTROL], "no-store");
     assert_eq!(
@@ -935,14 +915,8 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
     // Builtin ACL, Contact and Package do not become WASM capabilities.
     assert_eq!(values.as_object().unwrap().len(), 1);
     crate::package::remove_lib(&server.profile, "alice.dhttp.net/message").unwrap();
-    let response = server
-        .router
-        .read()
-        .unwrap()
-        .clone()
-        .oneshot(request())
-        .await
-        .unwrap();
+    let router = server.router.read().unwrap().clone();
+    let response = router.oneshot(request()).await.unwrap();
     assert_eq!(
         axum::body::to_bytes(response.into_body(), 65536)
             .await
@@ -954,14 +928,8 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
             .unwrap();
     db.execute_batch("DROP TABLE lib_capability_operation; DROP TABLE lib_capability;")
         .unwrap();
-    let response = server
-        .router
-        .read()
-        .unwrap()
-        .clone()
-        .oneshot(request())
-        .await
-        .unwrap();
+    let router = server.router.read().unwrap().clone();
+    let response = router.oneshot(request()).await.unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let bytes = axum::body::to_bytes(response.into_body(), 65536)
         .await
@@ -1159,7 +1127,7 @@ async fn introduction_static_reads_require_explicit_grant_without_management_acc
     let profile_document = json!({
         "openapi":"3.1.0",
         "info":{"title":"Profile","version":"1.0.0","description":"Public profile","license":{"name":"MIT"}},
-        "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":"profile","dependencies":[],"host":{}},
+        "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":"profile","dependencies":[]},
         "paths":{
             "/profile/nickname":{"get":{"operationId":"nickname","summary":"Nickname"},"put":{"operationId":"edit","summary":"Edit nickname"}},
             "/profile/avatar":{"get":{"operationId":"avatar","summary":"Avatar"}}
@@ -1203,14 +1171,8 @@ async fn introduction_static_reads_require_explicit_grant_without_management_acc
             "/std/profile/nickname",
             "/std/profile/avatar",
         ] {
-            let response = server
-                .router
-                .read()
-                .unwrap()
-                .clone()
-                .oneshot(request(method.clone(), path))
-                .await
-                .unwrap();
+            let router = server.router.read().unwrap().clone();
+            let response = router.oneshot(request(method.clone(), path)).await.unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
         }
     }
@@ -1233,14 +1195,8 @@ async fn introduction_static_reads_require_explicit_grant_without_management_acc
                 b"public introduction".as_slice(),
             ),
         ] {
-            let response = server
-                .router
-                .read()
-                .unwrap()
-                .clone()
-                .oneshot(request(method.clone(), path))
-                .await
-                .unwrap();
+            let router = server.router.read().unwrap().clone();
+            let response = router.oneshot(request(method.clone(), path)).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
             let body = axum::body::to_bytes(response.into_body(), 1024)
                 .await
@@ -1264,14 +1220,8 @@ async fn introduction_static_reads_require_explicit_grant_without_management_acc
         (Method::GET, "/std/profile/nickname"),
         (Method::GET, "/std/profile/avatar"),
     ] {
-        let response = server
-            .router
-            .read()
-            .unwrap()
-            .clone()
-            .oneshot(request(method, path))
-            .await
-            .unwrap();
+        let router = server.router.read().unwrap().clone();
+        let response = router.oneshot(request(method, path)).await.unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
     }
 }

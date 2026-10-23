@@ -333,6 +333,10 @@ fn check_name(conn: &rusqlite::Connection, id: &str, kind: &str) -> Result<()> {
 }
 
 // All values are derived from the authenticated container; no runtime registry.
+#[allow(
+    clippy::type_complexity,
+    reason = "Keep the frozen capability tuple interface unchanged."
+)]
 fn capability_rows(
     package: &webc::Container,
 ) -> Result<Vec<(String, String, Vec<(String, String)>)>> {

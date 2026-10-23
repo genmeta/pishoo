@@ -13,7 +13,9 @@ fn note_lib(directory: &Path) -> Arc<Lib> {
         Lib::load(
             Arc::new(WasmRuntime::new().unwrap()),
             "note".into(),
-            &package_component(&std::fs::read(path).expect("build Note WASM first")),
+            &runtime_fixture(&package_component(
+                &std::fs::read(path).expect("build Note WASM first"),
+            )),
             directory,
         )
         .unwrap(),

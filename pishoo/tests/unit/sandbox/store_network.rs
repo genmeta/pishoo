@@ -8,14 +8,13 @@ use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 
 use super::*;
-use crate::package::{
-    STORE_NAME, STORE_OWNER, package_metadata,
-    tests::{package_fixture, publisher},
+use crate::{
+    package::{
+        STORE_NAME, STORE_OWNER, package_metadata,
+        tests::{package_fixture, publisher},
+    },
+    test_credentials as credentials,
 };
-
-#[allow(dead_code)]
-#[path = "../../support/network_credentials.rs"]
-mod credentials;
 
 #[derive(Debug)]
 struct Peer(EndpointAddr);
@@ -105,7 +104,7 @@ async fn store_app_updates_exact_dependencies_through_the_management_api() {
                 })
                 .collect::<Vec<_>>();
             let document = serde_json::json!({"openapi":"3.1.0","info":{"title":name,"version":version,"description":"Installation acceptance","license":{"name":"MIT"}},
-                "x-pishoo":{"kind":if frontend {"app"} else {"lib"},"publisher":"alice.dhttp.net","name":name,"entry":"/","host":{},"dependencies":dependencies},
+                "x-pishoo":{"kind":if frontend {"app"} else {"lib"},"publisher":"alice.dhttp.net","name":name,"entry":"/","dependencies":dependencies},
                 "paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload"}}}});
             let public = if frontend {
                 webc::v3::write::Directory::new(
@@ -184,7 +183,7 @@ async fn store_app_updates_exact_dependencies_through_the_management_api() {
                         .header(
                             "content-type",
                             if req.uri().path().ends_with(".waz") {
-                                "application/webc"
+                                "application/zip"
                             } else {
                                 "application/json"
                             },

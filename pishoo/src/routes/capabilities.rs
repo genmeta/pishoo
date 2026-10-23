@@ -316,6 +316,10 @@ fn write_declarations(
 
 /// Replace validated declarations using the caller's transaction. An empty
 /// slice deletes them. Locking, commit and rollback remain with the caller.
+#[allow(
+    clippy::type_complexity,
+    reason = "Keep the frozen transactional capability interface unchanged."
+)]
 pub(crate) fn permissions(
     tx: &rusqlite::Transaction<'_>,
     name: &str,

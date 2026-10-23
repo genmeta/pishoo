@@ -18,7 +18,7 @@ fn release(
         .collect::<Vec<_>>();
     let document = json!({
         "openapi":"3.1.0", "info":{"title":name,"version":version,"description":"Dependency update fixture","license":{"name":"MIT"}},
-        "x-pishoo":{"kind":if frontend {"app"} else {"lib"},"publisher":"alice.dhttp.net","name":name,"host":{},"dependencies":dependencies},
+        "x-pishoo":{"kind":if frontend {"app"} else {"lib"},"publisher":"alice.dhttp.net","name":name,"dependencies":dependencies},
         "x-access-groups":{"read":{"title":format!("Read {version}"),"operations":["read"]}},
         "paths":{"/read":{"get":{"operationId":"read","summary":"Read","x-access-group":"read","responses":{"200":{"description":"ok"}}}}}
     });

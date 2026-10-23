@@ -12,6 +12,10 @@ mod setup;
 #[path = "../tests/support/test_identity.rs"]
 mod test_identity;
 
+#[cfg(test)]
+#[path = "../tests/support/network_credentials.rs"]
+mod test_credentials;
+
 pub use error::Error;
 pub use package::{validate_lib, validate_openapi};
 pub use sandbox::WasmRuntime;
