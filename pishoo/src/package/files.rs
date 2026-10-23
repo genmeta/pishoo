@@ -1299,8 +1299,9 @@ pub(super) fn install_packages(
     packages: &[(String, Vec<u8>)],
     sandbox: &mut super::Sandbox,
 ) -> Result<()> {
-    use rustix::fs::{FlockOperation, Mode, flock, mkdirat};
     use std::sync::Arc;
+
+    use rustix::fs::{FlockOperation, Mode, flock, mkdirat};
 
     if packages.is_empty() || packages.len() > 100 {
         return Err(Error::BadRequest(

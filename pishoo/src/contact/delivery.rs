@@ -131,10 +131,14 @@ struct PendingReview {
 
 fn pending_review(code: u16, body: &Value) -> Result<Option<i64>, Failure> {
     if !((code == 202 && body["status"] == "pending_review")
-        || (code == 400 && body["error"] == "need_review")) {
+        || (code == 400 && body["error"] == "need_review"))
+    {
         return Ok(None);
     }
-    body["review_id"].as_i64().filter(|id| *id > 0).map(Some)
+    body["review_id"]
+        .as_i64()
+        .filter(|id| *id > 0)
+        .map(Some)
         .ok_or_else(|| fail(400, "review protocol upgrade required"))
 }
 
@@ -356,12 +360,26 @@ mod tests {
 
     #[test]
     fn approval_wire_formats_are_distinct_from_queued_contact_receipts() {
-        assert_eq!(pending_review(202, &json!({"status":"pending_review","review_id":12})).unwrap(), Some(12));
-        assert_eq!(pending_review(400, &json!({"error":"need_review","review_id":12})).unwrap(), Some(12));
-        assert_eq!(pending_review(202, &json!({"status":"pending","delivery_status":"queued"})).unwrap(), None);
+        assert_eq!(
+            pending_review(202, &json!({"status":"pending_review","review_id":12})).unwrap(),
+            Some(12)
+        );
+        assert_eq!(
+            pending_review(400, &json!({"error":"need_review","review_id":12})).unwrap(),
+            Some(12)
+        );
+        assert_eq!(
+            pending_review(202, &json!({"status":"pending","delivery_status":"queued"})).unwrap(),
+            None
+        );
         assert!(pending_review(202, &json!({"status":"pending_review"})).is_err());
         assert!(pending_review(202, &json!({"status":"pending_review","review_id":0})).is_err());
-        assert_eq!(review_progress(202, &json!({"status":"pending_review","review_id":12})).unwrap_err().0, 409);
+        assert_eq!(
+            review_progress(202, &json!({"status":"pending_review","review_id":12}))
+                .unwrap_err()
+                .0,
+            409
+        );
     }
 
     #[test]

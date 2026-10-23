@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.9.0-preview.5] - 2026-10-23
+
+### Changed
+
+- Upgrade an application and its exact direct and transitive dependencies in one
+  installation transaction. Reuse matching loaded dependencies, prepare runtime
+  resources before committing, and recover the entire batch after interruption.
+  Conflicting requirements from other installed applications reject the update
+  and identify the dependent packages and required versions.
+- Allow the same author's installed package to add or remove APIs, change HTTP
+  methods, and replace or clear capability declarations while retaining existing
+  ACL rules. These rules continue to govern requests after the upgrade.
+- Use `author`, `author_owner_hash` and `dependencies[].author` in store metadata,
+  and download signed packages through `package.waz`. WEBC v3 contents, signatures
+  and the `application/webc` media type remain unchanged.
+- Return pending access reviews as HTTP 202 with `status: pending_review`, a review
+  ID and a status URL. Keep queued business responses distinct; waiting reviews
+  report denial, timeout and unavailable channels as 403, 504 and 503 respectively.
+- Support once and remembered access decisions, localized permission-group titles,
+  and optional permission-directory details.
+- Initialize only native contact and permission-discovery ACL defaults. Business
+  packages require owner-configured access; existing rules are preserved and no
+  defaults file is read or reapplied on restart.
+
+### Fixed
+
+- Preserve App root ACLs when frontend asset filenames change.
+- Persist authenticated contact delivery review state in contact schema v5 and
+  poll the original review while pending. Denial or expiry ends the delivery task
+  without replaying the business request or changing the contact relationship.
+- Repair account ownership across personal `.dhttp` directories when the host
+  runs as root, preserving file modes and filesystem boundaries.
+
+### Dependencies and compatibility
+
+- Pin daccess 0.2.0 to commit `4fbb0b2328538beede2027805414b24673da9ff1`.
+- Deploy the matching `author` / `.waz` registry protocol before using store
+  installation or updates. Old `publisher` / `.pkg` HTTP responses are unsupported.
+- Publish compatible application releases and their exact dependencies separately;
+  host distributions do not contain or automatically install business packages.
+  Clients must distinguish pending reviews from queued business success.
+- Existing ACLs and private business data are retained. Changing a package's author
+  is not an ordinary upgrade; conflicting authors cannot replace the same short name.
+
+Pishoo and pishoo-common advance together to 0.9.0-preview.5. The SDK remains
+0.1.0-preview.2.
+
 ## [0.9.0-preview.4] - 2026-10-21
 
 ### Changed
