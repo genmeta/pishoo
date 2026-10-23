@@ -30,7 +30,7 @@ and WASM components. See the [Pishoo documentation](https://docs.dhttp.net/en/do
 
 ### Local development build
 
-Dependencies are resolved from Cargo.lock, including the fixed Git revision of daccess 0.2.0; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
+Dependencies are resolved from Cargo.lock, including the crates.io release of daccess 0.2.0; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
 
 ```sh
 git clone --branch release/v0.9.0.preview.5 https://github.com/genmeta/pishoo.git
@@ -156,7 +156,7 @@ Startup creates `.volume/sys/{setting,pkg,access,contact}/`, `lib/std/`, `app/`,
 
 Native ACL defaults are written once when initializing a new authorization database: authenticated identities may POST/GET `/std/contact` and GET `/std/acl/status`, GET `/std/contact/list` is denied to visitors, and GET `/std/acl/permissions` is public. There is no defaults configuration file or provider exemption during installation. Access is managed in Workspace or with `genmeta access`; restarts and package installation never reapply defaults. New providers must not inherit existing ACL rules for their routes.
 
-Existing daccess schema v0 databases are backed up through SQLite before the library upgrades them to v1. The older 0.8.2 `location_rule_sets/location_rules` format is unsupported and stops startup with the original database preserved; it is never silently replaced with new defaults. Missing, corrupt, incomplete, and unsupported databases are distinguished. Pishoo does not create identity credentials, `server.conf`, or an instance configuration file. Linux packages use `User=root` without setting `DHTTP_HOME`. Existing manual overrides remain authoritative; custom deployments can set them in `/etc/systemd/system/pishoo.service.d/`.
+Existing daccess schema v0 databases are backed up through SQLite before the library upgrades them through schema v3. The older 0.8.2 `location_rule_sets/location_rules` format is unsupported and stops startup with the original database preserved; it is never silently replaced with new defaults. Missing, corrupt, incomplete, and unsupported databases are distinguished. Pishoo does not create identity credentials, `server.conf`, or an instance configuration file. Linux packages use `User=root` without setting `DHTTP_HOME`. Existing manual overrides remain authoritative; custom deployments can set them in `/etc/systemd/system/pishoo.service.d/`.
 
 Static files under `<identity-home>/<identity>/file/` are served at `/std/file/{path}`. The `/std/file` path itself is unavailable. Ordinary `/file/*` paths use configured proxies; there is no static-file proxy override.
 
@@ -257,6 +257,6 @@ App pages, assets and deep links share one `GET /app/<name>` access rule, includ
 
 Access review decisions require an explicit boolean `remember` alongside `id`, `kind` and `action` (`allow` or `deny`). Only remembered choices write ACL rules. Once allowance admits the next call matching verified name, SubjectId, method and normalized path; query, body and message IDs do not participate. It expires after ten minutes and is consumed atomically on admission, including when the business operation later fails. Live once decisions release only the selected waiter. Review lists advertise `decision_modes: ["once", "always"]`; visitor-scoped status supports `consumed` and does not consume an allowance. Authorization schema v3 preserves historical decisions and IDs across restart.
 
-Pishoo pins daccess 0.2.0 to an exact Git revision in `pishoo/Cargo.toml`. Host compilation and VM testing should use that same source revision and Message 0.2.1 / Workspace 0.3.2.
+Pishoo uses daccess 0.2.0 from crates.io in `pishoo/Cargo.toml`, with the exact resolved package and checksum recorded in `Cargo.lock`. Host compilation and VM testing should use the locked dependencies and Message 0.2.1 / Workspace 0.3.2.
 
 App and Lib developers must distinguish `202 pending_review` from accepted business jobs. See the [approval integration guide](docs/approval-handling.md) for response handling, live waits, timeouts, identity-bound status queries, idempotency and pending-state UI guidance.
