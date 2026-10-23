@@ -7,10 +7,9 @@ use std::{
 
 use dhttp_home::identity::IdentityProfile;
 
-use crate::{
-    Error, Result,
-    sandbox::{Sandbox, WasmRuntime},
-};
+#[cfg(test)]
+use crate::sandbox::WasmRuntime;
+use crate::{Error, Result, sandbox::Sandbox};
 
 mod files;
 mod format;
@@ -18,11 +17,12 @@ mod manifest;
 mod store;
 
 pub(crate) use files::{
-    disk_bytes, install_package, installed_apps, installed_packages, lib_root, remove_package,
-    valid_id,
+    disk_bytes, installed_apps, installed_packages, lib_root, remove_package, valid_id,
 };
 #[cfg(test)]
-pub(crate) use files::{install_app, install_lib, installed_libs, remove_app, remove_lib};
+pub(crate) use files::{
+    install_app, install_lib, install_package, installed_libs, remove_app, remove_lib,
+};
 pub(crate) use format::{package_file, package_metadata, read_package};
 pub use manifest::{validate_lib, validate_openapi};
 pub(crate) use store::install_store_package;
