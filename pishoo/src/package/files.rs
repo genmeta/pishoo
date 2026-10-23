@@ -569,6 +569,16 @@ fn check_existing_rules(
             } else {
                 path.trim_end_matches('/').to_owned()
             };
+            // New asset filenames still share the existing provider's root GET
+            // authorization, just like static requests and deep links do.
+            if kind == "app"
+                && method == "GET"
+                && previous
+                    .get(&path)
+                    .is_some_and(|methods| methods.iter().any(|method| method == "GET"))
+            {
+                continue;
+            }
             let exists: bool = access.query_row(
                 "SELECT EXISTS(SELECT 1 FROM access_rules WHERE (api='/' OR api=?1 OR substr(?1,1,length(api)+1)=api||'/') AND method IN (?2,'*'))",
                 rusqlite::params![path, method],
