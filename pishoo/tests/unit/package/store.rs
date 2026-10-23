@@ -59,13 +59,18 @@ fn release(owner: char, version: &str) -> (Vec<u8>, Value) {
         .map(|c| STANDARD.encode(c.as_ref()))
         .collect::<Vec<_>>();
     let mut metadata = serde_json::json!({"id":"alice.dhttp.net/note","publisher":publisher,"name":"note","version":version,
-        "publisher_owner_hash":owner.to_string().repeat(64),"size":bytes.len(),"package_sha256":format!("{:x}",Sha256::digest(&bytes)),
+        "author_owner_hash":owner.to_string().repeat(64),"size":bytes.len(),"package_sha256":format!("{:x}",Sha256::digest(&bytes)),
         "openapi":document,"signer_certificates":certificates});
     let package = read_package(&bytes).unwrap();
     let fields = package_metadata(&package).unwrap();
     for (key, value) in fields.as_object().unwrap() {
         metadata[key] = value.clone();
     }
+    metadata["author"] = fields["publisher"].clone();
+    metadata.as_object_mut().unwrap().remove("publisher");
+    metadata["dependencies"] = fields["dependencies"].as_array().unwrap().iter().map(|dependency| serde_json::json!({
+        "author":dependency["publisher"],"name":dependency["name"],"version":dependency["version"]
+    })).collect::<Vec<_>>().into();
     metadata["openapi"] =
         serde_json::from_slice(&package_file(&package, "/metadata/openapi.json").unwrap()).unwrap();
     (bytes, metadata)
@@ -77,7 +82,7 @@ fn authenticated_release_rejects_tampered_bytes_metadata_signers_and_identity() 
     verify_release(&bytes, &metadata, "alice.dhttp.net", "note", "1.2.3").unwrap();
     for key in [
         "package_sha256",
-        "publisher_owner_hash",
+        "author_owner_hash",
         "signer_certificates",
         "size",
     ] {
@@ -235,11 +240,16 @@ fn dependency_tree_orders_transitive_libs_and_rejects_cycles() {
         .unwrap()
         .0;
     let envelope: Value = serde_json::from_slice(&signature).unwrap();
-    let mut metadata = serde_json::json!({"kind":kind,"id":id,"publisher":"alice.dhttp.net","name":"parent","version":"1.0.0","publisher_owner_hash":"a".repeat(64),"package_sha256":format!("{:x}",Sha256::digest(&bytes)),"size":bytes.len(),"openapi":document,"dependencies":document["x-pishoo"]["dependencies"],"signer_certificates":envelope["certificates"]});
+    let mut metadata = serde_json::json!({"kind":kind,"id":id,"publisher":"alice.dhttp.net","name":"parent","version":"1.0.0","author_owner_hash":"a".repeat(64),"package_sha256":format!("{:x}",Sha256::digest(&bytes)),"size":bytes.len(),"openapi":document,"dependencies":document["x-pishoo"]["dependencies"],"signer_certificates":envelope["certificates"]});
     let fields = package_metadata(&container).unwrap();
     for (key, value) in fields.as_object().unwrap() {
         metadata[key] = value.clone();
     }
+    metadata["author"] = fields["publisher"].clone();
+    metadata.as_object_mut().unwrap().remove("publisher");
+    metadata["dependencies"] = fields["dependencies"].as_array().unwrap().iter().map(|dependency| serde_json::json!({
+        "author":dependency["publisher"],"name":dependency["name"],"version":dependency["version"]
+    })).collect::<Vec<_>>().into();
     assert!(!reused);
     verify_release(&bytes, &metadata, "alice.dhttp.net", "parent", "1.0.0").unwrap();
     let mut altered = metadata;
