@@ -45,7 +45,7 @@ async fn download_release(
     let metadata: Value =
         serde_json::from_slice(&store_get(endpoint, &path, 2 * 1024 * 1024).await?)
             .map_err(|_| Error::InvalidComponent("invalid store metadata".into()))?;
-    let download = format!("{path}/package.pkg");
+    let download = format!("{path}/package.waz");
     if metadata["id"] != id
         || metadata["publisher"] != publisher
         || metadata["name"] != name
@@ -243,7 +243,7 @@ async fn store_get(endpoint: &dhttp::Endpoint, path: &str, limit: usize) -> Resu
             .map_err(|_| Error::BadRequest("invalid store URI".into()))?;
         let owner = dhttp_home::certificate::OwnerHash::try_from(STORE_OWNER)
             .map_err(|_| Error::InvalidIdentity("invalid pinned store identity".into()))?;
-        let content_type = if path.ends_with(".pkg") {
+        let content_type = if path.ends_with(".waz") {
             "application/webc"
         } else {
             "application/json"

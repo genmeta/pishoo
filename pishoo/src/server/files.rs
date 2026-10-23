@@ -297,7 +297,7 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
             .ok_or_else(|| Error::InvalidConfig("invalid package recovery resources".into()))?;
         let db = crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let current: String = db.query_row(
-            include_str!("../package/registration-facts.sql"),
+            include_str!("../package/sql/registration-facts-v3.sql"),
             [short],
             |r| r.get(0),
         )?;

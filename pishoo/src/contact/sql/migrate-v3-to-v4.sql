@@ -1,3 +1,4 @@
+-- Contact database migration v3 -> v4: preserve selected operation snapshots.
 -- NULL means the original operation snapshot is unknown. Never infer it from
 -- a new permission catalog: that could turn a historical POST grant into PUT.
 ALTER TABLE outbound_contact_request ADD COLUMN requested_access TEXT

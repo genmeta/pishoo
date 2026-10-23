@@ -1,3 +1,4 @@
+-- Contact database migration v2 -> v3: singular outbound request table name.
 ALTER TABLE outbound_contact_requests RENAME TO outbound_contact_request;
 DROP INDEX outbound_contact_requests_pending_target;
 CREATE UNIQUE INDEX outbound_contact_request_pending_target

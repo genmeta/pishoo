@@ -1,3 +1,4 @@
+-- Package registration schema v3: unified package registry and permission declarations.
 -- Package metadata is the installation authority; content flags select runtime resources.
 CREATE TABLE IF NOT EXISTS pkg_registry.package (
     name TEXT PRIMARY KEY NOT NULL,

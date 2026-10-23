@@ -117,22 +117,23 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
         if count != 0 {
             return Err(fail(500, "unrecognized contact database"));
         }
-        tx.execute_batch(include_str!("contact.sql"))
+        tx.execute_batch(include_str!("sql/schema-v4.sql"))
             .map_err(storage)?;
         tx.pragma_update(None, "user_version", 4).map_err(storage)?;
     } else if version == 1 {
-        tx.execute_batch("ALTER TABLE outbound_contact_requests ADD COLUMN contact_id INTEGER; ALTER TABLE outbound_contact_requests ADD COLUMN contact_subject TEXT; DROP TABLE IF EXISTS saved_contacts;").map_err(storage)?;
+        tx.execute_batch(include_str!("sql/migrate-v1-to-v2.sql"))
+            .map_err(storage)?;
         tx.pragma_update(None, "user_version", 2).map_err(storage)?;
     } else if version != 2 && version != 3 && version != 4 {
         return Err(fail(500, "unsupported contact database version"));
     }
     if version == 1 || version == 2 {
-        tx.execute_batch(include_str!("migrate-v3.sql"))
+        tx.execute_batch(include_str!("sql/migrate-v2-to-v3.sql"))
             .map_err(storage)?;
         tx.pragma_update(None, "user_version", 3).map_err(storage)?;
     }
     if (1..=3).contains(&version) {
-        tx.execute_batch(include_str!("migrate-v4.sql"))
+        tx.execute_batch(include_str!("sql/migrate-v3-to-v4.sql"))
             .map_err(storage)?;
         tx.pragma_update(None, "user_version", 4).map_err(storage)?;
     }
