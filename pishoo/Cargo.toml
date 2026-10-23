@@ -2,7 +2,7 @@
 name = "pishoo"
 description = "modern, secure, QUIC-powered web/proxy engine"
 homepage = "https://www.dhttp.net"
-version = "0.9.0-preview.4"
+version = "0.9.0-preview.5"
 edition = "2024"
 license = "Apache-2.0"
 autobins = false
@@ -21,7 +21,7 @@ dhttp = { version = "0.7.1" }
 h3x = { version = "0.7.0" }
 dhttp-home = { version = "0.6.1" }
 qtls = { version = "0.1.0" }
-access_control = { package = "daccess", version = "0.1.1", git = "https://github.com/genmeta/daccess.git", rev = "1bd97a7d2e8bd572cde700b1ec52c8ca8fca2ee4" }
+access_control = { package = "daccess", version = "0.2.0", git = "https://github.com/genmeta/daccess.git", rev = "4fbb0b2328538beede2027805414b24673da9ff1" }
 axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio"] }
 sea-orm = { version = "2", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 rusqlite = { version = "0.32.1", features = ["bundled", "backup"] }
