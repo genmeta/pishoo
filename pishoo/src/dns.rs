@@ -102,17 +102,17 @@ pub(crate) async fn maintain_mdns(
     desired.retain(|_, values| !values.is_empty());
     for instance in mdns.snapshot() {
         let binding = MdnsBinding::new(instance.bound_device(), instance.bound_ip());
-        if !desired.contains_key(&binding) {
-            if let Err(failed) = mdns.remove(&binding).await {
-                let failed = io::Error::other(failed);
-                tracing::warn!(
-                    device = binding.device(),
-                    ip = %binding.ip(),
-                    error = %failed,
-                    "mDNS remove failed"
-                );
-                error.get_or_insert(failed);
-            }
+        if !desired.contains_key(&binding)
+            && let Err(failed) = mdns.remove(&binding).await
+        {
+            let failed = io::Error::other(failed);
+            tracing::warn!(
+                device = binding.device(),
+                ip = %binding.ip(),
+                error = %failed,
+                "mDNS remove failed"
+            );
+            error.get_or_insert(failed);
         }
     }
     for (binding, values) in desired {

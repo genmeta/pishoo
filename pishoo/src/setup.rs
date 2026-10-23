@@ -1070,8 +1070,8 @@ pub(crate) fn config_database(
         let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         read_server_config(&mut conn)?
     } else {
-        let proxy = match method {
-            &Method::PATCH if uri.path() == "/std/sys/listen" => {
+        let proxy = match *method {
+            Method::PATCH if uri.path() == "/std/sys/listen" => {
                 validate_listen_patch(
                     payload
                         .as_ref()
@@ -1079,7 +1079,7 @@ pub(crate) fn config_database(
                 )?;
                 None
             }
-            &Method::PATCH => Some(
+            Method::PATCH => Some(
                 parse_proxy_json(&Value::Array(vec![
                     payload
                         .clone()
@@ -1087,7 +1087,7 @@ pub(crate) fn config_database(
                 ]))?
                 .remove(0),
             ),
-            &Method::DELETE if payload.is_none() => None,
+            Method::DELETE if payload.is_none() => None,
             _ => return Err(Error::MethodNotAllowed),
         };
         initialize_config(profile)?;

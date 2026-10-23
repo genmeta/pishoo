@@ -696,17 +696,19 @@ async fn queued_legacy_capabilities_fail_without_network_or_new_grants() {
     contact_jobs(&profile, &endpoint, &access, &db)
         .await
         .unwrap();
-    let conn = db.lock().unwrap();
-    let (status, error, lease): (String, String, Option<i64>) = conn
-        .query_row(
-            "SELECT status,error_message,lease_until FROM outbound_contact_request",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(status, "failed");
-    assert!(error.contains("submit a new request"));
-    assert_eq!(lease, None);
+    {
+        let conn = db.lock().unwrap();
+        let (status, error, lease): (String, String, Option<i64>) = conn
+            .query_row(
+                "SELECT status,error_message,lease_until FROM outbound_contact_request",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert!(error.contains("submit a new request"));
+        assert_eq!(lease, None);
+    }
     assert!(access.find_contact_by_name("bob.dhttp.net").await.is_err());
 }
 

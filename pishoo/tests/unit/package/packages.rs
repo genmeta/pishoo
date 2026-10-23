@@ -52,12 +52,6 @@ pub(crate) fn package_fixture(
             .cloned()
             .unwrap_or_else(|| "/".into());
     }
-    if !app {
-        annotation["host"] = document["x-pishoo"]
-            .get("host")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
-    }
     if let Some(extension) = api["x-pishoo"].as_object_mut() {
         extension.retain(|key, _| key == "access-groups");
     }
@@ -110,80 +104,38 @@ pub(crate) fn package_fixture(
     let unsigned = writer.finish(SignatureAlgorithm::None).unwrap();
     let container =
         webc::Container::from_bytes_and_version(unsigned.clone(), webc::Version::V3).unwrap();
-    let reader = webc::v3::read::OwnedReader::parse(unsigned.clone()).unwrap();
-    let index = reader.index();
+    let mut files = crate::package::format::waz_export(&container).unwrap();
     let mut hash = Sha256::new();
-    hash.update(b"\0webc003");
-    for entry in std::iter::once(&index.manifest)
-        .chain(std::iter::once(&index.atoms))
-        .chain(index.volumes.values())
-    {
-        hash.update(&unsigned[entry.span.start..entry.span.end()]);
+    hash.update(b"pishoo-waz-payload-v1\0");
+    for (name, bytes) in &files {
+        hash.update((name.len() as u32).to_le_bytes());
+        hash.update(name.as_bytes());
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(Sha256::digest(bytes));
     }
-    let mut input = b"pishoo-webc-signature-v1\0".to_vec();
+    let mut input = b"pishoo-waz-signature-v1\0".to_vec();
     input.extend_from_slice(&hash.finalize());
     let signature = authority
         .sign(qtls::SignatureScheme::ECDSA_NISTP256_SHA256, &input)
         .unwrap();
-    let envelope = json!({"version":1,"certificates":authority.certificates().iter().map(|c|STANDARD.encode(c.as_ref())).collect::<Vec<_>>(),"signature":STANDARD.encode(signature)});
-    writer = Writer::default()
-        .write_raw_manifest(
-            unsigned[index.manifest.span.start + 41..index.manifest.span.end()].to_vec(),
-        )
-        .write_atoms(atoms())
-        .unwrap();
-    for (name, volume) in container.volumes() {
-        writer
-            .write_volume(&name, copy_directory(&volume, "/"))
-            .unwrap();
-    }
-    writer
-        .with_volume(
-            "pishoo-signature",
-            Directory::new(
-                BTreeMap::from([(
-                    "signature.json".parse().unwrap(),
-                    serde_json::to_vec(&envelope).unwrap().into(),
-                )]),
-                Timestamps::default(),
-            ),
-        )
-        .unwrap()
-        .finish(SignatureAlgorithm::None)
-        .unwrap()
-        .to_vec()
+    files.insert("signature.json".into(),serde_json::to_vec(&json!({"version":1,
+        "certificates":authority.certificates().iter().map(|c|STANDARD.encode(c.as_ref())).collect::<Vec<_>>(),
+        "signature":STANDARD.encode(signature)})).unwrap());
+    crate::package::format::waz_write(&files).unwrap()
 }
 
-fn copy_directory(volume: &webc::Volume, path: &str) -> Directory<'static> {
-    use webc::v3::write::DirEntry;
-    let timestamps = |value: Option<webc::Timestamps>| Timestamps {
-        modified: std::time::UNIX_EPOCH
-            + Duration::from_nanos(value.unwrap_or_default().modified()),
-    };
-    let children = volume
-        .read_dir(path)
-        .unwrap()
-        .into_iter()
-        .map(|(name, _, metadata)| {
-            let child = format!("{}/{}", path.trim_end_matches('/'), name);
-            let entry = match metadata {
-                webc::Metadata::Dir { .. } => DirEntry::Dir(copy_directory(volume, &child)),
-                webc::Metadata::File {
-                    timestamps: value, ..
-                } => DirEntry::File(FileEntry::owned(
-                    volume.read_file(child.as_str()).unwrap().0.to_vec(),
-                    timestamps(value),
-                )),
-                _ => panic!("unexpected fixture entry"),
-            };
-            (name, entry)
+pub(crate) fn zip_files(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    use std::io::Read;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    (0..archive.len())
+        .map(|index| {
+            let mut file = archive.by_index(index).unwrap();
+            let name = file.name().to_owned();
+            let mut data = Vec::new();
+            file.read_to_end(&mut data).unwrap();
+            (name, data)
         })
-        .collect();
-    let stamp = match volume.metadata(path).unwrap() {
-        webc::Metadata::Dir { timestamps: value } => timestamps(value),
-        _ => Timestamps::default(),
-    };
-    Directory::new(children, stamp)
+        .collect()
 }
 
 // Preserve existing execution fixtures, extracting their legacy test-only OpenAPI
@@ -239,9 +191,6 @@ pub(crate) fn package_component(bytes: &[u8]) -> Vec<u8> {
     if doc["info"]["license"].is_null() {
         doc["info"]["license"] = json!({"name":"MIT"});
     }
-    if doc["x-pishoo"]["host"].is_null() {
-        doc["x-pishoo"]["host"] = json!({"private-storage":"Fixture storage","request-identity":"Fixture identity","signatures":"Fixture signatures"});
-    }
     let mut ordinal = 0;
     for item in doc["paths"].as_object_mut().unwrap().values_mut() {
         for method in [
@@ -264,7 +213,7 @@ pub(crate) fn package_component(bytes: &[u8]) -> Vec<u8> {
 
 pub(crate) fn frontend_document(version: &str) -> Value {
     json!({"openapi":"3.1.0","info":{"title":"Hello","version":version,"description":"Hello test","license":{"name":"MIT"}},
-    "x-pishoo":{"publisher":"alice.dhttp.net","name":"hello","kind":"app","entry":"/","host":{}},
+    "x-pishoo":{"publisher":"alice.dhttp.net","name":"hello","kind":"app","entry":"/"},
     "paths":{
         "/":{"get":{"operationId":"page","summary":"Page","x-pishoo":{"static-file":"/public/index.html"}},"head":{"operationId":"pageHead","summary":"Page headers","x-pishoo":{"static-file":"/public/index.html"}}},
         "/assets/app.js":{"get":{"operationId":"js","summary":"Script","x-pishoo":{"static-file":"/public/assets/app.js"}},"head":{"operationId":"jsHead","summary":"Script headers","x-pishoo":{"static-file":"/public/assets/app.js"}}},
@@ -427,24 +376,22 @@ fn package_routes_files_and_identity_are_bound_to_publisher_signature() {
     trailing.push(0);
     assert!(read_package(&trailing).is_err());
     let mut changed = bytes.clone();
-    let position = changed
-        .windows(b"Old frontend".len())
-        .position(|s| s == b"Old frontend")
-        .unwrap();
-    changed[position] = b'X';
+    let position = zip::ZipArchive::new(std::io::Cursor::new(&bytes))
+        .unwrap()
+        .by_name("public/index.html")
+        .unwrap()
+        .data_start() as usize;
+    changed[position] ^= 0x80;
     assert!(read_package(&changed).is_err());
     // App routes are derived from files and do not use any API declaration.
-    let mut bad = frontend_document("1.0.0");
-    bad["x-pishoo"]["entry"] = "/other".into();
-    assert!(
-        read_package(&package_fixture(
-            &bad,
-            &[],
-            frontend_files("page"),
-            &publisher("alice.dhttp.net", 'a')
-        ))
-        .is_err()
+    let mut invalid = zip_files(&bytes);
+    let mut manifest: Value = serde_json::from_slice(&invalid["manifest.json"]).unwrap();
+    manifest["frontend"] = "other".into();
+    invalid.insert(
+        "manifest.json".into(),
+        serde_json::to_vec(&manifest).unwrap(),
     );
+    assert!(read_package(&crate::package::format::waz_write(&invalid).unwrap()).is_err());
     assert!(package.atoms().is_empty());
     assert!(package_file(&package, "/metadata/openapi.json").is_err());
     let wrong = package_fixture(
@@ -455,45 +402,17 @@ fn package_routes_files_and_identity_are_bound_to_publisher_signature() {
     );
     assert!(read_package(&wrong).is_err());
 
-    // Recompute all WEBC checksums after changing frontend bytes, keeping the
-    // original envelope: internal integrity must not substitute for a signature.
-    let forged = webc::Container::from_bytes_and_version(
-        frontend_package("1.0.0", "<h1>Attacker frontend</h1>").into(),
-        webc::Version::V3,
-    )
-    .unwrap();
-    let mut writer = Writer::default()
-        .write_manifest(forged.manifest())
-        .unwrap()
-        .write_atoms(
-            forged
-                .atoms()
-                .into_iter()
-                .map(|(name, data)| {
-                    (
-                        name.parse().unwrap(),
-                        FileEntry::owned(data.to_vec(), Timestamps::default()),
-                    )
-                })
-                .collect(),
-        )
-        .unwrap();
-    for (name, volume) in forged.volumes() {
-        let volume = if name == "pishoo-signature" {
-            package.get_volume(&name).unwrap()
-        } else {
-            volume
-        };
-        writer
-            .write_volume(&name, copy_directory(&volume, "/"))
-            .unwrap();
-    }
-    let forged = writer.finish(SignatureAlgorithm::None).unwrap();
-    assert!(
-        webc::Container::from_bytes_and_version(forged.clone(), webc::Version::V3)
-            .unwrap()
-            .validate()
-            .is_ok()
+    // Recompute ZIP checksums after replacing a file, keeping the original
+    // envelope: ZIP integrity must not substitute for the publisher signature.
+    let mut files = zip_files(&bytes);
+    files.insert(
+        "public/index.html".into(),
+        b"<h1>Attacker frontend</h1>".to_vec(),
+    );
+    let forged = crate::package::format::waz_write(&files).unwrap();
+    assert_eq!(
+        zip_files(&forged)["public/index.html"],
+        b"<h1>Attacker frontend</h1>"
     );
     assert!(read_package(&forged).is_err());
 }
@@ -984,7 +903,7 @@ fn standard_lib_declarations_stay_in_the_filename_namespace() {
         let document = json!({
             "openapi":"3.1.0",
             "info":{"title":"Profile","version":"1.0.0","description":"test","license":{"name":"MIT"}},
-            "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":"profile","host":{},"dependencies":[]},
+            "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":"profile","dependencies":[]},
             "paths":{path:{"get":{"operationId":"read","summary":"Read","responses":{"200":{"description":"ok"}}}}}
         });
         let bytes = package_fixture(&document, backend, Directory::default(), &authority);
@@ -1009,7 +928,7 @@ async fn ordinary_lib_mounts_bind_signatures_capabilities_and_proxy_conflicts() 
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let mut doc = json!({"openapi":"3.1.0","info":{"title":"Journal","version":"1.0.0","description":"test","license":{"name":"MIT"}},
-        "x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"journal","dependencies":[],"host":{"request-identity":"identity"},
+        "x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"journal","dependencies":[],
             "access-groups":{"journal":{"title":"Journal","operations":["write"]}}},
         "paths":{"/std/xxxx":{"post":{"operationId":"write","summary":"write","x-pishoo":{"access-group":"journal"}}},"/contact":{"get":{"operationId":"contact","summary":"local operation"}}}});
     let backend = include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm");
@@ -1196,7 +1115,7 @@ async fn ordinary_lib_mounts_bind_signatures_capabilities_and_proxy_conflicts() 
 #[test]
 fn access_groups_validate_modern_and_legacy_declarations() {
     let document = json!({"openapi":"3.1.0","info":{"title":"Message","version":"1.0.0","description":"test","license":{"name":"MIT"}},
-        "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":"message","dependencies":[],"host":{"request-identity":"identity"}},
+        "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":"message","dependencies":[]},
         "x-access-groups":{"message":{"title":"Receive","operations":["receive"]}},
         "paths":{"/message":{"post":{"operationId":"receive","summary":"Receive messages","x-access-group":"message","responses":{"200":{"description":"ok"}}}}}});
     let authority = publisher("std.dhttp.net", 'a');
@@ -1327,7 +1246,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     let authority = publisher("std.dhttp.net", 'a');
     let make_lib = |name: &str, version: &str, path: &str, method: &str, title: &str| {
         let doc = json!({"openapi":"3.1.0","info":{"title":name,"version":version,"description":"test","license":{"name":"MIT"}},
-            "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":name,"dependencies":[],"host":{"request-identity":"identity"}},
+            "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":name,"dependencies":[]},
             "x-access-groups":{"message":{"title":title,"operations":["receive"]}},
             "paths":{path:{method:{"operationId":"receive","summary":"test","x-access-group":"message","responses":{"200":{"description":"ok"}}}}}});
         package_fixture(
@@ -1414,7 +1333,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     assert_eq!(sandbox.libs.len(), 1);
     install_lib(&profile, id, &bytes, &runtime).unwrap();
     let doc = json!({"openapi":"3.1.0","info":{"title":"Message","version":"1.0.0","description":"test","license":{"name":"MIT"}},
-        "x-pishoo":{"publisher":"std.dhttp.net","name":"message","host":{"request-identity":"identity"}},
+        "x-pishoo":{"publisher":"std.dhttp.net","name":"message"},
         "x-access-groups":{"message":{"title":"1v1聊天","operations":["receive"]}},
         "paths":{"/message":{"post":{"operationId":"receive","summary":"Receive","x-access-group":"message"}}}});
     let combined = package_fixture(
@@ -1612,4 +1531,34 @@ fn package_catalog_uses_registration_without_a_payload_audit() {
     for removed in ["id", "package_sha256", "author_owner_hash", "changelog"] {
         assert!(!columns.iter().any(|c| c == removed));
     }
+}
+
+#[test]
+fn identity_imports_install_without_host_purpose_declarations() {
+    let backend = include_bytes!("../../fixtures/pishoo-host-client.wasm");
+    assert!(
+        backend
+            .windows(b"pishoo:identity/request-identity".len())
+            .any(|bytes| bytes == b"pishoo:identity/request-identity")
+    );
+    let document = json!({
+        "openapi":"3.1.0",
+        "info":{"title":"Identity client","version":"1.0.0","description":"Host imports","license":{"name":"MIT"}},
+        "x-pishoo":{"publisher":"alice.dhttp.net","name":"identity-client","dependencies":[]},
+        "paths":{}
+    });
+    let bytes = package_fixture(
+        &document,
+        backend,
+        Directory::default(),
+        &publisher("alice.dhttp.net", 'a'),
+    );
+    let package = read_package(&bytes).unwrap();
+    let manifest = serde_json::to_value(package.manifest()).unwrap();
+    assert!(manifest["package"]["pishoo"].get("host").is_none());
+    assert!(package_metadata(&package).unwrap().get("host").is_none());
+    WasmRuntime::new()
+        .unwrap()
+        .compile(&package.get_atom("backend").unwrap())
+        .unwrap();
 }

@@ -117,7 +117,9 @@ async fn large_echo_reports_fuel_exhaustion() {
     let lib = Lib::load(
         runtime,
         "echo".into(),
-        &package_component(include_bytes!("../../../../assets/tcp-demo-echo.wasm")),
+        &runtime_fixture(&package_component(include_bytes!(
+            "../../../../assets/tcp-demo-echo.wasm"
+        ))),
         directory.path(),
     )
     .unwrap();

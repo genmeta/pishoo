@@ -115,7 +115,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         std::fs::read(chat_project.join("dist/lib.wasm")).expect("build message-lib first");
     let mut chat_document: Value =
         serde_json::from_slice(&std::fs::read(chat_project.join("openapi.json")).unwrap()).unwrap();
-    chat_document["x-pishoo"] = json!({"kind":"lib","publisher":"dev.dhttp.net","name":"message","dependencies":[],"host":{"private-storage":"Chat data","request-identity":"Chat caller"},"access-groups":{"message":{"title":"1v1聊天","operations":["receiveMessage"]}}});
+    chat_document["x-pishoo"] = json!({"kind":"lib","publisher":"dev.dhttp.net","name":"message","dependencies":[],"access-groups":{"message":{"title":"1v1聊天","operations":["receiveMessage"]}}});
     let chat_package = package_fixture(
         &chat_document,
         &chat_bytes,
@@ -123,7 +123,8 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         &publisher("dev.dhttp.net", 'a'),
     );
     let mut document = document;
-    document["x-pishoo"] = json!({"kind":"lib","publisher":"dev.dhttp.net","name":"profile","dependencies":[],"host":{"private-storage":"Profile data","request-identity":"Profile caller"}});
+    document["x-pishoo"] =
+        json!({"kind":"lib","publisher":"dev.dhttp.net","name":"profile","dependencies":[]});
     let package = package_fixture(
         &document,
         &bytes,

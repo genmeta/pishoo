@@ -36,7 +36,7 @@ pub(super) fn offered(selected: &[Value]) -> Value {
 }
 
 pub(super) fn catalog(profile: &IdentityProfile) -> Result<Value, Failure> {
-    let db = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    let db = crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| fail(500, error.to_string()))?;
     let author: bool = db
         .query_row(

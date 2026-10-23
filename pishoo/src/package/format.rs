@@ -1,5 +1,5 @@
-//! Pishoo WEBC v3 profile: immutable container, publication signature and route binding.
-// Protocol matches the independent store's WEBC package validation.
+//! Standard ZIP release packages, signature verification and runtime projection.
+// Protocol matches the independent store's ZIP package validation.
 use std::collections::{BTreeMap, HashSet};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -34,6 +34,9 @@ fn webc_u64(bytes: &[u8], offset: usize) -> Result<usize> {
 }
 
 pub(crate) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
+    let original = bytes;
+    let projection = waz_convert(bytes).map_err(|error| invalid(&error.to_string()))?;
+    let bytes = projection.as_slice();
     // The dependency has lazy readers. Bound and authenticate every top-level span
     // before using them, including rejecting unindexed sections and trailing bytes.
     if bytes.len() > PACKAGE_LIMIT
@@ -120,8 +123,20 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
     }
     // Use an iterative bounded walk before any recursive dependency validator.
     let mut count = 0;
-    for volume in container.volumes().values() {
-        volume_files(volume, "/", &mut count)?;
+    for (name, volume) in container.volumes() {
+        let before = count;
+        let files = volume_files(&volume, "/", &mut count)?;
+        if name == "metadata"
+            && (files.is_empty()
+                || count - before != files.len()
+                || files
+                    .keys()
+                    .any(|path| !matches!(path.as_str(), "/README.md" | "/CHANGELOG.md")))
+        {
+            return Err(invalid(
+                "metadata volume may only contain README.md and CHANGELOG.md",
+            ));
+        }
     }
     container
         .validate()
@@ -164,10 +179,13 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
         .unwrap_or_default();
     if mappings.len() > 1
         || mappings.iter().any(|m| {
-            m.mount_path != "/public" || m.from.is_some() || m.volume_name == "pishoo-signature"
+            m.mount_path != "/public"
+                || m.from.is_some()
+                || matches!(m.volume_name.as_str(), "pishoo-signature" | "metadata")
         })
         || container.volumes().keys().any(|name| {
-            name != "pishoo-signature" && !mappings.iter().any(|m| &m.volume_name == name)
+            !matches!(name.as_str(), "pishoo-signature" | "metadata")
+                && !mappings.iter().any(|m| &m.volume_name == name)
         })
     {
         return Err(invalid("only an optional local /public mapping is allowed"));
@@ -244,9 +262,8 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
             return Err(invalid("OpenAPI version differs from package version"));
         }
         validate_declarations(&document)?;
-        validate_imports(&container.get_atom("backend").unwrap(), &metadata["host"])?;
     }
-    verify_signature(bytes, &container, &metadata)?;
+    verify_signature(original, &container, &metadata)?;
     Ok(container)
 }
 
@@ -399,27 +416,11 @@ pub(crate) fn package_file(container: &webc::Container, path: &str) -> Result<by
         .ok_or_else(|| invalid("missing mapped file"))
 }
 
-// Hash raw authenticated content sections, preserving every CBOR field, file,
-// path and timestamp. The index and unmapped signature volume are excluded;
-// they must already have passed the strict span/checksum checks above.
-fn package_payload(bytes: &[u8]) -> String {
-    let reader = webc::v3::read::OwnedReader::parse(bytes.to_vec()).unwrap();
-    let index = reader.index();
-    let mut hash = Sha256::new();
-    hash.update(b"\0webc003");
-    for entry in std::iter::once(&index.manifest)
-        .chain(std::iter::once(&index.atoms))
-        .chain(
-            index
-                .volumes
-                .iter()
-                .filter(|(name, _)| name.as_str() != "pishoo-signature")
-                .map(|(_, entry)| entry),
-        )
-    {
-        hash.update(&bytes[entry.span.start..entry.span.end()]);
-    }
-    format!("{:x}", hash.finalize())
+// Hash sorted uncompressed ZIP files. Signature bytes and ZIP compression or
+// timestamp metadata are outside the payload digest.
+fn package_payload(bytes: &[u8]) -> Result<String> {
+    let files = waz_read(bytes).map_err(|error| invalid(&error.to_string()))?;
+    Ok(waz_payload(&files))
 }
 
 fn verify_signature(bytes: &[u8], container: &webc::Container, document: &Value) -> Result<()> {
@@ -491,8 +492,8 @@ fn verify_signature(bytes: &[u8], container: &webc::Container, document: &Value)
             matches!(name, x509_parser::extensions::GeneralName::DNSName(name) if *name == publisher))) {
         return Err(invalid("signer certificate and publisher disagree"));
     }
-    let payload = package_payload(bytes);
-    let mut input = b"pishoo-webc-signature-v1\0".to_vec();
+    let payload = package_payload(bytes)?;
+    let mut input = b"pishoo-waz-signature-v1\0".to_vec();
     for i in (0..payload.len()).step_by(2) {
         input.push(u8::from_str_radix(&payload[i..i + 2], 16).unwrap());
     }
@@ -526,6 +527,7 @@ pub(crate) fn package_metadata(container: &webc::Container) -> Result<Value> {
     if !release_version(version) {
         return Err(invalid("version must be MAJOR.MINOR.PATCH"));
     }
+    // Older signed packages may contain host purposes; ignore them entirely.
     let allowed = ["title", "dependencies", "changelog", "entry", "host"];
     if annotation
         .as_object()
@@ -606,25 +608,6 @@ pub(crate) fn package_metadata(container: &webc::Container) -> Result<Value> {
         value["entry"] = "/".into();
     } else if annotation.get("entry").is_some() {
         return Err(invalid("entry requires public resources"));
-    }
-    if has_lib {
-        if container.get_volume("pishoo-signature").is_some() || annotation.get("host").is_some() {
-            let host = annotation["host"]
-                .as_object()
-                .ok_or_else(|| invalid("backend requires host purposes"))?;
-            for (key, purpose) in host {
-                if !matches!(
-                    key.as_str(),
-                    "private-storage" | "request-identity" | "signatures"
-                ) || purpose.as_str().is_none_or(|s| s.trim().is_empty())
-                {
-                    return Err(invalid("unknown or unexplained host capability"));
-                }
-            }
-            value["host"] = annotation["host"].clone();
-        }
-    } else if annotation.get("host").is_some() {
-        return Err(invalid("host purposes require a backend"));
     }
     value["has_lib"] = has_lib.into();
     value["has_app"] = has_app.into();
@@ -796,41 +779,450 @@ fn validate_declarations(document: &Value) -> Result<()> {
     Ok(())
 }
 
-fn validate_imports(bytes: &[u8], host: &Value) -> Result<()> {
-    let host = host.as_object().unwrap();
-    let mut depth = 0;
-    for item in wasmparser::Parser::new(0).parse_all(bytes) {
-        match item.map_err(|_| invalid("malformed component imports"))? {
-            wasmparser::Payload::ModuleSection { .. }
-            | wasmparser::Payload::ComponentSection { .. } => depth += 1,
-            wasmparser::Payload::End(_) if depth > 0 => depth -= 1,
-            wasmparser::Payload::ComponentImportSection(imports) if depth == 0 => {
-                for import in imports {
-                    let import = import.map_err(|_| invalid("malformed import"))?;
-                    let capability = if import.name.name.starts_with("wasi:filesystem/") {
-                        Some("private-storage")
-                    } else if import
-                        .name
-                        .name
-                        .starts_with("pishoo:identity/request-identity@")
-                    {
-                        Some("request-identity")
-                    } else if import.name.name.starts_with("pishoo:identity/signatures@") {
-                        Some("signatures")
-                    } else {
-                        None
-                    };
-                    if capability.is_some_and(|key| !host.contains_key(key)) {
-                        return Err(invalid(
-                            "imported host capability has no purpose declaration",
-                        ));
-                    }
-                }
+// WAZ v1 boundary codec, kept in sync with Jade archive.rs.
+
+type WazResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+const WAZ_LIMIT: usize = 64 * 1024 * 1024;
+
+fn waz_is_zip(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"PK\x03\x04")
+}
+
+fn waz_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 1024
+        && !path.contains(['\\', ':', '?', '#', '%'])
+        && !path.chars().any(|c| c.is_control() || c.is_whitespace())
+        && path.split('/').count() <= 33
+        && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
+        && (matches!(
+            path,
+            "manifest.json" | "signature.json" | "backend.wasm" | "README.md" | "CHANGELOG.md"
+        ) || path.starts_with("public/"))
+}
+
+fn waz_read(bytes: &[u8]) -> WazResult<std::collections::BTreeMap<String, Vec<u8>>> {
+    use std::io::Read;
+
+    if bytes.len() > WAZ_LIMIT || !waz_is_zip(bytes) || bytes.len() < 22 {
+        return Err("expected a bounded standard ZIP package".into());
+    }
+    // This profile uses ordinary single-disk ZIP, without ZIP64, comments,
+    // self-extracting prefixes or trailing data. Every byte belongs to the archive.
+    let end = bytes.len() - 22;
+    let eocd = &bytes[end..];
+    let u16_at = |offset: usize| u16::from_le_bytes(eocd[offset..offset + 2].try_into().unwrap());
+    let u32_at =
+        |offset: usize| u32::from_le_bytes(eocd[offset..offset + 4].try_into().unwrap()) as usize;
+    let count = u16_at(10) as usize;
+    let directory_size = u32_at(12);
+    let directory_start = u32_at(16);
+    if eocd[..4] != *b"PK\x05\x06"
+        || u16_at(4) != 0
+        || u16_at(6) != 0
+        || u16_at(20) != 0
+        || u16_at(8) as usize != count
+        || count == 0
+        || count > 4096
+        || directory_start.checked_add(directory_size) != Some(end)
+    {
+        return Err("invalid ZIP end record or entry budget".into());
+    }
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+    if archive.len() != count || archive.offset() != 0 {
+        return Err("ZIP central directory disagrees with archive".into());
+    }
+    let mut files = std::collections::BTreeMap::new();
+    let mut spans = std::collections::BTreeMap::new();
+    let mut central_spans = std::collections::BTreeMap::new();
+    let mut remaining = WAZ_LIMIT;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        let name = std::str::from_utf8(entry.name_raw())?.to_owned();
+        if !waz_path(&name)
+            || entry.is_dir()
+            || entry.encrypted()
+            || !matches!(
+                entry.compression(),
+                zip::CompressionMethod::Stored | zip::CompressionMethod::Deflated
+            )
+            || entry
+                .unix_mode()
+                .is_some_and(|mode| !matches!(mode & 0o170000, 0 | 0o100000))
+            || files.contains_key(&name)
+        {
+            return Err(format!("invalid, duplicate or unsupported ZIP entry: {name}").into());
+        }
+        let limit = match name.as_str() {
+            "manifest.json" => 1024 * 1024,
+            "signature.json" => 64 * 1024,
+            "backend.wasm" => WAZ_LIMIT,
+            _ => 16 * 1024 * 1024,
+        }
+        .min(remaining);
+        let size = usize::try_from(entry.size())?;
+        if size > limit {
+            return Err(format!("ZIP entry exceeds its decompressed size limit: {name}").into());
+        }
+        let start = usize::try_from(entry.header_start())?;
+        let data = usize::try_from(entry.data_start())?;
+        let stop = data
+            .checked_add(usize::try_from(entry.compressed_size())?)
+            .ok_or("ZIP span overflow")?;
+        let header = bytes
+            .get(start..start.checked_add(30).ok_or("ZIP header overflow")?)
+            .ok_or("truncated ZIP local header")?;
+        let name_length = u16::from_le_bytes(header[26..28].try_into().unwrap()) as usize;
+        let extra_length = u16::from_le_bytes(header[28..30].try_into().unwrap()) as usize;
+        let flags = u16::from_le_bytes(header[6..8].try_into().unwrap());
+        let central_start = usize::try_from(entry.central_header_start())?;
+        let central = bytes
+            .get(
+                central_start
+                    ..central_start
+                        .checked_add(46)
+                        .ok_or("ZIP directory overflow")?,
+            )
+            .ok_or("truncated ZIP central header")?;
+        let central_length = 46
+            + u16::from_le_bytes(central[28..30].try_into().unwrap()) as usize
+            + u16::from_le_bytes(central[30..32].try_into().unwrap()) as usize
+            + u16::from_le_bytes(central[32..34].try_into().unwrap()) as usize;
+        let central_end = central_start
+            .checked_add(central_length)
+            .ok_or("ZIP directory span overflow")?;
+        if central[..4] != *b"PK\x01\x02"
+            || central_start < directory_start
+            || central_end > end
+            || u16::from_le_bytes(central[8..10].try_into().unwrap()) != flags
+            || central_spans.insert(central_start, central_end).is_some()
+        {
+            return Err("invalid ZIP central header".into());
+        }
+        if header[..4] != *b"PK\x03\x04"
+            || flags & !0x0806 != 0 // UTF-8 and Deflate level hints only; no encryption/descriptors.
+            || bytes.get(start + 30..start + 30 + name_length) != Some(name.as_bytes())
+            || start + 30 + name_length + extra_length != data
+            || u16::from_le_bytes(header[8..10].try_into().unwrap()) != if entry.compression() == zip::CompressionMethod::Stored { 0 } else { 8 }
+            || u32::from_le_bytes(header[14..18].try_into().unwrap()) != entry.crc32()
+            || u32::from_le_bytes(header[18..22].try_into().unwrap()) as u64 != entry.compressed_size()
+            || u32::from_le_bytes(header[22..26].try_into().unwrap()) as u64 != entry.size()
+            || stop > directory_start || spans.insert(start, stop).is_some()
+        {
+            return Err("ZIP local header disagrees with the central directory".into());
+        }
+        let mut content = Vec::new();
+        entry
+            .by_ref()
+            .take(size as u64 + 1)
+            .read_to_end(&mut content)?;
+        if content.len() != size {
+            return Err("ZIP decompressed size disagrees with header".into());
+        }
+        remaining -= content.len();
+        files.insert(name, content);
+    }
+    let mut cursor = 0;
+    for (start, stop) in spans {
+        if start != cursor {
+            return Err("overlapping or unindexed ZIP data".into());
+        }
+        cursor = stop;
+    }
+    if cursor != directory_start {
+        return Err("unindexed ZIP data before directory".into());
+    }
+    for (start, stop) in central_spans {
+        if start != cursor {
+            return Err("overlapping or unindexed ZIP directory".into());
+        }
+        cursor = stop;
+    }
+    if cursor != end {
+        return Err("unindexed ZIP directory data".into());
+    }
+    for name in files.keys() {
+        let mut ancestor = name.as_str();
+        while let Some((parent, _)) = ancestor.rsplit_once('/') {
+            if files.contains_key(parent) {
+                return Err("ZIP file conflicts with a directory".into());
             }
-            _ => {}
+            ancestor = parent;
         }
     }
-    Ok(())
+    if !files.contains_key("manifest.json") {
+        return Err("ZIP package requires manifest.json".into());
+    }
+    Ok(files)
+}
+
+fn waz_payload(files: &std::collections::BTreeMap<String, Vec<u8>>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"pishoo-waz-payload-v1\0");
+    for (name, bytes) in files
+        .iter()
+        .filter(|(name, _)| name.as_str() != "signature.json")
+    {
+        digest.update((name.len() as u32).to_le_bytes());
+        digest.update(name.as_bytes());
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(Sha256::digest(bytes));
+    }
+    format!("{:x}", digest.finalize())
+}
+
+#[cfg(test)]
+pub(super) fn waz_write(files: &std::collections::BTreeMap<String, Vec<u8>>) -> WazResult<Vec<u8>> {
+    use std::io::Write;
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .compression_level(Some(6))
+        .last_modified_time(zip::DateTime::default())
+        .unix_permissions(0o644);
+    for (name, bytes) in files {
+        writer.start_file(name, options)?;
+        writer.write_all(bytes)?;
+    }
+    let bytes = writer.finish()?.into_inner();
+    waz_read(&bytes)?;
+    Ok(bytes)
+}
+
+fn waz_directory(
+    files: &std::collections::BTreeMap<String, Vec<u8>>,
+    prefix: &str,
+) -> WazResult<webc::v3::write::Directory<'static>> {
+    use webc::v3::{
+        Timestamps,
+        write::{DirEntry, Directory, FileEntry},
+    };
+    let mut children = std::collections::BTreeMap::new();
+    for (name, bytes) in files {
+        let Some(relative) = name.strip_prefix(prefix) else {
+            continue;
+        };
+        if let Some((directory, _)) = relative.split_once('/') {
+            let key = directory.parse()?;
+            if let std::collections::btree_map::Entry::Vacant(entry) = children.entry(key) {
+                entry.insert(DirEntry::Dir(waz_directory(
+                    files,
+                    &format!("{prefix}{directory}/"),
+                )?));
+            }
+        } else {
+            children.insert(
+                relative.parse()?,
+                DirEntry::File(FileEntry::owned(bytes.clone(), Timestamps::default())),
+            );
+        }
+    }
+    Ok(Directory::new(children, Timestamps::default()))
+}
+
+// Runtime tests load the same internal resource projection as installed packages.
+#[cfg(test)]
+pub(crate) fn runtime_fixture(bytes: &[u8]) -> Vec<u8> {
+    waz_convert(bytes).unwrap()
+}
+
+fn waz_convert(bytes: &[u8]) -> WazResult<Vec<u8>> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
+    use webc::v3::{
+        SignatureAlgorithm, Timestamps,
+        write::{Directory, FileEntry, Writer},
+    };
+
+    let files = waz_read(bytes)?;
+    let document: Value = serde_json::from_slice(&files["manifest.json"])?;
+    if document["format"] != "waz/1"
+        || document.as_object().is_none_or(|v| {
+            v.keys().any(|k| {
+                !matches!(
+                    k.as_str(),
+                    "format" | "package" | "dependencies" | "frontend" | "backend"
+                )
+            })
+        })
+    {
+        return Err("unsupported WAZ manifest format or field".into());
+    }
+    let package = document["package"]
+        .as_object()
+        .ok_or("manifest package requires an object")?;
+    if package.keys().any(|k| {
+        !matches!(
+            k.as_str(),
+            "author"
+                | "name"
+                | "version"
+                | "title"
+                | "description"
+                | "license"
+                | "release-notes"
+                | "repository"
+        )
+    }) {
+        return Err("unknown WAZ package field".into());
+    }
+    let field = |name: &str| {
+        package
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| format!("missing WAZ package {name}"))
+    };
+    let mut wapm = json!({"name":format!("{}/{}", field("author")?, field("name")?),
+        "version":field("version")?,"description":field("description")?,"license":field("license")?});
+    if let Some(repository) = package.get("repository") {
+        wapm["repository"] = repository.clone();
+    }
+    if files.contains_key("README.md") {
+        wapm["readme"] = json!({"volume":"metadata","path":"/README.md"});
+    }
+    let dependencies = document["dependencies"]
+        .as_array()
+        .filter(|v| v.len() <= 100)
+        .ok_or("WAZ dependencies requires an array with at most 100 packages")?;
+    let mut dependencies_out = Vec::new();
+    for dependency in dependencies {
+        if dependency.as_object().is_none_or(|v| {
+            v.len() != 3
+                || !v.contains_key("author")
+                || !v.contains_key("name")
+                || !v.contains_key("version")
+        }) {
+            return Err("WAZ dependency requires author, name and version".into());
+        }
+        dependencies_out.push(json!({"publisher":dependency["author"],"name":dependency["name"],"version":dependency["version"]}));
+    }
+    let has_frontend = document.get("frontend").is_some();
+    let has_backend = document.get("backend").is_some();
+    if (has_frontend && document["frontend"] != "public")
+        || (has_backend && document["backend"] != "backend.wasm")
+        || has_backend != files.contains_key("backend.wasm")
+        || has_frontend != files.keys().any(|name| name.starts_with("public/"))
+        || (has_frontend && !files.contains_key("public/index.html"))
+        || (!has_frontend && !has_backend)
+    {
+        return Err("WAZ manifest runtime paths disagree with package files".into());
+    }
+    let mut annotation = json!({"title":field("title")?,"changelog":field("release-notes")?,"dependencies":dependencies_out});
+    if has_frontend {
+        annotation["entry"] = "/".into();
+    }
+    let mut manifest = json!({"package":{"wapm":wapm,"pishoo":annotation,
+        "fs":if has_frontend {json!([{"volume_name":"public","mount_path":"/public"}])} else {json!([])}}});
+    let mut atoms = std::collections::BTreeMap::new();
+    if let Some(backend) = files.get("backend.wasm") {
+        manifest["atoms"] = json!({"backend":{"kind":"https://webc.org/kind/wasm","signature":format!("sha256:{}", STANDARD.encode(Sha256::digest(backend)))}});
+        atoms.insert(
+            "backend".parse()?,
+            FileEntry::owned(backend.clone(), Timestamps::default()),
+        );
+    }
+    let manifest: webc::metadata::Manifest = serde_json::from_value(manifest)?;
+    let mut writer = Writer::default()
+        .write_manifest(&manifest)?
+        .write_atoms(atoms)?;
+    if has_frontend {
+        writer.write_volume("public", waz_directory(&files, "public/")?)?;
+    }
+    let documents = files
+        .iter()
+        .filter(|(name, _)| matches!(name.as_str(), "README.md" | "CHANGELOG.md"))
+        .map(|(name, data)| Ok((name.parse()?, data.clone().into())))
+        .collect::<WazResult<std::collections::BTreeMap<_, _>>>()?;
+    if !documents.is_empty() {
+        writer.write_volume("metadata", Directory::new(documents, Timestamps::default()))?;
+    }
+    if let Some(signature) = files.get("signature.json") {
+        writer.write_volume(
+            "pishoo-signature",
+            Directory::new(
+                std::collections::BTreeMap::from([(
+                    "signature.json".parse()?,
+                    signature.clone().into(),
+                )]),
+                Timestamps::default(),
+            ),
+        )?;
+    }
+    // Keep the existing in-memory resource API and installation snapshots. These
+    // bytes are an internal projection, never a signed archive or published file.
+    Ok(writer.finish(SignatureAlgorithm::None)?.to_vec())
+}
+
+#[cfg(test)]
+pub(super) fn waz_export(
+    container: &webc::Container,
+) -> WazResult<std::collections::BTreeMap<String, Vec<u8>>> {
+    use serde_json::json;
+    let old = serde_json::to_value(container.manifest())?;
+    let wapm = &old["package"]["wapm"];
+    let annotation = &old["package"]["pishoo"];
+    let (author, name) = wapm["name"]
+        .as_str()
+        .and_then(|v| v.split_once('/'))
+        .ok_or("package requires author/name")?;
+    let mut package = json!({"author":author,"name":name,"version":wapm["version"],"description":wapm["description"],
+        "license":wapm["license"],"title":annotation["title"],"release-notes":annotation["changelog"]});
+    if let Some(repository) = wapm.get("repository") {
+        package["repository"] = repository.clone();
+    }
+    let dependencies = annotation["dependencies"]
+        .as_array()
+        .ok_or("missing dependencies")?
+        .iter()
+        .map(|v| json!({"author":v["publisher"],"name":v["name"],"version":v["version"]}))
+        .collect::<Vec<_>>();
+    let mut manifest = json!({"format":"waz/1","package":package,"dependencies":dependencies});
+    let mut files = std::collections::BTreeMap::new();
+    if let Some(backend) = container.get_atom("backend") {
+        manifest["backend"] = "backend.wasm".into();
+        files.insert("backend.wasm".into(), backend.to_vec());
+    }
+    if let Some(volume) = container.get_volume("public") {
+        manifest["frontend"] = "public".into();
+        let mut pending = vec!["/".to_owned()];
+        while let Some(directory) = pending.pop() {
+            for (name, _, metadata) in volume
+                .read_dir(directory.as_str())
+                .ok_or("unreadable resource directory")?
+            {
+                let path = format!("{directory}{name}");
+                match metadata {
+                    webc::Metadata::Dir { .. } => pending.push(format!("{path}/")),
+                    webc::Metadata::File { .. } => {
+                        files.insert(
+                            format!("public{path}"),
+                            volume
+                                .read_file(path.as_str())
+                                .ok_or("unreadable resource")?
+                                .0
+                                .to_vec(),
+                        );
+                    }
+                    _ => return Err("unsupported resource type".into()),
+                }
+            }
+        }
+    }
+    if let Some(volume) = container.get_volume("metadata") {
+        for name in ["README.md", "CHANGELOG.md"] {
+            if let Some((data, _)) = volume.read_file(format!("/{name}")) {
+                files.insert(name.into(), data.to_vec());
+            }
+        }
+    }
+    files.insert(
+        "manifest.json".into(),
+        serde_json::to_vec_pretty(&manifest)?,
+    );
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -838,87 +1230,148 @@ mod tests {
     use serde_json::json;
     use webc::v3::{
         SignatureAlgorithm, Timestamps,
-        write::{Directory, FileEntry, Writer},
+        write::{FileEntry, Writer},
     };
 
     use super::*;
 
     #[test]
-    fn signed_lib_reads_embedded_openapi_without_a_sidecar() {
-        let document = serde_json::to_vec(&json!({
-            "openapi":"3.1.0", "info":{"title":"Embedded API","version":"1.0.0"},
-            "paths":{}
-        }))
-        .unwrap();
-        let mut backend = b"\0asm\x0d\0\x01\0".to_vec();
-        let mut payload = vec![b"pishoo:openapi".len() as u8];
-        payload.extend_from_slice(b"pishoo:openapi");
-        payload.extend_from_slice(&document);
-        backend.push(0);
-        let mut length = payload.len();
-        while length >= 0x80 {
-            backend.push((length as u8 & 0x7f) | 0x80);
-            length >>= 7;
-        }
-        backend.push(length as u8);
-        backend.extend_from_slice(&payload);
-        let authority = crate::package::tests::publisher("alice.dhttp.net", 'a');
-        let manifest: webc::metadata::Manifest = serde_json::from_value(json!({
+    fn signed_lib_reads_embedded_openapi_without_host_purposes_or_a_sidecar() {
+        for host in [
+            None,
+            Some(json!({"unknown-capability":""})),
+            Some(json!(false)),
+        ] {
+            let document = serde_json::to_vec(&json!({
+                "openapi":"3.1.0", "info":{"title":"Embedded API","version":"1.0.0"},
+                "paths":{}
+            }))
+            .unwrap();
+            let mut backend = b"\0asm\x0d\0\x01\0".to_vec();
+            let mut payload = vec![b"pishoo:openapi".len() as u8];
+            payload.extend_from_slice(b"pishoo:openapi");
+            payload.extend_from_slice(&document);
+            backend.push(0);
+            let mut length = payload.len();
+            while length >= 0x80 {
+                backend.push((length as u8 & 0x7f) | 0x80);
+                length >>= 7;
+            }
+            backend.push(length as u8);
+            backend.extend_from_slice(&payload);
+            let authority = crate::package::tests::publisher("alice.dhttp.net", 'a');
+            let mut annotation =
+                json!({"title":"Embedded","changelog":"First release","dependencies":[]});
+            if let Some(host) = host {
+                annotation["host"] = host;
+            }
+            let manifest: webc::metadata::Manifest = serde_json::from_value(json!({
             "package":{
                 "wapm":{"name":"alice.dhttp.net/embedded","version":"1.0.0","description":"Embedded API","license":"MIT"},
-                "pishoo":{"title":"Embedded","changelog":"First release","dependencies":[],"host":{}},
+                "pishoo":annotation,
                 "fs":[]
             },
             "atoms":{"backend":{"kind":"https://webc.org/kind/wasm","signature":format!("sha256:{}",STANDARD.encode(Sha256::digest(&backend)))}}
         })).unwrap();
-        let atoms = || {
-            BTreeMap::from([(
-                "backend".parse().unwrap(),
-                FileEntry::borrowed(&backend, Timestamps::default()),
-            )])
-        };
-        let unsigned = Writer::default()
-            .write_manifest(&manifest)
-            .unwrap()
-            .write_atoms(atoms())
-            .unwrap()
-            .finish(SignatureAlgorithm::None)
-            .unwrap();
-        let mut input = b"pishoo-webc-signature-v1\0".to_vec();
-        let digest = package_payload(&unsigned);
-        for index in (0..digest.len()).step_by(2) {
-            input.push(u8::from_str_radix(&digest[index..index + 2], 16).unwrap());
-        }
-        let signature = authority
-            .sign(qtls::SignatureScheme::ECDSA_NISTP256_SHA256, &input)
-            .unwrap();
-        let envelope = json!({"version":1,
+            let atoms = || {
+                BTreeMap::from([(
+                    "backend".parse().unwrap(),
+                    FileEntry::borrowed(&backend, Timestamps::default()),
+                )])
+            };
+            let unsigned = Writer::default()
+                .write_manifest(&manifest)
+                .unwrap()
+                .write_atoms(atoms())
+                .unwrap()
+                .finish(SignatureAlgorithm::None)
+                .unwrap();
+            let projection =
+                webc::Container::from_bytes_and_version(unsigned, webc::Version::V3).unwrap();
+            let mut files = waz_export(&projection).unwrap();
+            let unsigned = waz_write(&files).unwrap();
+            let mut input = b"pishoo-waz-signature-v1\0".to_vec();
+            let digest = package_payload(&unsigned).unwrap();
+            for index in (0..digest.len()).step_by(2) {
+                input.push(u8::from_str_radix(&digest[index..index + 2], 16).unwrap());
+            }
+            let signature = authority
+                .sign(qtls::SignatureScheme::ECDSA_NISTP256_SHA256, &input)
+                .unwrap();
+            let envelope = json!({"version":1,
             "certificates":authority.certificates().iter().map(|cert|STANDARD.encode(cert.as_ref())).collect::<Vec<_>>(),
             "signature":STANDARD.encode(signature)});
-        let reader = webc::v3::read::OwnedReader::parse(unsigned.clone()).unwrap();
-        let entry = &reader.index().manifest;
-        let bytes = Writer::default()
-            .write_raw_manifest(unsigned[entry.span.start + 41..entry.span.end()].to_vec())
-            .write_atoms(atoms())
-            .unwrap()
-            .with_volume(
-                "pishoo-signature",
-                Directory::new(
-                    BTreeMap::from([(
-                        "signature.json".parse().unwrap(),
-                        serde_json::to_vec(&envelope).unwrap().into(),
-                    )]),
-                    Timestamps::default(),
+            files.insert(
+                "signature.json".into(),
+                serde_json::to_vec(&envelope).unwrap(),
+            );
+            let bytes = waz_write(&files).unwrap();
+            let package = read_package(&bytes).unwrap();
+            assert_eq!(
+                package_file(&package, "/metadata/openapi.json").unwrap(),
+                document
+            );
+            assert!(package.get_volume("metadata").is_none());
+            assert!(package_metadata(&package).unwrap().get("host").is_none());
+        }
+    }
+
+    #[test]
+    fn signed_packages_accept_only_optional_readme_and_changelog_documents() {
+        let authority = crate::package::tests::publisher("alice.dhttp.net", 'a');
+        for names in [
+            vec![],
+            vec!["README.md"],
+            vec!["CHANGELOG.md"],
+            vec!["README.md", "CHANGELOG.md"],
+        ] {
+            let manifest = json!({"format":"waz/1","package":{
+                "author":"alice.dhttp.net","name":"docs","version":"1.0.0","description":"Documentation","license":"MIT",
+                "title":"Docs","release-notes":"First release"},"dependencies":[],"frontend":"public"});
+            let mut files = BTreeMap::from([
+                (
+                    "manifest.json".to_owned(),
+                    serde_json::to_vec(&manifest).unwrap(),
                 ),
-            )
-            .unwrap()
-            .finish(SignatureAlgorithm::None)
-            .unwrap();
-        let package = read_package(&bytes).unwrap();
-        assert_eq!(
-            package_file(&package, "/metadata/openapi.json").unwrap(),
-            document
-        );
-        assert!(package.get_volume("metadata").is_none());
+                ("public/index.html".to_owned(), b"<h1>Docs</h1>".to_vec()),
+            ]);
+            for name in &names {
+                files.insert((*name).to_owned(), b"# Docs".to_vec());
+            }
+            let digest = waz_payload(&files);
+            let mut input = b"pishoo-waz-signature-v1\0".to_vec();
+            for index in (0..digest.len()).step_by(2) {
+                input.push(u8::from_str_radix(&digest[index..index + 2], 16).unwrap());
+            }
+            let signature = authority
+                .sign(qtls::SignatureScheme::ECDSA_NISTP256_SHA256, &input)
+                .unwrap();
+            files.insert("signature.json".into(),serde_json::to_vec(&json!({"version":1,
+                "certificates":authority.certificates().iter().map(|c|STANDARD.encode(c.as_ref())).collect::<Vec<_>>(),
+                "signature":STANDARD.encode(signature)})).unwrap());
+            let bytes = waz_write(&files).unwrap();
+            let package = read_package(&bytes).unwrap();
+            assert_eq!(package.get_volume("metadata").is_some(), !names.is_empty());
+            for name in &names {
+                assert_eq!(
+                    package
+                        .get_volume("metadata")
+                        .unwrap()
+                        .read_file(format!("/{name}"))
+                        .unwrap()
+                        .0
+                        .as_ref(),
+                    b"# Docs"
+                );
+            }
+            if let Some(name) = names.first() {
+                files.insert((*name).into(), b"# Changed docs".to_vec());
+                assert!(read_package(&waz_write(&files).unwrap()).is_err());
+            }
+            assert!(
+                read_package(&waz_convert(&bytes).unwrap()).is_err(),
+                "raw WEBC packages are unsupported"
+            );
+        }
     }
 }

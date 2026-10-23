@@ -57,9 +57,8 @@ fn lib_metadata(package: &webc::Container, id: Option<&str>) -> serde_json::Valu
         Err(error) => return serde_json::json!({"id":id,"error":error.to_string()}),
     };
     // A runtime snapshot contains installed resources and parsed metadata only.
-    // It cannot claim to retain the original manifest's host-purpose text.
+    // It cannot claim to retain the original release notes.
     if package.get_volume("pishoo-signature").is_none() {
-        value.as_object_mut().unwrap().remove("host");
         value.as_object_mut().unwrap().remove("changelog");
     }
     let mut endpoints = Vec::new();

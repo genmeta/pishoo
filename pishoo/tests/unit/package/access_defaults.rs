@@ -101,7 +101,7 @@ async fn package_upgrades_replace_apis_and_capabilities_without_changing_or_bloc
         };
         let authority = publisher(author, 'a');
         let mut doc = json!({"openapi":"3.1.0","info":{"title":"Profile","version":"1.0.0","description":"API evolution","license":{"name":"MIT"}},
-        "x-pishoo":{"kind":if frontend_first {"app"} else {"lib"},"publisher":author,"name":"profile","host":{},"dependencies":[]},
+        "x-pishoo":{"kind":if frontend_first {"app"} else {"lib"},"publisher":author,"name":"profile","dependencies":[]},
         "x-access-groups":{"read":{"title":"Old read","operations":["nickname"]},"legacy":{"title":"Legacy","operations":["obsolete"]}},
         "paths":{
             format!("{prefix}/nickname"):{"get":{"operationId":"nickname","summary":"Nickname","x-access-group":"read"}},

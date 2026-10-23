@@ -1,12 +1,12 @@
 //! Identity provenance and persistence checks against the actual Journal component.
 use super::*;
-use crate::package::{
-    install_package, remove_package,
-    tests::{package_fixture, publisher},
+use crate::{
+    package::{
+        install_package, remove_package,
+        tests::{package_fixture, publisher},
+    },
+    test_credentials as network_credentials,
 };
-
-#[path = "../../../support/network_credentials.rs"]
-mod network_credentials;
 
 async fn journal_credentials(
     root: &Path,
@@ -231,13 +231,17 @@ fn journal_lib(directory: &Path) -> Arc<Lib> {
         Lib::load(
             Arc::new(WasmRuntime::new().unwrap()),
             "alice.smith.dhttp.net/journal".into(),
-            &journal_package("lib"),
+            &runtime_fixture(&journal_package("lib")),
             directory,
         )
         .unwrap(),
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keep HTTP fixture parameters explicit."
+)]
 async fn journal_call(
     lib: &Arc<Lib>,
     tasks: &TaskTracker,

@@ -48,13 +48,12 @@ async fn run() -> Result<(), Failure> {
         .into_iter()
         .filter(|_| !h3_only)
     {
-        if qprotocol::Dock::global().find_socket(bound).is_some() {
-            if let Err(error) = mdns
+        if qprotocol::Dock::global().find_socket(bound).is_some()
+            && let Err(error) = mdns
                 .upsert(ddns::mdns::MdnsBinding::new(device.name(), bound.ip()))
                 .await
-            {
-                eprintln!("client mDNS {} at {}: {error}", device.name(), bound.ip());
-            }
+        {
+            eprintln!("client mDNS {} at {}: {error}", device.name(), bound.ip());
         }
     }
     let home = dhttp_home::DhttpHome::for_user_home_dir(

@@ -178,7 +178,7 @@ async fn store_get(endpoint: &dhttp::Endpoint, path: &str, limit: usize) -> Resu
         let owner = dhttp_home::certificate::OwnerHash::try_from(STORE_OWNER)
             .map_err(|_| Error::InvalidIdentity("invalid pinned store identity".into()))?;
         let content_type = if path.ends_with(".waz") {
-            "application/webc"
+            "application/zip"
         } else {
             "application/json"
         };

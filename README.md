@@ -30,7 +30,7 @@ and WASM components. See the [Pishoo documentation](https://docs.dhttp.net/en/do
 
 ### Local development build
 
-Dependencies are resolved from Cargo.lock, including the fixed Git revision of daccess on feat/contact-acl-v2; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
+Dependencies are resolved from Cargo.lock, including the fixed Git revision of daccess 0.2.0; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
 
 ```sh
 git clone --branch release/v0.9.0.preview.5 https://github.com/genmeta/pishoo.git
@@ -41,6 +41,10 @@ cargo check --locked --workspace --all-targets
 ```
 
 The host build is independent of frontend tooling. Business products live in six independent repositories: Workspace, Introduction, Profile, Message, Calendar and Journal. Calendar and Journal each keep their App and Lib together, publishing one signed .waz per product. Pishoo contains native services, reserved std APIs, WASM runtime, WIT/SDK and transport test fixtures. Host release packages contain no business App/Lib artifacts; install Workspace explicitly after starting Pishoo, as shown below. First-time host builds need access to GitHub and crates.io. Run `./target/debug/pishoo` with credentials in your account’s `~/.dhttp`. Ancestor or user-level Cargo path patches can override registry dependencies; use a checkout outside those configured directories when reproducing it.
+
+### Package releases
+
+New `.waz` releases are standard ZIP archives with a signed JSON manifest, runtime files and optional README.md/CHANGELOG.md. See [WAZ v1](WAZ.md). Publication and installation reject legacy WEBC releases; rebuild application packages and update both registry and host readers before rollout. Existing installed resources and private data are retained. This preparation does not migrate, delete or re-sign stored releases.
 
 ### Install Pishoo
 

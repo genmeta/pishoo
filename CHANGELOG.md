@@ -13,8 +13,10 @@
   methods, and replace or clear capability declarations while retaining existing
   ACL rules. These rules continue to govern requests after the upgrade.
 - Use `author`, `author_owner_hash` and `dependencies[].author` in store metadata,
-  and download signed packages through `package.waz`. WEBC v3 contents, signatures
-  and the `application/webc` media type remain unchanged.
+  and download signed packages through `package.waz`. Releases now use standard
+  ZIP, `application/zip`, a signed JSON manifest and optional README/CHANGELOG
+  documents. Reject legacy WEBC release inputs; existing installed resources and
+  private data remain unchanged.
 - Return pending access reviews as HTTP 202 with `status: pending_review`, a review
   ID and a status URL. Keep queued business responses distinct; waiting reviews
   report denial, timeout and unavailable channels as 403, 504 and 503 respectively.
@@ -35,8 +37,8 @@
 
 ### Dependencies and compatibility
 
-- Pin daccess 0.2.0 to commit `4fbb0b2328538beede2027805414b24673da9ff1`.
-- Deploy the matching `author` / `.waz` registry protocol before using store
+- Pin daccess 0.2.0 to commit `76862af3b6a03d56ea68c6bdc4e7edb74805238b`.
+- Deploy the matching ZIP `author` / `.waz` registry protocol before using store
   installation or updates. Old `publisher` / `.pkg` HTTP responses are unsupported.
 - Publish compatible application releases and their exact dependencies separately;
   host distributions do not contain or automatically install business packages.

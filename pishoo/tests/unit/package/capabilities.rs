@@ -36,7 +36,7 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
                 crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
                     .unwrap();
             let mut document = json!({"openapi":"3.1.0","info":{"title":"Message","version":"1.0.0","description":"test","license":{"name":"MIT"}},
-                "x-pishoo":{"kind":"lib","publisher":publisher,"name":"message","dependencies":[],"host":{"request-identity":"identity"}},
+                "x-pishoo":{"kind":"lib","publisher":publisher,"name":"message","dependencies":[]},
                 "x-access-groups":{"message":{"title":title,"operations":["receive"]}},
                 "paths":{"/message":{"post":{"operationId":"receive","summary":"Receive messages","x-access-group":"message","responses":{"200":{"description":"ok"}}}}}});
             if legacy {

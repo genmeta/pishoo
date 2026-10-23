@@ -62,7 +62,7 @@ pub(super) fn access_version(path: &std::path::Path) -> Result<Option<i64>> {
             [],
             |row| row.get(0),
         )?;
-        if !matches!(version, 0 | 1 | 2 | 3) {
+        if !matches!(version, 0..=3) {
             return Err(Error::InvalidConfig(format!(
                 "unsupported access database version {version}; expected 0, 1, 2 or 3"
             )));

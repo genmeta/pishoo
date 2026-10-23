@@ -69,7 +69,6 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
         serde_json::from_slice(&std::fs::read(profile_repo.join("openapi.json")).unwrap()).unwrap();
     let publisher = "alice.dhttp.net";
     profile_doc["x-pishoo"] = json!({"kind":"lib","publisher":publisher,"name":"profile",
-        "host":{"request-identity":"Profile caller","private-storage":"Profile data"},
         "dependencies":[]});
     let profile_id = format!("{publisher}/profile");
     let probe_id = format!("{publisher}/http-probe");
@@ -87,7 +86,7 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
                 "tests/fixtures/lib-http-probe/target/wasm32-wasip2/release/lib_http_probe.wasm",
             )
         });
-    let probe_doc = json!({"openapi":"3.1.0","info":{"title":"HTTP probe","description":"Probe local Lib calls","version":"0.1.0","license":{"name":"MIT"}},"x-pishoo":{"kind":"lib","publisher":publisher,"name":"http-probe","host":{"request-identity":"Record real caller facts","private-storage":"Persist CLI response"},"dependencies":[{"publisher":publisher,"name":"profile","version":profile_doc["info"]["version"]}]},"paths":{"/call":{"get":{"operationId":"call","summary":"Call dependency"}}}});
+    let probe_doc = json!({"openapi":"3.1.0","info":{"title":"HTTP probe","description":"Probe local Lib calls","version":"0.1.0","license":{"name":"MIT"}},"x-pishoo":{"kind":"lib","publisher":publisher,"name":"http-probe","dependencies":[{"publisher":publisher,"name":"profile","version":profile_doc["info"]["version"]}]},"paths":{"/call":{"get":{"operationId":"call","summary":"Call dependency"}}}});
     let probe = crate::package::tests::package_fixture(
         &probe_doc,
         &std::fs::read(probe_path).expect("build lib-http-probe first"),
@@ -96,7 +95,7 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
     );
     let mut chat_doc: Value =
         serde_json::from_slice(&std::fs::read(message_repo.join("openapi.json")).unwrap()).unwrap();
-    chat_doc["x-pishoo"] = json!({"kind":"lib","publisher":publisher,"name":"message","host":{"request-identity":"Chat caller","private-storage":"Chat data"},"dependencies":[],"access-groups":{"message":{"title":"1v1聊天","operations":["receiveMessage"]}}});
+    chat_doc["x-pishoo"] = json!({"kind":"lib","publisher":publisher,"name":"message","dependencies":[],"access-groups":{"message":{"title":"1v1聊天","operations":["receiveMessage"]}}});
     let chat = crate::package::tests::package_fixture(
         &chat_doc,
         &std::fs::read(message_repo.join("dist/lib.wasm")).expect("build message-lib first"),

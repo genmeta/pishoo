@@ -44,7 +44,7 @@ fn signed_release_packages_install_and_load_together() {
 
 fn package(version: &str, lib: bool, app: bool) -> Vec<u8> {
     let doc = json!({"openapi":"3.1.0","info":{"title":"Calendar","version":version,"description":"Combined package","license":{"name":"MIT"}},
-        "x-pishoo":{"kind":if lib {"lib"} else {"app"},"publisher":"alice.dhttp.net","name":"calendar","host":{},"dependencies":[]},
+        "x-pishoo":{"kind":if lib {"lib"} else {"app"},"publisher":"alice.dhttp.net","name":"calendar","dependencies":[]},
         "x-access-groups":{"events":{"title":format!("Events {version}"),"operations":["events"]}},
         "paths":{"/events":{"post":{"operationId":"events","summary":"Events","x-access-group":"events","responses":{"200":{"description":"ok"}}}}}});
     package_fixture(

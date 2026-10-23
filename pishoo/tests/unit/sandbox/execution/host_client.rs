@@ -2,9 +2,7 @@
 use serde_json::{Value, json};
 
 use super::*;
-
-#[path = "../../../support/network_credentials.rs"]
-mod credentials;
+use crate::test_credentials as credentials;
 
 fn endpoint() -> dhttp::Endpoint {
     let name = "alice.dhttp.net";

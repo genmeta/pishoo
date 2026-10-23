@@ -176,7 +176,7 @@ async fn root_guest_error_and_cancellation_repair_actual_preopened_directory() {
         let data = database.join("test");
         std::fs::create_dir_all(&data).unwrap();
         rustix::fs::fchown(
-            &std::fs::File::open(&database).unwrap(),
+            std::fs::File::open(&database).unwrap(),
             Some(rustix::fs::Uid::from_raw(10001)),
             Some(rustix::fs::Gid::from_raw(10002)),
         )
