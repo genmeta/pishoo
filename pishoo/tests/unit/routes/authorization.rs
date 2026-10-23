@@ -567,7 +567,8 @@ async fn waiting_timeout_cleans_up_without_granting_acl() {
     tokio::time::advance(std::time::Duration::from_secs(301)).await;
     let response = task.await.unwrap().unwrap();
     assert_eq!(response.status(), 504);
-    let body: serde_json::Value = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["error"], "review_timeout");
     let response = management
         .oneshot(
