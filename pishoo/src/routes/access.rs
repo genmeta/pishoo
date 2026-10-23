@@ -90,29 +90,35 @@ pub(crate) async fn authorize(
                 .expect("review response contains only serializable values");
             body.as_object_mut().unwrap().remove("error");
             body["status"] = "pending_review".into();
-            let mut response = (
-                StatusCode::ACCEPTED,
-                axum::Json(body),
-            )
-                .into_response();
+            let mut response = (StatusCode::ACCEPTED, axum::Json(body)).into_response();
             response.headers_mut().insert(
                 http::header::CACHE_CONTROL,
                 http::HeaderValue::from_static("no-store"),
             );
-            response.headers_mut().insert(http::header::LOCATION, location.parse().unwrap());
-            response.headers_mut().insert(http::header::RETRY_AFTER, http::HeaderValue::from_static("3"));
+            response
+                .headers_mut()
+                .insert(http::header::LOCATION, location.parse().unwrap());
+            response.headers_mut().insert(
+                http::header::RETRY_AFTER,
+                http::HeaderValue::from_static("3"),
+            );
             return response;
         }
         Ok(AuthResult::Waiting(review)) => {
-            let (status, error) = match tokio::time::timeout(std::time::Duration::from_secs(300), review).await {
-                Ok(Ok(Action::Allow)) => (StatusCode::OK, ""),
-                Ok(Ok(Action::Deny)) => (StatusCode::FORBIDDEN, "review_denied"),
-                Ok(Err(_)) => (StatusCode::SERVICE_UNAVAILABLE, "review_unavailable"),
-                Err(_) => (StatusCode::GATEWAY_TIMEOUT, "review_timeout"),
-            };
+            let (status, error) =
+                match tokio::time::timeout(std::time::Duration::from_secs(300), review).await {
+                    Ok(Ok(Action::Allow)) => (StatusCode::OK, ""),
+                    Ok(Ok(Action::Deny)) => (StatusCode::FORBIDDEN, "review_denied"),
+                    Ok(Err(_)) => (StatusCode::SERVICE_UNAVAILABLE, "review_unavailable"),
+                    Err(_) => (StatusCode::GATEWAY_TIMEOUT, "review_timeout"),
+                };
             if status != StatusCode::OK {
-                return (status, [(http::header::CACHE_CONTROL, "no-store")],
-                    axum::Json(serde_json::json!({"error": error}))).into_response();
+                return (
+                    status,
+                    [(http::header::CACHE_CONTROL, "no-store")],
+                    axum::Json(serde_json::json!({"error": error})),
+                )
+                    .into_response();
             }
             true
         }

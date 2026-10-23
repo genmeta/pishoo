@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.9.0--preview.2-1f6feb?style=flat-square" alt="Version 0.9.0-preview.2">
+  <img src="https://img.shields.io/badge/version-0.9.0--preview.5-1f6feb?style=flat-square" alt="Version 0.9.0-preview.5">
   <img src="https://img.shields.io/badge/Rust-2024-dea584?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-4c956c?style=flat-square" alt="Apache-2.0 license"></a>
 </p>
@@ -33,14 +33,14 @@ and WASM components. See the [Pishoo documentation](https://docs.dhttp.net/en/do
 Dependencies are resolved from Cargo.lock, including the fixed Git revision of daccess on feat/contact-acl-v2; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
 
 ```sh
-git clone --branch feat/release-pishoo-0.9.0 https://github.com/genmeta/pishoo.git
+git clone --branch release/v0.9.0.preview.5 https://github.com/genmeta/pishoo.git
 cd pishoo
 cargo build --locked -p pishoo --bin pishoo
 cargo test --locked --workspace -- --test-threads=1
 cargo check --locked --workspace --all-targets
 ```
 
-The host build is independent of frontend tooling. Business products live in five independent repositories: Workspace, Profile, Message, Calendar and Journal. Calendar and Journal each keep their App and Lib together, publishing one signed .waz per product. Pishoo contains native services, reserved std APIs, WASM runtime, WIT/SDK and transport test fixtures. Host release packages contain no business App/Lib artifacts; install Workspace explicitly after starting Pishoo, as shown below. First-time host builds need access to GitHub and crates.io. Run `./target/debug/pishoo` with credentials in your account’s `~/.dhttp`. Ancestor or user-level Cargo path patches can override registry dependencies; use a checkout outside those configured directories when reproducing it.
+The host build is independent of frontend tooling. Business products live in six independent repositories: Workspace, Introduction, Profile, Message, Calendar and Journal. Calendar and Journal each keep their App and Lib together, publishing one signed .waz per product. Pishoo contains native services, reserved std APIs, WASM runtime, WIT/SDK and transport test fixtures. Host release packages contain no business App/Lib artifacts; install Workspace explicitly after starting Pishoo, as shown below. First-time host builds need access to GitHub and crates.io. Run `./target/debug/pishoo` with credentials in your account’s `~/.dhttp`. Ancestor or user-level Cargo path patches can override registry dependencies; use a checkout outside those configured directories when reproducing it.
 
 ### Install Pishoo
 
@@ -118,12 +118,21 @@ account that owns the identity**, replacing `alice.smith` with its name:
 genmeta install workspace --id alice.smith
 ```
 
-The command calls the running identity's Pishoo installation API. Pishoo downloads and verifies the Workspace package and its exact Profile and Message dependencies. The page is available at `https://<identity>/app/workspace/` after installation. Selected versions must already be published to the store. Installation and updates use `POST /std/sys/pkg/install` with exactly `author`, `name` and `version`; there is no local-package upload fallback.
+The command calls the running identity's Pishoo installation API. Pishoo downloads and verifies the Workspace package and its declared exact dependencies. The page is available at `https://<identity>/app/workspace/` after installation. Selected versions must already be published to the store. Installation and updates use `POST /std/sys/pkg/install` with exactly `author`, `name` and `version`; there is no local-package upload fallback.
 
 Pishoo package installation and startup initialize native services and databases
 without downloading business Apps or invoking gmutils. Store unavailability does
 not prevent host installation or startup. Installing an App is an explicit step
 for each identity; it preserves the normal ACL and dependency rules.
+
+Package installation and upgrades require the registry's `author` / `.waz` protocol.
+Deploy the compatible registry and publish the application releases before upgrading
+through Workspace. The requested package and dependencies that need updating are
+validated and committed together at the exact versions declared by the new package;
+matching loaded dependencies are reused. Conflicts with other installed applications
+reject the update, and failures restore the previous installation. Same-author API
+and capability changes preserve existing ACL rules and private data. See the
+[preview.5 release notes](CHANGELOG.md#090-preview5---2026-10-23).
 
 ### Configuration
 

@@ -1,10 +1,11 @@
+use http::Method;
+use serde_json::json;
+use webc::v3::write::Directory;
+
 use super::*;
 use crate::package::tests::packages::{
     frontend_document, frontend_files, package_fixture, publisher,
 };
-use http::Method;
-use serde_json::json;
-use webc::v3::write::Directory;
 
 #[tokio::test]
 async fn app_upgrades_preserve_root_rules_when_asset_names_change() {
