@@ -83,21 +83,39 @@ pub(crate) async fn authorize(
         Ok(AuthResult::Allowed) => true,
         Ok(AuthResult::Denied) => false,
         Ok(AuthResult::Reviewing(review)) => {
+            // Project the wire contract independently of the pinned daccess
+            // DTO, so both old and updated DTO releases produce the same reply.
+            let location = format!("/std/acl/status?id={}", review.id());
+            let mut body = serde_json::to_value(PendingReviewResponse::from(review))
+                .expect("review response contains only serializable values");
+            body.as_object_mut().unwrap().remove("error");
+            body["status"] = "pending_review".into();
             let mut response = (
-                StatusCode::BAD_REQUEST,
-                axum::Json(PendingReviewResponse::from(review)),
+                StatusCode::ACCEPTED,
+                axum::Json(body),
             )
                 .into_response();
             response.headers_mut().insert(
                 http::header::CACHE_CONTROL,
                 http::HeaderValue::from_static("no-store"),
             );
+            response.headers_mut().insert(http::header::LOCATION, location.parse().unwrap());
+            response.headers_mut().insert(http::header::RETRY_AFTER, http::HeaderValue::from_static("3"));
             return response;
         }
-        Ok(AuthResult::Waiting(review)) => matches!(
-            tokio::time::timeout(std::time::Duration::from_secs(300), review).await,
-            Ok(Ok(Action::Allow))
-        ),
+        Ok(AuthResult::Waiting(review)) => {
+            let (status, error) = match tokio::time::timeout(std::time::Duration::from_secs(300), review).await {
+                Ok(Ok(Action::Allow)) => (StatusCode::OK, ""),
+                Ok(Ok(Action::Deny)) => (StatusCode::FORBIDDEN, "review_denied"),
+                Ok(Err(_)) => (StatusCode::SERVICE_UNAVAILABLE, "review_unavailable"),
+                Err(_) => (StatusCode::GATEWAY_TIMEOUT, "review_timeout"),
+            };
+            if status != StatusCode::OK {
+                return (status, [(http::header::CACHE_CONTROL, "no-store")],
+                    axum::Json(serde_json::json!({"error": error}))).into_response();
+            }
+            true
+        }
         Err(sea_orm::DbErr::Type(message)) => {
             return (StatusCode::BAD_REQUEST, message).into_response();
         }
