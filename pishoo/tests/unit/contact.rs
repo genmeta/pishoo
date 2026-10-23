@@ -516,7 +516,7 @@ fn contact_v1_upgrade_preserves_delivery_jobs_and_removes_only_saved_collection(
         assert_eq!(
             db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            4
+            5
         );
         assert_eq!(
             db.query_row(
@@ -715,7 +715,7 @@ fn v3_migration_preserves_unknown_snapshots_without_catalog_backfill() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     let db = database(&profile).unwrap();
-    db.execute_batch("ALTER TABLE outbound_contact_request DROP COLUMN requested_access; ALTER TABLE outbound_contact_request DROP COLUMN offers; PRAGMA user_version=3;").unwrap();
+    db.execute_batch("ALTER TABLE outbound_contact_request DROP COLUMN review_id; ALTER TABLE outbound_contact_request DROP COLUMN review_subject; ALTER TABLE outbound_contact_request DROP COLUMN review_method; ALTER TABLE outbound_contact_request DROP COLUMN review_path; ALTER TABLE outbound_contact_request DROP COLUMN requested_access; ALTER TABLE outbound_contact_request DROP COLUMN offers; PRAGMA user_version=3;").unwrap();
     db.execute("INSERT INTO outbound_contact_request(target_name,requested_capabilities,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES('bob.dhttp.net','[\"Receive messages\"]','queued',?1,?1,0,1,1)", [now()+120]).unwrap();
     drop(db);
     for _ in 0..2 {
@@ -723,7 +723,7 @@ fn v3_migration_preserves_unknown_snapshots_without_catalog_backfill() {
         assert_eq!(
             db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            4
+            5
         );
         assert_eq!(
             db.query_row(
@@ -738,4 +738,28 @@ fn v3_migration_preserves_unknown_snapshots_without_catalog_backfill() {
             (None, None)
         );
     }
+}
+
+#[test]
+fn v4_contact_migration_preserves_review_tracking_across_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let db = database(&profile).unwrap();
+    db.execute_batch("ALTER TABLE outbound_contact_request DROP COLUMN review_id; ALTER TABLE outbound_contact_request DROP COLUMN review_subject; ALTER TABLE outbound_contact_request DROP COLUMN review_method; ALTER TABLE outbound_contact_request DROP COLUMN review_path; PRAGMA user_version=4;").unwrap();
+    db.execute("INSERT INTO outbound_contact_request(target_name,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES('bob.dhttp.net','queued',?1,?1,0,1,1)",[now()+3600]).unwrap();
+    drop(db);
+    let db = database(&profile).unwrap();
+    db.execute("UPDATE outbound_contact_request SET review_id=27,review_subject='verified-peer',review_method='POST',review_path='/std/contact'",[]).unwrap();
+    drop(db);
+    let db = database(&profile).unwrap();
+    let review:(i64,String,String,String)=db.query_row("SELECT review_id,review_subject,review_method,review_path FROM outbound_contact_request",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    assert_eq!(
+        review,
+        (
+            27,
+            "verified-peer".into(),
+            "POST".into(),
+            "/std/contact".into()
+        )
+    );
 }

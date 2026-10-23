@@ -435,7 +435,7 @@ async fn empty_access_file_and_abandoned_staging_do_not_lose_initial_rules() {
     ));
     assert_eq!(
         access_version(&profile.join(".volume/sys/access/database")).unwrap(),
-        Some(2)
+        Some(3)
     );
 }
 
@@ -501,6 +501,19 @@ async fn old_access_versions_upgrade_structure_without_replacing_data_or_seeding
         let db = rusqlite::Connection::open(profile.join(".volume/sys/access/database")).unwrap();
         db.execute_batch(
             "PRAGMA journal_mode=WAL;
+            DROP TRIGGER access_reviews_policy_insert;
+            DROP TRIGGER access_reviews_policy_update;
+            DROP TRIGGER access_reviews_policy_delete;
+            DROP TRIGGER access_reviews_contact_update;
+            DROP TRIGGER access_reviews_contact_delete;
+            DROP TRIGGER access_reviews_contact_insert;
+            DROP INDEX access_reviews_once;
+            DROP INDEX access_reviews_pending_scope;
+            ALTER TABLE access_reviews DROP COLUMN remember;
+            ALTER TABLE access_reviews DROP COLUMN decided_at;
+            ALTER TABLE access_reviews DROP COLUMN grant_expires_at;
+            ALTER TABLE access_reviews DROP COLUMN consumed_at;
+            ALTER TABLE access_reviews DROP COLUMN invalidated_at;
             DROP TRIGGER contacts_updated;
             DROP TRIGGER contacts_inserted;
             DROP TRIGGER contacts_delete_exact_rules;
@@ -526,7 +539,7 @@ async fn old_access_versions_upgrade_structure_without_replacing_data_or_seeding
         let reopened = load_access(&profile, &subject).await.unwrap();
         assert_eq!(
             access_version(&profile.join(".volume/sys/access/database")).unwrap(),
-            Some(2)
+            Some(3)
         );
         assert_eq!(
             db.query_row("SELECT name,alias,updated_at FROM contacts", [], |row| {

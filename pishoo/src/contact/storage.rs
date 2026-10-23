@@ -119,11 +119,11 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
         }
         tx.execute_batch(include_str!("contact.sql"))
             .map_err(storage)?;
-        tx.pragma_update(None, "user_version", 4).map_err(storage)?;
+        tx.pragma_update(None, "user_version", 5).map_err(storage)?;
     } else if version == 1 {
         tx.execute_batch("ALTER TABLE outbound_contact_requests ADD COLUMN contact_id INTEGER; ALTER TABLE outbound_contact_requests ADD COLUMN contact_subject TEXT; DROP TABLE IF EXISTS saved_contacts;").map_err(storage)?;
         tx.pragma_update(None, "user_version", 2).map_err(storage)?;
-    } else if version != 2 && version != 3 && version != 4 {
+    } else if !(2..=5).contains(&version) {
         return Err(fail(500, "unsupported contact database version"));
     }
     if version == 1 || version == 2 {
@@ -136,7 +136,12 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
             .map_err(storage)?;
         tx.pragma_update(None, "user_version", 4).map_err(storage)?;
     }
-    tx.prepare("SELECT id,target_name,description,requested_capabilities,offered_capabilities,application_id,status,expired_after,delivery_deadline,remote_expired_after,next_attempt_at,attempt_count,lease_until,last_checked_at,error_message,created_at,updated_at,contact_id,contact_subject,requested_access,offers FROM outbound_contact_request LIMIT 0").map_err(storage)?;
+    if (1..=4).contains(&version) {
+        tx.execute_batch(include_str!("migrate-v5.sql"))
+            .map_err(storage)?;
+        tx.pragma_update(None, "user_version", 5).map_err(storage)?;
+    }
+    tx.prepare("SELECT id,target_name,description,requested_capabilities,offered_capabilities,application_id,status,expired_after,delivery_deadline,remote_expired_after,next_attempt_at,attempt_count,lease_until,last_checked_at,error_message,created_at,updated_at,contact_id,contact_subject,requested_access,offers,review_id,review_subject,review_method,review_path FROM outbound_contact_request LIMIT 0").map_err(storage)?;
     tx.commit().map_err(storage)?;
     if rustix::process::geteuid().is_root() {
         use std::os::unix::fs::MetadataExt;

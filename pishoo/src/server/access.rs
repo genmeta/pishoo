@@ -61,9 +61,9 @@ pub(super) fn access_version(path: &std::path::Path) -> Result<Option<i64>> {
             [],
             |row| row.get(0),
         )?;
-        if !matches!(version, 0 | 1 | 2) {
+        if !matches!(version, 0 | 1 | 2 | 3) {
             return Err(Error::InvalidConfig(format!(
-                "unsupported access database version {version}; expected 0, 1 or 2"
+                "unsupported access database version {version}; expected 0, 1, 2 or 3"
             )));
         }
         // Validate the source schema before allowing structural migrations.
@@ -74,8 +74,11 @@ pub(super) fn access_version(path: &std::path::Path) -> Result<Option<i64>> {
         ] {
             conn.prepare(sql)?;
         }
-        if version == 2 {
+        if version >= 2 {
             conn.prepare("SELECT name,updated_at FROM contact_deletions LIMIT 0")?;
+        }
+        if version >= 3 {
+            conn.prepare("SELECT remember,decided_at,grant_expires_at,consumed_at,invalidated_at FROM access_reviews LIMIT 0")?;
         }
         if version >= 1 {
             conn.prepare("SELECT application_id,applicant_name,applicant_sid,payload_hash,status,received_at,expired_after FROM contact_applications LIMIT 0")?;
@@ -223,7 +226,7 @@ pub(super) async fn load_access(
     let ready = tempfile::NamedTempFile::new_in(staging.path())?;
     inherit_identity_owner(ready.as_file(), profile)?;
     snapshot_access(working.path(), ready.path())?;
-    if access_version(ready.path())? != Some(2) {
+    if access_version(ready.path())? != Some(3) {
         return Err(Error::InvalidConfig(
             "initialized access database failed version validation".into(),
         ));
