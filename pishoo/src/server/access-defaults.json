@@ -1,0 +1,19 @@
+{
+  "native": [
+    ["POST", "/std/contact", "allow", "**"],
+    ["GET", "/std/contact", "allow", "**"],
+    ["GET", "/std/acl/status", "allow", "**"],
+    ["GET", "/std/contact/list", "deny", "*?"],
+    ["GET", "/std/acl/permissions", "allow", "*?"]
+  ],
+  "std.dhttp.net/workspace": [
+    ["GET", "/app/workspace", "deny", "*?"]
+  ],
+  "std.dhttp.net/introduction": [
+    ["GET", "/app/introduction", "allow", "*?"]
+  ],
+  "std.dhttp.net/profile": [
+    ["GET", "/std/profile/nickname", "allow", "*?"],
+    ["GET", "/std/profile/avatar", "allow", "*?"]
+  ]
+}

@@ -65,20 +65,36 @@ pub(super) fn catalog(profile: &IdentityProfile) -> Result<Value, Failure> {
         std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     >::new();
     let mut stmt = db.prepare(&format!(
-        "SELECT ({package})||' · '||c.title,CASE WHEN coalesce({standard},0)=0 AND substr(o.path,1,5)='/std/' THEN '/'||l.name||substr(o.path,5) ELSE o.path END,o.method FROM lib_capability c JOIN lib l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operation o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
+        "SELECT ({package}),c.title,CASE WHEN coalesce({standard},0)=0 AND substr(o.path,1,5)='/std/' THEN '/'||l.name||substr(o.path,5) ELSE o.path END,o.method FROM lib_capability c JOIN lib l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operation o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
     )).map_err(storage)?;
     for row in stmt
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })
         .map_err(storage)?
     {
-        let (title, path, method) = row.map_err(storage)?;
-        let paths = permissions.entry(title).or_default();
+        let (package, title, path, method) = row.map_err(storage)?;
+        let localized = serde_json::from_str::<Value>(&title)
+            .ok()
+            .filter(|value| value["en"].is_string() && value["zh-CN"].is_string());
+        let label = localized
+            .as_ref()
+            .map(|value| {
+                format!(
+                    "{} / {}",
+                    value["zh-CN"].as_str().unwrap(),
+                    value["en"].as_str().unwrap()
+                )
+            })
+            .unwrap_or(title);
+        let paths = permissions
+            .entry(format!("{package} · {label}"))
+            .or_default();
         if let (Some(path), Some(method)) = (path, method) {
             paths.entry(path).or_default().insert(method);
         }

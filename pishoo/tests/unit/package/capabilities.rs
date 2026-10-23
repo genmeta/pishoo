@@ -7,6 +7,16 @@ use super::*;
 async fn access_groups_register_mounted_operations_and_populate_catalog() {
     for publisher in ["std.dhttp.net", "alice.dhttp.net"] {
         for legacy in [false, true] {
+            let title = if legacy {
+                json!("Receive")
+            } else {
+                json!({"en":"Receive","zh-CN":"接收消息"})
+            };
+            let label = if legacy {
+                "Receive"
+            } else {
+                "接收消息 / Receive"
+            };
             let root = tempfile::tempdir().unwrap();
             let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
             // Exercise package registration independently of identity/ACL
@@ -27,7 +37,7 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
                     .unwrap();
             let mut document = json!({"openapi":"3.1.0","info":{"title":"Message","version":"1.0.0","description":"test","license":{"name":"MIT"}},
                 "x-pishoo":{"kind":"lib","publisher":publisher,"name":"message","dependencies":[],"host":{"request-identity":"identity"}},
-                "x-access-groups":{"message":{"title":"Receive","operations":["receive"]}},
+                "x-access-groups":{"message":{"title":title,"operations":["receive"]}},
                 "paths":{"/message":{"post":{"operationId":"receive","summary":"Receive messages","x-access-group":"message","responses":{"200":{"description":"ok"}}}}}});
             if legacy {
                 document["x-pishoo"]["access-groups"] = document
@@ -65,7 +75,13 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 )
                 .unwrap(),
-                ("message".into(), "Receive".into())
+                (
+                    "message".into(),
+                    title
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| title.to_string())
+                )
             );
             assert_eq!(
                 db.query_row(
@@ -76,7 +92,7 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
                 .unwrap(),
                 ("POST".into(), path.into())
             );
-            let response = crate::routes::capabilities_router(profile)
+            let response = crate::routes::capabilities_router(profile.clone())
                 .oneshot(
                     http::Request::builder()
                         .uri("/std/acl/permissions")
@@ -93,7 +109,24 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
             let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(
                 value,
-                json!({format!("{publisher}/message · Receive"):{path:["POST"]}})
+                json!({format!("{publisher}/message · {label}"):{path:["POST"]}})
+            );
+            let response = crate::routes::capabilities_router(profile)
+                .oneshot(
+                    http::Request::builder()
+                        .uri("/std/acl/permissions?details=1")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), http::StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                json!({format!("{publisher}/message · {label}"):{"title":title,"endpoints":{path:["POST"]}}})
             );
         }
     }

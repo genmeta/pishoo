@@ -1112,7 +1112,7 @@ fn account_database_uses_actual_homes_across_distributions() {
 }
 
 #[tokio::test]
-async fn workspace_static_defaults_allow_anonymous_reads_without_management_access() {
+async fn introduction_static_defaults_allow_anonymous_reads_without_management_access() {
     use std::collections::BTreeMap;
 
     use http::{Method, StatusCode};
@@ -1130,8 +1130,8 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
     .await
     .unwrap();
     let document = json!({
-        "info":{"title":"Workspace","version":"1.0.0","description":"Public introduction","license":{"name":"MIT"}},
-        "x-pishoo":{"kind":"app","publisher":"std.dhttp.net","name":"workspace","entry":"/","dependencies":[]}
+        "info":{"title":"Introduction","version":"1.0.0","description":"Public introduction","license":{"name":"MIT"}},
+        "x-pishoo":{"kind":"app","publisher":"std.dhttp.net","name":"introduction","entry":"/","dependencies":[]}
     });
     let public = Directory::new(
         BTreeMap::from([
@@ -1167,7 +1167,7 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
         &crate::package::tests::publisher("other.dhttp.net", 'b'),
     );
     assert!(
-        crate::package::install_app(&server.profile, "other.dhttp.net/workspace", &other_package)
+        crate::package::install_app(&server.profile, "other.dhttp.net/introduction", &other_package)
             .unwrap_err()
             .to_string()
             .contains("existing ACL")
@@ -1176,14 +1176,14 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
         .access
         .set_policy(
             access_control::Method::Specified(Method::GET),
-            "/app/workspace",
+            "/app/introduction",
             access_control::Effect::Deny,
             access_control::Grantee::Named,
         )
         .await
         .unwrap();
     assert!(
-        crate::package::install_app(&server.profile, "std.dhttp.net/workspace", &package)
+        crate::package::install_app(&server.profile, "std.dhttp.net/introduction", &package)
             .unwrap_err()
             .to_string()
             .contains("existing ACL")
@@ -1194,13 +1194,13 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
         .access
         .set_policy(
             access_control::Method::Specified(Method::GET),
-            "/app/workspace",
+            "/app/introduction",
             access_control::Effect::Allow,
             access_control::Grantee::All,
         )
         .await
         .unwrap();
-    crate::package::install_app(&server.profile, "std.dhttp.net/workspace", &package).unwrap();
+    crate::package::install_app(&server.profile, "std.dhttp.net/introduction", &package).unwrap();
     let profile_document = json!({
         "openapi":"3.1.0",
         "info":{"title":"Profile","version":"1.0.0","description":"Public profile","license":{"name":"MIT"}},
@@ -1242,8 +1242,8 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
     };
     for method in [Method::GET, Method::HEAD] {
         for (path, expected) in [
-            ("/app/workspace/", b"public introduction".as_slice()),
-            ("/app/workspace/assets/app.js", b"export {}".as_slice()),
+            ("/app/introduction/", b"public introduction".as_slice()),
+            ("/app/introduction/assets/app.js", b"export {}".as_slice()),
         ] {
             let response = server
                 .router
@@ -1268,8 +1268,8 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
         }
     }
     for (method, path) in [
-        (Method::POST, "/app/workspace/"),
-        (Method::GET, "/app/workspace-other/"),
+        (Method::POST, "/app/introduction/"),
+        (Method::GET, "/app/introduction-other/"),
         (Method::GET, "/std/contacts"),
         (Method::GET, "/std/acl/access"),
         (Method::GET, "/std/sys/listen"),

@@ -361,7 +361,10 @@ fn capability_rows(
             endpoints.sort();
             rows.push((
                 id.clone(),
-                group["title"].as_str().unwrap().to_owned(),
+                group["title"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| group["title"].to_string()),
                 endpoints,
             ));
         }
@@ -550,34 +553,58 @@ fn check_existing_rules(
     if !rules {
         return Ok(());
     }
+    let defaults_path = profile.join(".volume/sys/access/defaults.json");
+    let defaults = match defaults_path.symlink_metadata() {
+        Ok(metadata) if metadata.is_file() => std::fs::read_to_string(&defaults_path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            include_str!("../server/access-defaults.json").to_owned()
+        }
+        Err(error) => return Err(error.into()),
+        Ok(_) => {
+            return Err(Error::InvalidConfig(
+                "access defaults must be a regular file".into(),
+            ));
+        }
+    };
+    let defaults: std::collections::BTreeMap<String, Vec<[String; 4]>> =
+        serde_json::from_str(&defaults)
+            .map_err(|error| Error::InvalidConfig(format!("access defaults: {error}")))?;
     for (path, methods) in package_routes(package, id, kind)? {
         for method in methods {
             if previous.get(&path).is_some_and(|m| m.contains(&method)) {
                 continue;
             }
-            // These exact public discovery grants are installed before the
-            // standard packages. Custom rules and other publishers still need
-            // explicit review; no write operation inherits this exception.
-            let public_default = match (id, kind, method.as_str(), path.trim_end_matches('/')) {
-                (
-                    "std.dhttp.net/profile",
-                    "lib",
-                    "GET",
-                    route @ ("/std/profile/nickname" | "/std/profile/avatar"),
-                ) => route,
-                ("std.dhttp.net/workspace", "app", "GET" | "HEAD", route)
-                    if route == "/app/workspace" || route.starts_with("/app/workspace/") =>
-                {
-                    "/app/workspace"
-                }
-                _ => "",
+            // App reads use root GET authorization, including HEAD and assets.
+            let method = if kind == "app" && matches!(method.as_str(), "GET" | "HEAD") {
+                "GET"
+            } else {
+                method.as_str()
             };
-            let exists: bool = access.query_row(
-                "SELECT EXISTS(SELECT 1 FROM access_rules WHERE (api='/' OR api=?1 OR substr(?1,1,length(api)+1)=api||'/') AND method IN (?2,'*') AND NOT ((api=?3 OR (api='/std/profile' AND ?4)) AND method=?2 AND effect='allow' AND grantee_type=4 AND grantee='*?'))",
-                rusqlite::params![path.trim_end_matches('/'), method, public_default, id == "std.dhttp.net/profile" && kind == "lib" && !public_default.is_empty()],
-                |r| r.get(0),
+            let path = if kind == "app" && method == "GET" {
+                format!("/app/{}", id.rsplit('/').next().unwrap())
+            } else {
+                path.trim_end_matches('/').to_owned()
+            };
+            let mut query = access.prepare(
+                "SELECT method,api,effect,grantee FROM access_rules WHERE (api='/' OR api=?1 OR substr(?1,1,length(api)+1)=api||'/') AND method IN (?2,'*')",
             )?;
-            if exists {
+            let rules = query.query_map(rusqlite::params![path, method], |row| {
+                Ok([
+                    row.get::<_, String>(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                ])
+            })?;
+            for rule in rules {
+                let rule = rule?;
+                // Only an exact configured read rule for this signed provider
+                // may predate installation. Broad legacy grants still conflict.
+                if matches!(method, "GET" | "HEAD")
+                    && defaults.get(id).is_some_and(|rules| rules.contains(&rule))
+                {
+                    continue;
+                }
                 return Err(Error::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!(
@@ -1589,3 +1616,7 @@ pub(crate) fn installed_apps(
     }
     Ok(apps)
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/package/access_defaults.rs"]
+mod access_defaults_tests;

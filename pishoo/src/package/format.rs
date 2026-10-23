@@ -761,7 +761,16 @@ fn validate_declarations(document: &Value) -> Result<()> {
             if !valid_name(name) {
                 return Err(invalid("invalid group name"));
             }
-            text(group, "title")?;
+            if let Some(titles) = group["title"].as_object() {
+                if titles.len() != 2 || !titles.contains_key("en") || !titles.contains_key("zh-CN")
+                {
+                    return Err(invalid("localized group title requires en and zh-CN"));
+                }
+                text(&group["title"], "en")?;
+                text(&group["title"], "zh-CN")?;
+            } else {
+                text(group, "title")?;
+            }
             let ids = group["operations"]
                 .as_array()
                 .filter(|v| !v.is_empty())
