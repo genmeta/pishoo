@@ -157,44 +157,36 @@ pub(super) async fn load_access(
     inherit_identity_owner(working.as_file(), profile)?;
     let uri = format!("sqlite://{}?mode=rw", working.path().display());
     let access = access_control::AccessService::load_from_db(&uri, profile.name(), subject).await?;
-    for (method, path) in [
-        (http::Method::POST, "/std/contact"),
-        (http::Method::GET, "/std/contact"),
-        (http::Method::GET, "/std/acl/status"),
-    ] {
-        access
-            .set_policy(
-                access_control::Method::Specified(method),
-                path,
-                access_control::Effect::Allow,
-                access_control::Grantee::Named,
-            )
-            .await?;
-    }
-    access
-        .set_policy(
-            access_control::Method::Specified(http::Method::GET),
-            "/std/contact/list",
-            access_control::Effect::Deny,
-            access_control::Grantee::All,
-        )
-        .await?;
-    // Only the explicitly public profile fields are discoverable by default.
-    for (method, path) in [
-        (http::Method::GET, "/std/acl/permissions"),
-        (http::Method::GET, "/std/profile/nickname"),
-        (http::Method::GET, "/std/profile/avatar"),
-        // The public /app/workspace/intro page and assets are served by Workspace.
-        (http::Method::GET, "/app/workspace"),
-    ] {
-        access
-            .set_policy(
-                access_control::Method::Specified(method),
-                path,
-                access_control::Effect::Allow,
-                access_control::Grantee::All,
-            )
-            .await?;
+    // Defaults seed a new database only. All subsequent decisions use saved ACLs.
+    let defaults_path = profile.join(".volume/sys/access/defaults.json");
+    let defaults = match defaults_path.symlink_metadata() {
+        Ok(metadata) if metadata.is_file() => std::fs::read_to_string(&defaults_path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            include_str!("access-defaults.json").to_owned()
+        }
+        Err(error) => return Err(error.into()),
+        Ok(_) => {
+            return Err(Error::InvalidConfig(
+                "access defaults must be a regular file".into(),
+            ));
+        }
+    };
+    let defaults: std::collections::BTreeMap<String, Vec<[String; 4]>> =
+        serde_json::from_str(&defaults)
+            .map_err(|error| Error::InvalidConfig(format!("access defaults: {error}")))?;
+    for [method, path, effect, grantee] in defaults.into_values().flatten() {
+        let invalid = |error| Error::InvalidConfig(format!("access defaults: {error}"));
+        let method = method.parse::<access_control::Method>().map_err(invalid)?;
+        let effect = effect.parse::<access_control::Effect>().map_err(invalid)?;
+        let grantee = grantee
+            .parse::<access_control::Grantee>()
+            .map_err(invalid)?;
+        if !path.starts_with('/') || path.contains(['?', '#', '*', '{', '}']) {
+            return Err(Error::InvalidConfig(format!(
+                "invalid access default path {path:?}"
+            )));
+        }
+        access.set_policy(method, &path, effect, grantee).await?;
     }
     if path.try_exists()? {
         let pending = rusqlite::Connection::open_with_flags(

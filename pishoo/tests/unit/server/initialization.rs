@@ -168,10 +168,10 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
         for (method, path) in [
             (Method::GET, "/std/profile/nickname"),
             (Method::GET, "/std/profile/avatar"),
-            (Method::GET, "/app/workspace"),
-            (Method::GET, "/app/workspace/"),
-            (Method::GET, "/app/workspace/assets/app.js"),
-            (Method::GET, "/app/workspace/assets/app.css"),
+            (Method::GET, "/app/introduction"),
+            (Method::GET, "/app/introduction/"),
+            (Method::GET, "/app/introduction/assets/app.js"),
+            (Method::GET, "/app/introduction/assets/app.css"),
         ] {
             assert!(
                 matches!(
@@ -183,6 +183,13 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
         }
         for (method, path) in [
             (Method::POST, "/std/acl/permissions"),
+            (Method::GET, "/std/profile"),
+            (Method::GET, "/std/profile/introduction"),
+            (Method::GET, "/std/profile/permissions"),
+            (Method::GET, "/std/profile/permission-sets"),
+            (Method::GET, "/app/workspace"),
+            (Method::GET, "/app/workspace/assets/app.js"),
+            (Method::GET, "/app/introduction-other/"),
             (Method::GET, "/std/acl/access"),
             (Method::GET, "/std/acl/allow"),
             (Method::GET, "/std/sys/listen"),
@@ -192,7 +199,7 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
             (Method::GET, "/std/contact/list"),
             (Method::PATCH, "/std/contact?name=bob.dhttp.net"),
             (Method::PUT, "/std/message"),
-            (Method::POST, "/app/workspace/"),
+            (Method::POST, "/app/introduction/"),
             (Method::GET, "/app/workspace-other/"),
         ] {
             assert!(
@@ -256,6 +263,77 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
 }
 
 #[tokio::test]
+async fn configurable_defaults_seed_only_new_databases() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path(), "alice");
+    let defaults = profile.join(".volume/sys/access/defaults.json");
+    std::fs::write(
+        &defaults,
+        r#"{"custom.example/card":[["GET","/app/card","allow","*?"]]}"#,
+    )
+    .unwrap();
+    let subject = SubjectId::new(b"owner").unwrap();
+    let access = load_access(&profile, &subject).await.unwrap();
+    assert!(matches!(
+        authorization(&access, Method::GET, "/app/card", None).await,
+        AuthResult::Allowed
+    ));
+    assert!(matches!(
+        authorization(&access, Method::GET, "/app/introduction", None).await,
+        AuthResult::Denied
+    ));
+    access
+        .set_policy(
+            AccessMethod::Specified(Method::GET),
+            "/app/card",
+            access_control::Effect::Deny,
+            Grantee::All,
+        )
+        .await
+        .unwrap();
+    // Even a broken template must not override or prevent loading existing ACLs.
+    std::fs::write(defaults, "invalid JSON").unwrap();
+    let reopened = load_access(&profile, &subject).await.unwrap();
+    assert!(matches!(
+        authorization(&reopened, Method::GET, "/app/card", None).await,
+        AuthResult::Denied
+    ));
+}
+
+#[tokio::test]
+async fn invalid_defaults_never_publish_partial_authorization() {
+    let root = tempfile::tempdir().unwrap();
+    for value in [
+        "not JSON",
+        r#"{"native":[["GET","/public","allow","*?"],["get","/private","allow","*?"]]}"#,
+        r#"{"native":[["GET","/public?field=secret","allow","*?"]]}"#,
+        r#"{"native":[["GET","/public","invalid","*?"]]}"#,
+    ] {
+        let profile = profile(root.path(), "alice");
+        std::fs::write(profile.join(".volume/sys/access/defaults.json"), value).unwrap();
+        assert!(
+            load_access(&profile, &SubjectId::new(b"owner").unwrap())
+                .await
+                .is_err()
+        );
+        assert!(!profile.join(".volume/sys/access/database").exists());
+    }
+    let profile = profile(root.path(), "alice");
+    std::fs::write(profile.join(".volume/sys/access/defaults.json"), "{}").unwrap();
+    let access = load_access(&profile, &SubjectId::new(b"owner").unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(
+        authorization(&access, Method::GET, "/std/profile/nickname", None).await,
+        AuthResult::Denied
+    ));
+    assert!(matches!(
+        authorization(&access, Method::GET, "/app/workspace", Some(profile.name())).await,
+        AuthResult::Allowed
+    ));
+}
+
+#[tokio::test]
 async fn reopening_preserves_removed_default_rule_and_existing_config() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path(), "alice");
@@ -285,7 +363,8 @@ async fn reopening_preserves_removed_default_rule_and_existing_config() {
         (Method::GET, "/std/profile/nickname"),
         (Method::GET, "/std/profile/avatar"),
         (Method::GET, "/app/workspace"),
-        (Method::HEAD, "/app/workspace"),
+        (Method::GET, "/app/introduction"),
+        (Method::HEAD, "/app/introduction"),
     ] {
         access
             .remove_policy(
