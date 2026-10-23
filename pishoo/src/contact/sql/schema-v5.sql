@@ -1,4 +1,4 @@
--- Contact database schema v4; used to initialize a new database.
+-- Contact database schema v5; used to initialize a new database.
 CREATE TABLE outbound_contact_request (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     target_name TEXT NOT NULL CHECK (length(target_name) > 0),
@@ -19,6 +19,10 @@ CREATE TABLE outbound_contact_request (
     next_attempt_at INTEGER NOT NULL,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     lease_until INTEGER,
+    review_id INTEGER CHECK (review_id > 0),
+    review_subject TEXT,
+    review_method TEXT,
+    review_path TEXT,
     last_checked_at INTEGER,
     error_message TEXT,
     created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer'),

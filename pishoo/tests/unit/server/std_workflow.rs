@@ -404,7 +404,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 bob,
                 Method::PATCH,
                 "/std/acl/review",
-                json!({"id":pending["review_id"],"action":"allow"}),
+                json!({"id":pending["review_id"],"action":"allow","remember":true}),
                 204,
             )
             .await;
@@ -557,7 +557,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         bob,
         Method::PATCH,
         "/std/acl/review",
-        json!({"id":pending["review_id"],"action":"allow"}),
+        json!({"id":pending["review_id"],"action":"allow","remember":true}),
         204,
     )
     .await;
