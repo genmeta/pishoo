@@ -68,7 +68,7 @@ fn split_v2(profile: &IdentityProfile, conflict: bool) {
         )
         .unwrap();
     }
-    db.execute_batch(include_str!("../../src/package/legacy-packages.sql"))
+    db.execute_batch(include_str!("../../src/package/sql/schema-v2.sql"))
         .unwrap();
     db.execute_batch("INSERT INTO lib_registry.lib(name,author,version,title,description,license) VALUES('hello','alice.dhttp.net','1.0.0','Hello','Description','MIT'); INSERT INTO app_registry.app SELECT * FROM lib_registry.lib;
         INSERT INTO app_registry.app_dependency VALUES('hello','hello','1.0.0'); DROP TABLE pkg_registry.package_dependency;DROP TABLE pkg_registry.package;PRAGMA main.user_version=2;").unwrap();
@@ -150,7 +150,7 @@ async fn package_recovery_rolls_back_partial_updates_and_cleans_committed_update
             .unwrap();
         let facts: String = db
             .query_row(
-                include_str!("../../src/package/registration-facts.sql"),
+                include_str!("../../src/package/sql/registration-facts-v3.sql"),
                 ["hello"],
                 |r| r.get(0),
             )
@@ -183,7 +183,7 @@ async fn package_recovery_restores_uncommitted_removal_and_finishes_committed_re
             .unwrap();
         let facts: String = db
             .query_row(
-                include_str!("../../src/package/registration-facts.sql"),
+                include_str!("../../src/package/sql/registration-facts-v3.sql"),
                 ["hello"],
                 |r| r.get(0),
             )

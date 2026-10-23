@@ -29,7 +29,7 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
             let db =
                 crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
                     .unwrap();
-            db.execute_batch(include_str!("../../../src/package/packages.sql"))
+            db.execute_batch(include_str!("../../../src/package/sql/schema-v3.sql"))
                 .unwrap();
             drop(db);
             let mut db =

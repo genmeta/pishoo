@@ -1112,7 +1112,7 @@ fn account_database_uses_actual_homes_across_distributions() {
 }
 
 #[tokio::test]
-async fn introduction_static_defaults_allow_anonymous_reads_without_management_access() {
+async fn introduction_static_reads_require_explicit_grant_without_management_access() {
     use std::collections::BTreeMap;
 
     use http::{Method, StatusCode};
@@ -1155,51 +1155,6 @@ async fn introduction_static_defaults_allow_anonymous_reads_without_management_a
         public,
         &crate::package::tests::publisher("std.dhttp.net", 'a'),
     );
-    let mut other_document = document.clone();
-    other_document["x-pishoo"]["publisher"] = json!("other.dhttp.net");
-    let other_package = crate::package::tests::package_fixture(
-        &other_document,
-        &[],
-        Directory::new(
-            BTreeMap::from([("index.html".parse().unwrap(), b"other".to_vec().into())]),
-            Timestamps::default(),
-        ),
-        &crate::package::tests::publisher("other.dhttp.net", 'b'),
-    );
-    assert!(
-        crate::package::install_app(&server.profile, "other.dhttp.net/introduction", &other_package)
-            .unwrap_err()
-            .to_string()
-            .contains("existing ACL")
-    );
-    server
-        .access
-        .set_policy(
-            access_control::Method::Specified(Method::GET),
-            "/app/introduction",
-            access_control::Effect::Deny,
-            access_control::Grantee::Named,
-        )
-        .await
-        .unwrap();
-    assert!(
-        crate::package::install_app(&server.profile, "std.dhttp.net/introduction", &package)
-            .unwrap_err()
-            .to_string()
-            .contains("existing ACL")
-    );
-    // daccess replaces conflicting All/Named rules rather than layering them.
-    // Restore the public default after testing an explicit administrator override.
-    server
-        .access
-        .set_policy(
-            access_control::Method::Specified(Method::GET),
-            "/app/introduction",
-            access_control::Effect::Allow,
-            access_control::Grantee::All,
-        )
-        .await
-        .unwrap();
     crate::package::install_app(&server.profile, "std.dhttp.net/introduction", &package).unwrap();
     let profile_document = json!({
         "openapi":"3.1.0",
@@ -1241,9 +1196,42 @@ async fn introduction_static_defaults_allow_anonymous_reads_without_management_a
         request
     };
     for method in [Method::GET, Method::HEAD] {
+        for path in [
+            "/app/introduction/",
+            "/app/introduction/assets/app.js",
+            "/app/introduction/deep/link?view=card",
+            "/std/profile/nickname",
+            "/std/profile/avatar",
+        ] {
+            let response = server
+                .router
+                .read()
+                .unwrap()
+                .clone()
+                .oneshot(request(method.clone(), path))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+    }
+    server
+        .access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            "/app/introduction",
+            access_control::Effect::Allow,
+            access_control::Grantee::All,
+        )
+        .await
+        .unwrap();
+    for method in [Method::GET, Method::HEAD] {
         for (path, expected) in [
             ("/app/introduction/", b"public introduction".as_slice()),
             ("/app/introduction/assets/app.js", b"export {}".as_slice()),
+            (
+                "/app/introduction/deep/link?view=card",
+                b"public introduction".as_slice(),
+            ),
         ] {
             let response = server
                 .router
@@ -1273,6 +1261,8 @@ async fn introduction_static_defaults_allow_anonymous_reads_without_management_a
         (Method::GET, "/std/contacts"),
         (Method::GET, "/std/acl/access"),
         (Method::GET, "/std/sys/listen"),
+        (Method::GET, "/std/profile/nickname"),
+        (Method::GET, "/std/profile/avatar"),
     ] {
         let response = server
             .router
@@ -1445,7 +1435,7 @@ async fn permission_catalog_qualifies_group_titles_and_preserves_legacy_registra
                 INSERT INTO lib_capability VALUES ('dev.dhttp.net/message', 'read', 'read message'), ('dev.dhttp.net/message', 'details', 'read message'), ('dev.dhttp.net/message', 'empty', 'empty');
                 INSERT INTO lib_capability_operation VALUES ('dev.dhttp.net/message', 'read', '/std/message', 'GET'), ('dev.dhttp.net/message', 'read', '/std/message', 'HEAD'), ('dev.dhttp.net/message', 'details', '/std/message', 'GET'), ('dev.dhttp.net/message', 'details', '/std/message/history', 'GET');").unwrap();
         } else {
-            db.execute_batch(include_str!("../../src/package/packages.sql"))
+            db.execute_batch(include_str!("../../src/package/sql/schema-v3.sql"))
                 .unwrap();
             db.execute_batch("INSERT INTO package (has_lib,has_app,name, author, version) VALUES (1,0,'message', 'dev.dhttp.net', '1.0.0');
                 INSERT INTO lib_capability VALUES ('message', 'read', 'read message'), ('message', 'details', 'read message'), ('message', 'empty', 'empty');

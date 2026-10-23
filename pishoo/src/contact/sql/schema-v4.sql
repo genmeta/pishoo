@@ -1,3 +1,4 @@
+-- Contact database schema v4; used to initialize a new database.
 CREATE TABLE outbound_contact_request (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     target_name TEXT NOT NULL CHECK (length(target_name) > 0),

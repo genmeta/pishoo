@@ -234,7 +234,7 @@ fn initialize_legacy_config(profile: &IdentityProfile) -> Result<()> {
     if old_proxy {
         tx.execute_batch("INSERT INTO proxy_location SELECT * FROM proxy_locations;")?;
     }
-    tx.execute_batch(include_str!("package/legacy-packages.sql"))?;
+    tx.execute_batch(include_str!("package/sql/schema-v2.sql"))?;
     for (old, schema, table) in [
         ("libs", "lib_registry", "lib"),
         ("apps", "app_registry", "app"),
@@ -532,7 +532,7 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS setting(key TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS proxy_location(location TEXT PRIMARY KEY NOT NULL,proxy_pass TEXT NOT NULL);")?;
-    tx.execute_batch(include_str!("package/packages.sql"))?;
+    tx.execute_batch(include_str!("package/sql/schema-v3.sql"))?;
     if version == 2 {
         let conflict: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM old_lib.lib l JOIN old_app.app a USING(name) WHERE l.author IS NOT a.author OR l.version<>a.version)", [], |r| r.get(0))?;
         if conflict {
