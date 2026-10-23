@@ -17,3 +17,5 @@ pub(crate) use packages::{package_component, package_fixture, publisher};
 
 #[path = "package/pkg.rs"]
 mod pkg;
+#[path = "package/updates.rs"]
+mod updates;
