@@ -128,7 +128,7 @@ class ContactMigration(unittest.TestCase):
     def test_new_delivery_schema_has_no_saved_collection(self):
         db = sqlite3.connect(':memory:')
         self.addCleanup(db.close)
-        db.executescript((ROOT / 'pishoo/src/contact/sql/schema-v4.sql').read_text())
+        db.executescript((ROOT / 'pishoo/src/contact/sql/schema-v5.sql').read_text())
         self.assertFalse(db.execute("SELECT 1 FROM sqlite_master WHERE name='saved_contacts'").fetchall())
         columns = {row[1] for row in db.execute('PRAGMA table_info(outbound_contact_request)')}
         self.assertTrue({'contact_id', 'contact_subject'} <= columns)

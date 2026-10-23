@@ -1151,8 +1151,8 @@ dependencies = [
 
 [[package]]
 name = "daccess"
-version = "0.1.1"
-source = "git+https://github.com/genmeta/daccess.git?rev=1bd97a7d2e8bd572cde700b1ec52c8ca8fca2ee4#1bd97a7d2e8bd572cde700b1ec52c8ca8fca2ee4"
+version = "0.2.0"
+source = "git+https://github.com/genmeta/daccess.git?rev=4fbb0b2328538beede2027805414b24673da9ff1#4fbb0b2328538beede2027805414b24673da9ff1"
 dependencies = [
  "axum",
  "chrono",
@@ -3475,7 +3475,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pishoo"
-version = "0.9.0-preview.4"
+version = "0.9.0-preview.5"
 dependencies = [
  "async-stream",
  "axum",

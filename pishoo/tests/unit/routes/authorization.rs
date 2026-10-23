@@ -256,7 +256,7 @@ async fn persistent_reviews_are_scoped_to_the_subject_and_write_durable_acl() {
             expected
         );
     }
-    access.decide_review(id, Action::Allow).await.unwrap();
+    access.decide_review(id, Action::Allow, true).await.unwrap();
     assert!(matches!(
         access
             .auth(
@@ -469,7 +469,7 @@ async fn business_requests_trigger_break_and_waiting_reviews_without_a_permissio
                         .uri("/std/acl/review")
                         .header("content-type", "application/json")
                         .body(AxumBody::from(
-                            serde_json::json!({"kind":"live","id":live["id"],"action":action})
+                            serde_json::json!({"kind":"live","id":live["id"],"action":action,"remember":true})
                                 .to_string(),
                         ))
                         .unwrap(),

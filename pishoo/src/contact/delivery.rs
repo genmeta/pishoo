@@ -20,7 +20,7 @@ use super::{
     string,
 };
 
-pub(super) async fn remote(
+async fn remote_response(
     endpoint: &dhttp::Endpoint,
     target: &str,
     method: Method,
@@ -95,24 +95,57 @@ pub(super) async fn remote(
             }
             bytes.extend_from_slice(&data);
         }
-        if status != 200 && status != 201 {
-            let reviewing = status == 400
-                && serde_json::from_slice::<Value>(&bytes)
-                    .is_ok_and(|body| body["error"] == "need_review");
-            return Err(fail(
-                status,
-                if reviewing {
-                    "need_review"
-                } else {
-                    "remote contact operation rejected"
-                },
-            ));
-        }
-        let value = serde_json::from_slice(&bytes).map_err(|_| fail(502, "invalid remote JSON"))?;
+        let value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) if !matches!(status, 200 | 201) => Value::Null,
+            Err(_) => return Err(fail(502, "invalid remote JSON")),
+        };
         Ok((status, value, sid))
     })
     .await
     .map_err(|_| fail(504, "contact request timed out"))?
+}
+
+pub(super) async fn remote(
+    endpoint: &dhttp::Endpoint,
+    target: &str,
+    method: Method,
+    path: &str,
+    body: Option<&Value>,
+    expected: Option<&str>,
+) -> Result<(u16, Value, String), Failure> {
+    let response = remote_response(endpoint, target, method, path, body, expected).await?;
+    if !matches!(response.0, 200 | 201) {
+        return Err(fail(response.0, "remote contact operation rejected"));
+    }
+    Ok(response)
+}
+
+#[derive(Clone)]
+struct PendingReview {
+    id: i64,
+    subject: String,
+    method: String,
+    path: String,
+}
+
+fn review_progress(code: u16, body: &Value) -> Result<bool, Failure> {
+    if code == 404 {
+        return Err(fail(410, "review_expired"));
+    }
+    if code != 200 {
+        return Err(fail(
+            if code == 400 { 409 } else { code },
+            "review status unavailable",
+        ));
+    }
+    match body["status"].as_str() {
+        Some("pending") => Ok(false),
+        Some("allowed" | "consumed") => Ok(true),
+        Some("denied") => Err(fail(409, "review_denied")),
+        Some("expired") => Err(fail(410, "review_expired")),
+        _ => Err(fail(502, "invalid review status")),
+    }
 }
 
 fn operation_snapshot(snapshot: Option<&str>, capabilities: &str) -> Result<Value, Failure> {
@@ -148,6 +181,7 @@ struct DeliveryJob {
     requested_access: Option<String>,
     offered_access: Option<String>,
     started_at: i64,
+    review: Option<PendingReview>,
 }
 
 pub(crate) async fn contact_jobs(
@@ -170,7 +204,7 @@ async fn deliver(
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
         expire_requests(&tx)?;
         let job = tx.query_row(
-            "SELECT id,target_name,application_id,description,requested_capabilities,offered_capabilities,status,contact_id,contact_subject,requested_access,offers,created_at \
+            "SELECT id,target_name,application_id,description,requested_capabilities,offered_capabilities,status,contact_id,contact_subject,requested_access,offers,created_at,review_id,review_subject,review_method,review_path \
              FROM outbound_contact_request WHERE status IN ('queued','pending','active') AND next_attempt_at<=?1 AND (status='active' OR expired_after>?1) \
              AND (lease_until IS NULL OR lease_until<=?1) ORDER BY next_attempt_at,id LIMIT 1",
             [now()],
@@ -178,6 +212,10 @@ async fn deliver(
                 id: row.get(0)?, target: row.get(1)?, application_id: row.get(2)?, description: row.get(3)?,
                 requested_caps: row.get(4)?, offered_caps: row.get(5)?, status: row.get(6)?, contact_id: row.get(7)?,
                 contact_subject: row.get(8)?, requested_access: row.get(9)?, offered_access: row.get(10)?, started_at: row.get(11)?,
+                review: match row.get::<_,Option<i64>>(12)? {
+                    Some(id) => Some(PendingReview { id, subject:row.get(13)?, method:row.get(14)?, path:row.get(15)? }),
+                    None => None,
+                },
             }),
         ).optional().map_err(storage)?;
         let lease = now() + 120;
@@ -200,10 +238,12 @@ async fn deliver(
         requested_access,
         offered_access,
         started_at,
+        review,
     }) = job
     else {
         return Ok(());
     };
+    let mut next_review = review;
     let outcome=async {
         let (requests, offers) = if status == "queued" {
             (operation_snapshot(requested_access.as_deref(), &requested_caps)?, operation_snapshot(offered_access.as_deref(), &offered_caps)?)
@@ -219,7 +259,26 @@ async fn deliver(
         let (method,path,body)=if status=="queued" {
             (Method::POST,"/std/contact".to_owned(),Some(json!({"from":endpoint.name(),"to":target,"application_id":application_id,"description":description,"class":"Human","requested_access":requests,"offers":offers})))
         } else {(Method::GET,format!("/std/contact?name={}",encoded(endpoint.name())),None)};
-        let (_,mut receipt,sid)=remote(endpoint,&target,method,&path,body.as_ref(),expected).await?;
+        let reviewed_subject = next_review.as_ref().map(|review| review.subject.clone());
+        if let Some(review) = &next_review {
+            if review.method != method.as_str() || review.path != path
+                || expected.is_some_and(|sid| sid != review.subject) {
+                return Err(fail(409, "review target or operation changed"));
+            }
+            let (code, result, _) = remote_response(endpoint, &target, Method::GET,
+                &format!("/std/acl/status?id={}",review.id), None, Some(&review.subject)).await?;
+            if !review_progress(code, &result)? { return Err(fail(400,"need_review")); }
+        }
+        let pinned = reviewed_subject.as_deref().or(expected);
+        let (code,mut receipt,sid)=remote_response(endpoint,&target,method.clone(),&path,body.as_ref(),pinned).await?;
+        if code == 400 && receipt["error"] == "need_review" {
+            let review_id = receipt["review_id"].as_i64().filter(|id|*id>0)
+                .ok_or_else(||fail(400,"review protocol upgrade required"))?;
+            next_review = Some(PendingReview {id:review_id,subject:sid,method:method.to_string(),path});
+            return Err(fail(400,"need_review"));
+        }
+        if !matches!(code,200|201) {return Err(fail(code,"remote contact operation rejected"));}
+        next_review = None;
         if status != "queued" {
             let visitor=super::access::owner(endpoint)?;
             if receipt["name"]!=endpoint.name() || receipt["subject_id"].as_str()!=std::str::from_utf8(visitor.subject_id().as_bytes()).ok() {
@@ -267,22 +326,48 @@ async fn deliver(
     }.await;
     let db = db.clone();
     tokio::task::spawn_blocking(move|| {
-        let db=db.lock().map_err(|_|fail(500,"contact database lock poisoned"))?;
+        let mut db=db.lock().map_err(|_|fail(500,"contact database lock poisoned"))?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+        let db = &tx;
+        db.execute("UPDATE outbound_contact_request SET review_id=?1,review_subject=?2,review_method=?3,review_path=?4 WHERE id=?5 AND lease_until=?6",
+            params![next_review.as_ref().map(|r|r.id), next_review.as_ref().map(|r|r.subject.as_str()), next_review.as_ref().map(|r|r.method.as_str()), next_review.as_ref().map(|r|r.path.as_str()), id,lease]).map_err(storage)?;
         match outcome {
             Ok(receipt)=> {
                 db.execute("UPDATE outbound_contact_request SET status=?1,remote_expired_after=?2,expired_after=CASE WHEN ?1='pending' THEN min(delivery_deadline,?2) ELSE expired_after END,last_checked_at=?3,next_attempt_at=?4,attempt_count=attempt_count+1,error_message=NULL,lease_until=NULL,updated_at=?3 WHERE id=?5 AND lease_until=?6",params![string(&receipt,"status")?,receipt["valid_before"].as_i64().unwrap(),now(),now()+if receipt["status"]=="active" {30}else{3},id,lease]).map_err(storage)?;
             }
             Err((code,error))=> {
-                db.execute("UPDATE outbound_contact_request SET status=CASE WHEN ?1 THEN 'failed' ELSE status END,attempt_count=attempt_count+CASE WHEN ?2='need_review' THEN 0 ELSE 1 END,error_message=?2,next_attempt_at=?3,lease_until=NULL,last_checked_at=?4,updated_at=?4 WHERE id=?5 AND lease_until=?6",params![error != "need_review" && matches!(code,400|403|404|410),error,now()+if error == "need_review" {30} else {5},now(),id,lease]).map_err(storage)?;
+                db.execute("UPDATE outbound_contact_request SET status=CASE WHEN ?1 THEN 'failed' ELSE status END,attempt_count=attempt_count+CASE WHEN ?2='need_review' THEN 0 ELSE 1 END,error_message=?2,next_attempt_at=?3,lease_until=NULL,last_checked_at=?4,updated_at=?4 WHERE id=?5 AND lease_until=?6",params![error != "need_review" && matches!(code,400|403|404|409|410),error,now()+if error == "need_review" {30} else {5},now(),id,lease]).map_err(storage)?;
             }
         }
-        Ok(())
+        tx.commit().map_err(storage)
     }).await.map_err(|e|fail(500,e.to_string()))?
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_polling_never_creates_another_approval_or_accepts_a_relationship() {
+        assert!(!review_progress(200, &json!({"status":"pending"})).unwrap());
+        for status in ["allowed", "consumed"] {
+            assert!(review_progress(200, &json!({"status":status})).unwrap());
+        }
+        assert_eq!(
+            review_progress(200, &json!({"status":"denied"})).unwrap_err(),
+            fail(409, "review_denied")
+        );
+        assert_eq!(
+            review_progress(200, &json!({"status":"expired"})).unwrap_err(),
+            fail(410, "review_expired")
+        );
+        assert_eq!(
+            review_progress(400, &json!({"error":"need_review","review_id":99}))
+                .unwrap_err()
+                .0,
+            409
+        );
+    }
 
     #[test]
     fn legacy_capabilities_are_never_reinterpreted() {
