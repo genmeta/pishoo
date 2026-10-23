@@ -399,7 +399,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 payload.clone(),
             )
             .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{pending}");
+            assert_eq!(status, StatusCode::ACCEPTED, "{pending}");
             expect(
                 bob,
                 Method::PATCH,
@@ -543,7 +543,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         payload.clone(),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{pending}");
+    assert_eq!(status, StatusCode::ACCEPTED, "{pending}");
     let (_, repeated) = remote_json(
         &alice.endpoint,
         bob.name(),
