@@ -37,7 +37,7 @@
 
 ### Dependencies and compatibility
 
-- Pin daccess 0.2.0 to commit `76862af3b6a03d56ea68c6bdc4e7edb74805238b`.
+- Use the published daccess 0.2.0 crate from crates.io.
 - Deploy the matching ZIP `author` / `.waz` registry protocol before using store
   installation or updates. Old `publisher` / `.pkg` HTTP responses are unsupported.
 - Publish compatible application releases and their exact dependencies separately;

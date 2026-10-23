@@ -1155,7 +1155,8 @@ dependencies = [
 [[package]]
 name = "daccess"
 version = "0.2.0"
-source = "git+https://github.com/genmeta/daccess.git?rev=76862af3b6a03d56ea68c6bdc4e7edb74805238b#76862af3b6a03d56ea68c6bdc4e7edb74805238b"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ad584655bdac1828a98f2657f7460e3a76b32ad7204d435a84c49c2bc2093a2"
 dependencies = [
  "axum",
  "chrono",
