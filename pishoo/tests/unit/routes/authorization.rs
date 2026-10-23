@@ -415,10 +415,12 @@ async fn business_requests_trigger_break_and_waiting_reviews_without_a_permissio
         .oneshot(reviewed_request("break"))
         .await
         .unwrap();
-    assert_eq!(response.status(), 400);
+    assert_eq!(response.status(), 202);
+    assert_eq!(response.headers()["retry-after"], "3");
     let pending: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(pending["error"], "need_review");
+    assert_eq!(pending["status"], "pending_review");
+    assert!(pending.get("error").is_none());
     assert_eq!(access.pending_persistent_reviews(0, 10).await.unwrap().0, 1);
     let management = access_router(access.clone());
     for action in ["allow", "deny", "cancel"] {
@@ -563,7 +565,10 @@ async fn waiting_timeout_cleans_up_without_granting_acl() {
         tokio::task::yield_now().await;
     }
     tokio::time::advance(std::time::Duration::from_secs(301)).await;
-    assert_eq!(task.await.unwrap().unwrap().status(), 403);
+    let response = task.await.unwrap().unwrap();
+    assert_eq!(response.status(), 504);
+    let body: serde_json::Value = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["error"], "review_timeout");
     let response = management
         .oneshot(
             Request::builder()
