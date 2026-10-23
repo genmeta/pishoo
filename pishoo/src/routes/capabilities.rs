@@ -39,8 +39,10 @@ pub(crate) fn capabilities_router(profile: IdentityProfile) -> Router {
     };
     Router::new().route(
         "/std/acl/permissions",
-        axum::routing::get(move || {
+        axum::routing::get(move |request: Request<Body>| {
             let profile = profile.clone();
+            let details = form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes())
+                .any(|(key, value)| key == "details" && value == "1");
             async move {
                 let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
                     let path = profile.join(".volume/sys/setting/database");
@@ -67,20 +69,36 @@ pub(crate) fn capabilities_router(profile: IdentityProfile) -> Router {
                         "CASE WHEN coalesce(l.author,'')<>'' THEN l.author||'/'||l.name ELSE l.name END"
                     } else { "l.id" };
                     let mut permissions = BTreeMap::<String, BTreeMap<String, BTreeSet<String>>>::new();
+                    let mut titles = BTreeMap::<String, Value>::new();
                     let mut statement = tx.prepare(&format!(
-                        "SELECT ({package})||' · '||c.title,CASE WHEN coalesce({standard},0)=0 AND substr(o.path,1,5)='/std/' THEN '/'||l.name||substr(o.path,5) ELSE o.path END,o.method FROM lib_capability c JOIN lib l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operation o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
+                        "SELECT ({package}),c.title,CASE WHEN coalesce({standard},0)=0 AND substr(o.path,1,5)='/std/' THEN '/'||l.name||substr(o.path,5) ELSE o.path END,o.method FROM lib_capability c JOIN lib l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operation o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
                     ))?;
                     for row in statement.query_map([], |row| Ok((
-                        row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
                     )))? {
-                        let (title, path, method) = row?;
-                        let paths = permissions.entry(title).or_default();
+                        let (package, title, path, method) = row?;
+                        let localized = serde_json::from_str::<Value>(&title).ok()
+                            .filter(|value| value["en"].is_string() && value["zh-CN"].is_string());
+                        // Keep existing bilingual catalog identities stable across locales.
+                        let label = localized.as_ref().map(|value| format!("{} / {}",
+                            value["zh-CN"].as_str().unwrap(), value["en"].as_str().unwrap()))
+                            .unwrap_or_else(|| title.clone());
+                        let id = format!("{package} · {label}");
+                        titles.entry(id.clone()).or_insert_with(|| localized.unwrap_or(Value::String(title)));
+                        let paths = permissions.entry(id).or_default();
                         if let (Some(path), Some(method)) = (path, method) {
                             paths.entry(path).or_default().insert(method);
                         }
                     }
-                    Ok(serde_json::json!(permissions))
+                    if details {
+                        Ok(permissions.into_iter().map(|(id, endpoints)| {
+                            let title = titles.remove(&id).unwrap();
+                            (id, serde_json::json!({"title":title,"endpoints":endpoints}))
+                        }).collect::<serde_json::Map<String, Value>>().into())
+                    } else {
+                        Ok(serde_json::json!(permissions))
+                    }
                 }).await;
                 let mut response = match result {
                     Ok(Ok(value)) => axum::Json(value).into_response(),
@@ -241,11 +259,21 @@ fn write_declarations(
         if id.contains('/') || !ids.insert(id) {
             return Err(Error::BadRequest("invalid or duplicate group id".into()));
         }
-        let title = object
-            .get("title")
-            .and_then(Value::as_str)
-            .filter(|title| !title.trim().is_empty() && !title.chars().any(char::is_control))
-            .ok_or_else(|| Error::BadRequest("invalid group title".into()))?;
+        let title = &group["title"];
+        let valid_text = |value: &Value| {
+            value
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty() && !text.chars().any(char::is_control))
+        };
+        if !(valid_text(title)
+            || title.as_object().is_some_and(|values| {
+                values.len() == 2 && valid_text(&title["en"]) && valid_text(&title["zh-CN"])
+            }))
+        {
+            return Err(Error::BadRequest(
+                "title must be text or contain en and zh-CN text".into(),
+            ));
+        }
         let operations = object
             .get("endpoints")
             .and_then(Value::as_array)
@@ -272,7 +300,14 @@ fn write_declarations(
             }
             declared.push(endpoint);
         }
-        rows.push((id.to_owned(), title.to_owned(), declared));
+        rows.push((
+            id.to_owned(),
+            title
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| title.to_string()),
+            declared,
+        ));
     }
     permissions(&tx, name, &rows)?;
     tx.commit()?;

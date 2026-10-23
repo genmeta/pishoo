@@ -242,6 +242,66 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
         changed["alice.dhttp.net/notes · Original"],
         original["alice.dhttp.net/notes · Original"]
     );
+    let mut localized = replacement.clone();
+    localized[0]["title"] = json!({"en":"Receive","zh-CN":"接收消息"});
+    assert_eq!(
+        call(
+            &router,
+            &local,
+            "PUT",
+            "/std/acl/permissions?name=message",
+            Some(localized.clone()),
+            true
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        catalog(&router, &local).await["std.dhttp.net/message · 接收消息 / Receive"],
+        json!({"/std/message":["PUT"]})
+    );
+    let response = call(
+        &router,
+        &local,
+        "GET",
+        "/std/acl/permissions?details=1",
+        None,
+        true,
+    )
+    .await;
+    let body = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    let details: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        details["std.dhttp.net/message · 接收消息 / Receive"]["title"],
+        localized[0]["title"]
+    );
+    for title in [
+        json!({"en":"Receive"}),
+        json!({"en":"Receive","zh-CN":""}),
+        json!({"en":true,"zh-CN":"消息"}),
+    ] {
+        localized[0]["title"] = title;
+        assert_eq!(
+            call(
+                &router,
+                &local,
+                "PUT",
+                "/std/acl/permissions?name=message",
+                Some(localized.clone()),
+                true
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            catalog(&router, &local).await["std.dhttp.net/message · 接收消息 / Receive"],
+            json!({"/std/message":["PUT"]})
+        );
+    }
     // Reinstallation uses the package's declarations, replacing a manual edit.
     crate::package::install_package(&profile, &packages[0].0, &packages[0].1, &runtime).unwrap();
     assert_eq!(catalog(&router, &local).await, original);

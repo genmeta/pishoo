@@ -1207,6 +1207,19 @@ fn access_groups_validate_modern_and_legacy_declarations() {
         )
     };
     assert!(read_package(&package(&document)).is_ok());
+    let mut translated = document.clone();
+    translated["x-access-groups"]["message"]["title"] = json!({"en":"Receive", "zh-CN":"接收消息"});
+    assert!(read_package(&package(&translated)).is_ok());
+    for title in [
+        json!({}),
+        json!({"en":"Receive"}),
+        json!({"en":42,"zh-CN":"消息"}),
+        json!({"en":" ","zh-CN":"消息"}),
+        json!({"en":"Receive","zh-CN":"消息","fr":"Messages"}),
+    ] {
+        translated["x-access-groups"]["message"]["title"] = title;
+        assert!(read_package(&package(&translated)).is_err());
+    }
     let mut legacy = document.clone();
     legacy["x-pishoo"]["access-groups"] = legacy
         .as_object_mut()
