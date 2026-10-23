@@ -10,10 +10,12 @@ use dhttp_home::identity::IdentityProfile;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{Sandbox, install_package, installed_packages, package_metadata, read_package};
+use super::{Sandbox, installed_packages, package_metadata, read_package};
 #[cfg(test)]
 use super::{install_lib, package_file};
-use crate::{Error, Result, sandbox::Lib};
+#[cfg(test)]
+use crate::sandbox::Lib;
+use crate::{Error, Result};
 
 pub(crate) const STORE_NAME: &str = "store.dhttp.net";
 // Independent store-server/DEPLOYMENT.md, verified on 2026-10-13.
@@ -134,79 +136,11 @@ pub(crate) async fn install_store_package(
         if sandbox.tasks.is_closed() {
             return Err(Error::Denied);
         }
-        let runtime = sandbox.runtime.clone();
-        let mut result = Value::Null;
-        for (id, bytes) in ordered {
-            let metadata = package_metadata(&read_package(&bytes)?)?;
-            let current = match installed_packages(profile, Some(&id)) {
-                Ok(value) => Some(value),
-                Err(Error::RouteNotFound) => None,
-                Err(e) => return Err(e),
-            };
-            let reused = id != root_id
-                && current.as_ref().is_some_and(|value| {
-                    value["version"] == metadata["version"]
-                        && value["has_lib"] == metadata["has_lib"]
-                        && value["has_app"] == metadata["has_app"]
-                })
-                && (metadata["has_lib"] != true
-                    || sandbox.libs.get(&id).is_some_and(|lib| {
-                        Some(lib.openapi.info.version.as_str()) == metadata["version"].as_str()
-                    }))
-                && (metadata["has_app"] != true
-                    || sandbox.apps.get(&id).is_some_and(|app| {
-                        package_metadata(app)
-                            .is_ok_and(|value| value["version"] == metadata["version"])
-                    }));
-            if id != root_id
-                && current
-                    .as_ref()
-                    .is_some_and(|v| v["version"] != metadata["version"])
-            {
-                return Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("incompatible installed dependency {id}"),
-                )));
-            }
-            if !reused {
-                let value = install_package(profile, &id, &bytes, &runtime)?;
-                // Prepare both runtime projections, then replace them while the
-                // existing Sandbox write lock excludes new request snapshots.
-                let lib = if metadata["has_lib"] == true {
-                    let package = super::disk_bytes(profile, &super::lib_root(profile)?, &id)?;
-                    Some(Arc::new(Lib::load(
-                        runtime.clone(),
-                        id.clone(),
-                        &package,
-                        &profile
-                            .join(".volume")
-                            .join(if id.starts_with("std.dhttp.net/") {
-                                format!("std/{}", id.rsplit('/').next().unwrap())
-                            } else {
-                                id.rsplit('/').next().unwrap().to_owned()
-                            }),
-                    )?))
-                } else {
-                    None
-                };
-                let app = if metadata["has_app"] == true {
-                    super::installed_apps(profile, Some(&id))?.remove(&id)
-                } else {
-                    None
-                };
-                sandbox.libs.remove(&id);
-                sandbox.apps.remove(&id);
-                if let Some(lib) = lib {
-                    sandbox.libs.insert(id.clone(), lib);
-                }
-                if let Some(app) = app {
-                    sandbox.apps.insert(id.clone(), app);
-                }
-                if id == root_id {
-                    result = value;
-                }
-            }
-        }
+        // The root is last in dependency order. Prepare its response before the
+        // commit so no fallible work follows the durable/runtime switch.
+        let result =
+            super::lib_metadata(&read_package(&ordered.last().unwrap().1)?, Some(&root_id));
+        super::files::install_packages(profile, &ordered, &mut sandbox)?;
         Ok(result)
     })
 }

@@ -1026,6 +1026,83 @@ fn interrupted_package_updates_recover_both_resources_at_the_database_commit_bou
 }
 
 #[test]
+fn interrupted_dependency_update_recovers_the_entire_batch_even_when_one_packages_facts_match() {
+    for (committed, all_swapped, partial_cleanup) in [
+        (false, false, false),
+        (false, true, false),
+        (true, true, false),
+        (true, true, true),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let profile = profile(root.path(), "owner");
+        load_server_config(&profile).unwrap();
+        let db = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .unwrap();
+        db.execute_batch("INSERT INTO package(name,author,version,has_lib,has_app) VALUES ('profile','alice.dhttp.net','2.0.0',1,0), ('workspace','alice.dhttp.net','1.0.0',0,1);").unwrap();
+        let stage = profile.join(".pishoo-interrupted-batch");
+        let mut entries = Vec::new();
+        // Visit the same-version member first: its matching facts alone must
+        // never be mistaken for a successful transaction.
+        for name in ["workspace", "profile"] {
+            let facts: String = db
+                .query_row(
+                    include_str!("../../../src/package/sql/registration-facts-v3.sql"),
+                    [name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            std::fs::create_dir_all(stage.join(name)).unwrap();
+            entries.push(serde_json::json!({"id":format!("alice.dhttp.net/{name}"),"directory":name,"facts":facts,"resources":[
+                {"kind":"lib","old":name=="profile","new":name=="profile"},
+                {"kind":"app","old":name=="workspace","new":name=="workspace"}
+            ]}));
+        }
+        if !committed {
+            db.execute(
+                "UPDATE package SET version='1.0.0' WHERE name='profile'",
+                [],
+            )
+            .unwrap();
+        }
+        std::fs::write(profile.join("lib/profile.wasm"), b"new component").unwrap();
+        std::fs::write(stage.join("profile/old-lib"), b"old component").unwrap();
+        std::fs::create_dir_all(profile.join("app/workspace")).unwrap();
+        if all_swapped {
+            std::fs::write(profile.join("app/workspace/index.html"), b"new page").unwrap();
+            std::fs::create_dir_all(stage.join("workspace/old-app")).unwrap();
+            std::fs::write(stage.join("workspace/old-app/index.html"), b"old page").unwrap();
+        } else {
+            std::fs::write(profile.join("app/workspace/index.html"), b"old page").unwrap();
+            std::fs::create_dir_all(stage.join("workspace/new-app")).unwrap();
+            std::fs::write(stage.join("workspace/new-app/index.html"), b"new page").unwrap();
+        }
+        std::fs::write(
+            stage.join(".transaction.json"),
+            serde_json::to_vec(&serde_json::json!({"packages":entries})).unwrap(),
+        )
+        .unwrap();
+        if partial_cleanup {
+            std::fs::remove_dir_all(stage.join("workspace")).unwrap();
+        }
+        initialize_directories(&profile).unwrap();
+        assert_eq!(
+            std::fs::read(profile.join("lib/profile.wasm")).unwrap(),
+            if committed {
+                b"new component"
+            } else {
+                b"old component"
+            }
+        );
+        assert_eq!(
+            std::fs::read(profile.join("app/workspace/index.html")).unwrap(),
+            if committed { b"new page" } else { b"old page" }
+        );
+        assert!(!stage.exists());
+        initialize_directories(&profile).unwrap();
+    }
+}
+
+#[test]
 fn interrupted_first_install_removes_only_published_unregistered_resources() {
     for published in [false, true] {
         let root = tempfile::tempdir().unwrap();
