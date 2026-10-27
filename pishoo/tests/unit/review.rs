@@ -85,26 +85,42 @@ fn split_v2(profile: &IdentityProfile, conflict: bool) {
 }
 
 #[tokio::test]
-async fn split_v2_registries_are_preserved_and_require_reinitialization() {
+async fn split_v2_registries_are_preserved_but_not_imported_into_fresh_configuration() {
     for conflict in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let profile = identity(root.path()).await;
         split_v2(&profile, conflict);
-        let paths = ["setting", "lib", "app", "pkg"]
-            .map(|name| profile.join(format!(".volume/sys/{name}/database")));
+        let setting = std::fs::read(profile.join(".volume/sys/setting/database")).unwrap();
+        let paths = ["lib", "app"].map(|name| profile.join(format!(".volume/sys/{name}/database")));
         let before = paths
             .iter()
             .map(|path| std::fs::read(path).unwrap())
             .collect::<Vec<_>>();
-        assert!(
-            load_server_config(&profile)
-                .unwrap_err()
-                .to_string()
-                .contains("reinitialize")
-        );
+        assert_eq!(load_server_config(&profile).unwrap().listen, "off");
         for (path, bytes) in paths.iter().zip(before) {
             assert_eq!(std::fs::read(path).unwrap(), bytes);
         }
+        let archive = std::fs::read_dir(profile.join(".volume/sys"))
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".setting-v2-")
+            })
+            .unwrap();
+        assert_eq!(
+            std::fs::read(archive.path().join("setting/database")).unwrap(),
+            setting
+        );
+        let conn = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM package", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 }
 

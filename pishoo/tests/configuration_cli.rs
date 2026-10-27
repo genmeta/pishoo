@@ -1,7 +1,7 @@
 use std::process::Command;
 
 #[test]
-fn local_cli_initializes_current_schema_and_preserves_rejected_old_data() {
+fn local_cli_initializes_current_schema_and_preserves_unknown_data() {
     let root = tempfile::Builder::new()
         .prefix("configuration space ")
         .tempdir()
@@ -49,13 +49,13 @@ fn local_cli_initializes_current_schema_and_preserves_rejected_old_data() {
             .unwrap(),
         3
     );
-    db.pragma_update(None, "user_version", 1).unwrap();
+    db.pragma_update(None, "user_version", 99).unwrap();
     drop(db);
     let before = std::fs::read(&path).unwrap();
     for args in [vec![], vec!["--init"], vec!["--listen", "all"]] {
         let result = invoke(&args);
         assert!(!result.status.success());
-        assert!(String::from_utf8_lossy(&result.stderr).contains("reinitialize"));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("unsupported configuration"));
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
     assert!(!profile.join(".volume/sys/lib").exists());

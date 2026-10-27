@@ -280,6 +280,15 @@ stderr and a nonzero exit status. gmutils finds Pishoo on PATH, or via `PISHOO_B
 
 Pishoo owns database initialization. `.volume/sys/` contains `setting`, `pkg`,
 `access`, and `contact`; package registration uses `pkg/database`. New identities
-never create `sys/app` or `sys/lib`. Configuration v1/v2 and old config.db files
-are rejected with a request to reinitialize the service, without migration or
-deletion. Identity credentials remain untouched.
+never create `sys/app` or `sys/lib`. Legacy `db/config.db` files are ignored and
+left untouched. If configuration v1/v2 occupies the current setting path, Pishoo
+archives the complete setting directory (including SQLite sidecars) under a unique
+`.volume/sys/.setting-vN-*/setting/` directory, then creates fresh v3 defaults.
+Old settings are not migrated; default listening is off until explicitly enabled.
+Valid v3 settings, package registrations, credentials and business data are retained.
+
+Startup uses the same per-identity reconciliation as later scans. Failed identities
+are logged and retried without stopping healthy identities. Identities with old or
+empty host configuration get fresh defaults; credentials alone do not enable hosting.
+Unsupported future schemas, corrupt databases and filesystem errors are reported
+without overwriting those files or terminating the whole host.
