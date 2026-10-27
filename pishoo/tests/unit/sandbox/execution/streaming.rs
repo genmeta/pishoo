@@ -105,11 +105,8 @@ async fn upload_error_ends_native_body_and_reaps_guest() {
 async fn large_echo_reports_fuel_exhaustion() {
     use wasmtime::Store;
     use wasmtime_wasi_http::{
-        WasiHttpCtx,
-        p2::{
-            WasiHttpView,
-            bindings::{Proxy, http::types},
-        },
+        WasiHttpCtx, WasiHttpView,
+        p2::bindings::{Proxy, http::types},
     };
 
     let directory = tempfile::tempdir().unwrap();

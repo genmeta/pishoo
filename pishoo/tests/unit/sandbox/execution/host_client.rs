@@ -281,10 +281,7 @@ async fn host_client_real_dhttp_transport_uses_endpoint_credentials() {
 
 #[tokio::test]
 async fn granted_http_streams_before_upload_eof_and_checks_local_certificate_sequence() {
-    use wasmtime_wasi_http::p2::{
-        WasiHttpHooks,
-        types::{HostFutureIncomingResponse, OutgoingRequestConfig},
-    };
+    use wasmtime_wasi_http::{RequestOptions, WasiHttpHooks};
     let endpoint = endpoint();
     let (access, _) = native(&endpoint).await;
     let api = axum::Router::new().route(
@@ -298,38 +295,32 @@ async fn granted_http_streams_before_upload_eof_and_checks_local_certificate_seq
         access,
         api,
     };
-    let config = || OutgoingRequestConfig {
-        use_tls: true,
-        connect_timeout: Duration::from_secs(5),
-        first_byte_timeout: Duration::from_secs(5),
-        between_bytes_timeout: Duration::from_secs(5),
+    let config = || {
+        Some(RequestOptions {
+            connect_timeout: Some(Duration::from_secs(5)),
+            first_byte_timeout: Some(Duration::from_secs(5)),
+            between_bytes_timeout: Some(Duration::from_secs(5)),
+        })
     };
     let (sender, body) = upload();
     let request = Request::post("https://~/echo")
         .body(
-            body.map_err(|e| {
-                wasmtime_wasi_http::p2::bindings::http::types::ErrorCode::InternalError(Some(
-                    e.to_string(),
-                ))
-            })
-            .boxed_unsync(),
+            body.map_err(|e| wasmtime_wasi_http::Error::InternalError(Some(e.to_string())))
+                .boxed_unsync(),
         )
         .unwrap();
-    let future = outgoing.send_request(request, config()).unwrap();
-    let HostFutureIncomingResponse::Pending(future) = future else {
-        panic!("expected asynchronous response")
-    };
-    let mut response = tokio::time::timeout(Duration::from_secs(5), future)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let future = outgoing.send_request(request, config(), Box::new(async { Ok(()) }));
+    let (mut response, _completion) =
+        tokio::time::timeout(Duration::from_secs(5), Box::into_pin(future))
+            .await
+            .unwrap()
+            .unwrap();
     sender
         .send(Ok(Frame::data(Bytes::from_static(b"first chunk"))))
         .await
         .unwrap();
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), response.resp.body_mut().frame())
+        tokio::time::timeout(Duration::from_secs(5), response.body_mut().frame())
             .await
             .unwrap()
             .unwrap()
@@ -340,7 +331,7 @@ async fn granted_http_streams_before_upload_eof_and_checks_local_certificate_seq
     );
     assert!(!sender.is_closed());
     drop(sender);
-    assert!(response.resp.body_mut().frame().await.is_none());
+    assert!(response.body_mut().frame().await.is_none());
     let request = Request::post("https://~:1/echo")
         .body(
             http_body_util::Empty::<Bytes>::new()
@@ -348,7 +339,11 @@ async fn granted_http_streams_before_upload_eof_and_checks_local_certificate_seq
                 .boxed_unsync(),
         )
         .unwrap();
-    assert!(outgoing.send_request(request, config()).is_err());
+    assert!(
+        Box::into_pin(outgoing.send_request(request, config(), Box::new(async { Ok(()) })))
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -376,4 +371,42 @@ async fn cli_run_deadline_cancels_and_reaps_the_store_task() {
     assert!(matches!(result, Err(Error::Deadline)));
     assert!(tasks.is_empty());
     reaped(&tasks).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn outgoing_default_options_preserve_review_wait_and_body_idle_timeout() {
+    use wasmtime_wasi_http::{Error as HttpError, WasiHttpHooks};
+    let endpoint = endpoint();
+    let (access, _) = native(&endpoint).await;
+    let api = axum::Router::new().route(
+        "/wait",
+        axum::routing::get(|| async {
+            tokio::time::sleep(Duration::from_secs(16)).await;
+            let frames =
+                futures::stream::pending::<std::result::Result<Frame<Bytes>, std::io::Error>>();
+            http::Response::new(axum::body::Body::new(StreamBody::new(frames)))
+        }),
+    );
+    let mut outgoing = Outgoing::Granted {
+        endpoint,
+        access,
+        api,
+    };
+    let request = Request::get("https://~/wait")
+        .header("if-reviewed", "waiting")
+        .body(
+            http_body_util::Empty::<Bytes>::new()
+                .map_err(|never| match never {})
+                .boxed_unsync(),
+        )
+        .unwrap();
+    let (mut response, completion) =
+        Box::into_pin(outgoing.send_request(request, None, Box::new(async { Ok(()) })))
+            .await
+            .unwrap();
+    assert!(matches!(
+        response.body_mut().frame().await,
+        Some(Err(HttpError::HttpResponseTimeout))
+    ));
+    Box::into_pin(completion).await.unwrap();
 }

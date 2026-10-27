@@ -17,11 +17,8 @@ use wasmtime_wasi::{
     random::WasiRandomView,
 };
 use wasmtime_wasi_http::{
-    WasiHttpCtx,
-    p2::{
-        WasiHttpCtxView, WasiHttpView,
-        bindings::{Proxy, ProxyPre, http::types},
-    },
+    WasiHttpCtx, WasiHttpCtxView, WasiHttpView,
+    p2::bindings::{Proxy, ProxyPre, http::types},
 };
 
 use super::{
@@ -250,12 +247,7 @@ impl Lib {
         }
         let mut builder = WasiCtx::builder();
         builder
-            .preopened_dir(
-                &data,
-                "/db",
-                wasmtime_wasi::DirPerms::all(),
-                wasmtime_wasi::FilePerms::all(),
-            )
+            .preopened_dir(&data, "/db", wasmtime_wasi::FsPerms::ReadWrite)
             .map_err(Error::Guest)?;
         let filesystem = builder.build().filesystem().clone();
         Ok(Self {
@@ -429,7 +421,7 @@ impl Invocation {
         // Dropping the JoinHandle detaches the guest; TaskTracker still owns
         // its lifecycle. The existing WASI body supplies frames and errors.
         Ok(response.map(|body| {
-            body.map_err(|error| Error::GuestRejectedResponse(error).body_error())
+            body.map_err(|error| Error::Guest(wasmtime::Error::new(error)).body_error())
                 .boxed_unsync()
         }))
     }
@@ -539,8 +531,9 @@ fn repair_guest_ownership(
             .get(&descriptor)
             .map_err(|error| Error::Guest(error.into()))?
         {
-            let owner = directory.dir.try_clone()?.into_std_file().metadata()?;
-            repair_guest_directory(&directory.dir, &owner)?;
+            let directory = cap_std::fs::Dir::from_std_file(directory.dir.try_clone()?);
+            let owner = directory.try_clone()?.into_std_file().metadata()?;
+            repair_guest_directory(&directory, &owner)?;
         }
     }
     Ok(())
