@@ -55,3 +55,50 @@ async fn identity_signatures_enforce_bounds_and_handshake_scope() {
         Err(VerifyError::Unavailable)
     ));
 }
+
+#[test]
+fn wasi_http_rejects_conflicting_lengths_and_handles_long_unicode_paths() {
+    use wasmtime::component::Resource;
+    use wasmtime_wasi_http::{
+        WasiHttpCtxView,
+        p2::bindings::http::types::{HostFields, HostOutgoingRequest},
+    };
+    let mut table = ResourceTable::new();
+    let mut http = WasiHttpCtx::new();
+    let mut outgoing = Outgoing::Denied;
+    let mut view = WasiHttpCtxView {
+        ctx: &mut http,
+        table: &mut table,
+        hooks: &mut outgoing,
+    };
+    assert!(
+        HostFields::from_list(
+            &mut view,
+            vec![
+                ("content-length".into(), b"1".to_vec()),
+                ("content-length".into(), b"2".to_vec()),
+            ]
+        )
+        .is_err()
+    );
+    let fields = HostFields::new(&mut view).unwrap();
+    let request = HostOutgoingRequest::new(&mut view, fields).unwrap();
+    // The query offset wraps into the UTF-8 character in vulnerable http versions.
+    let path = format!("/é{}?query=1", "a".repeat(65_535));
+    let _ = HostOutgoingRequest::set_path_with_query(
+        &mut view,
+        Resource::new_borrow(request.rep()),
+        Some(path),
+    )
+    .unwrap();
+    assert!(
+        HostOutgoingRequest::set_path_with_query(
+            &mut view,
+            Resource::new_borrow(request.rep()),
+            Some("/normal?query=1".into()),
+        )
+        .unwrap()
+        .is_ok()
+    );
+    HostOutgoingRequest::drop(&mut view, request).unwrap();
+}
