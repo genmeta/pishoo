@@ -49,6 +49,12 @@ async fn package_registry_records_both_resources_dates_and_capabilities() {
     assert!(profile.join(".volume/sys/pkg/database").is_file());
     assert!(!profile.join(".volume/sys/lib").exists());
     assert!(!profile.join(".volume/sys/app").exists());
+    // Reload the installed registry and runtime resources from the same identity.
+    load_server_config(&profile).unwrap();
+    let mut reloaded = Sandbox::new(Arc::new(runtime));
+    reloaded.load_libs(&profile).unwrap();
+    assert!(!profile.join(".volume/sys/lib").exists());
+    assert!(!profile.join(".volume/sys/app").exists());
 }
 
 fn split_v2(profile: &IdentityProfile, conflict: bool) {
@@ -79,50 +85,27 @@ fn split_v2(profile: &IdentityProfile, conflict: bool) {
 }
 
 #[tokio::test]
-async fn compatible_v2_resources_merge_and_internal_dependencies_disappear() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = identity(root.path()).await;
-    split_v2(&profile, false);
-    load_server_config(&profile).unwrap();
-    let value = installed_packages(&profile, Some("alice.dhttp.net/hello")).unwrap();
-    assert_eq!(value["has_lib"], true);
-    assert_eq!(value["has_app"], true);
-    assert!(value["dependencies"].as_array().unwrap().is_empty());
-    assert!(value["installed_at"].is_null());
-    load_server_config(&profile).unwrap();
-    assert_eq!(
-        installed_packages(&profile, None)
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn conflicting_v2_resources_preserve_old_rows_and_can_retry() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = identity(root.path()).await;
-    split_v2(&profile, true);
-    assert!(load_server_config(&profile).is_err());
-    let db = rusqlite::Connection::open(profile.join(".volume/sys/app/database")).unwrap();
-    assert_eq!(
-        db.query_row("SELECT author FROM app", [], |r| r.get::<_, String>(0))
-            .unwrap(),
-        "bob.dhttp.net"
-    );
-    db.execute("UPDATE app SET author='alice.dhttp.net'", [])
-        .unwrap();
-    load_server_config(&profile).unwrap();
-    assert_eq!(
-        installed_packages(&profile, None)
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+async fn split_v2_registries_are_preserved_and_require_reinitialization() {
+    for conflict in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let profile = identity(root.path()).await;
+        split_v2(&profile, conflict);
+        let paths = ["setting", "lib", "app", "pkg"]
+            .map(|name| profile.join(format!(".volume/sys/{name}/database")));
+        let before = paths
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            load_server_config(&profile)
+                .unwrap_err()
+                .to_string()
+                .contains("reinitialize")
+        );
+        for (path, bytes) in paths.iter().zip(before) {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+    }
 }
 
 #[tokio::test]

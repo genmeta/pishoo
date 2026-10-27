@@ -142,7 +142,7 @@ and capability changes preserve existing ACL rules and private data. See the
 
 Database SQL files live beside their owning modules in [contact/sql](pishoo/src/contact/sql/) and [package/sql](pishoo/src/package/sql/), with schema versions and migration source/target versions in their filenames.
 
-Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's home. Listening is stored in `<identity>/.volume/sys/setting/database` as the `setting` key `listen`; an absent key keeps the identity stopped across discovery and restarts. `genmeta listen --id NAME internal` opts in, `all` selects both internal and external scopes, and `genmeta listen --id NAME off` deletes the key after confirmation. Proxy rows use `proxy_location`. Existing `db/config.db` remains a migration input and backup. Endpoint and shared Network lifetimes are unchanged. See [Review implementation](REVIEW-IMPLEMENTATION-2026-10-21.md).
+Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's home. Listening is stored in `<identity>/.volume/sys/setting/database` as the `setting` key `listen`; an absent key keeps the identity stopped across discovery and restarts. `genmeta listen --id NAME internal` opts in, `all` selects both internal and external scopes, and `genmeta listen --id NAME off` deletes the key after confirmation. Proxy rows use `proxy_location`. Old `db/config.db` and configuration v1/v2 are rejected without migration; explicitly reinitialize the service before using this release. Endpoint and shared Network lifetimes are unchanged. See [Review implementation](REVIEW-IMPLEMENTATION-2026-10-21.md).
 
 Local proxies support HTTP/3 WebSocket extended CONNECT (`:protocol=websocket`, version 13), translating the upstream HTTP/1.1 upgrade into an H3 200 and streaming opaque frames in both directions. Handshake attempts have bounded timeouts; established sessions have no 30-second lifetime limit. All system HTTP routes are reserved under `/std`, including Lib execution for authenticated publisher `std.dhttp.net` at its declared path prefixed with `/std`. Other Libs use `/<name>` plus their declared path; a nonstandard journal declaring `/std/xxxx` is exposed only at `/journal/std/xxxx`. Missing system paths return 404 and unsupported Lib methods return 405 without reaching proxies. Ordinary `/api/*` and `/file/*` belong to configured proxies independently of loaded Libs. Home Assistant and OpenCode can use their native upstream paths.
 
@@ -260,3 +260,26 @@ Access review decisions require an explicit boolean `remember` alongside `id`, `
 Pishoo uses daccess 0.2.0 from crates.io in `pishoo/Cargo.toml`, with the exact resolved package and checksum recorded in `Cargo.lock`. Host compilation and VM testing should use the locked dependencies and Message 0.2.1 / Workspace 0.3.2.
 
 App and Lib developers must distinguish `202 pending_review` from accepted business jobs. See the [approval integration guide](docs/approval-handling.md) for response handling, live waits, timeouts, identity-bound status queries, idempotency and pending-state UI guidance.
+
+### Local configuration with gmutils (release/0.9.0)
+
+Use matching gmutils and Pishoo releases. `genmeta listen` and identity service
+activation delegate to Pishoo locally, even when HTTP listening is off:
+
+```sh
+pishoo configure --profile /absolute/path/to/identity --init
+pishoo configure --profile /absolute/path/to/identity --listen all
+pishoo configure --profile /absolute/path/to/identity
+```
+
+`--init` creates the current v3 schema with listening off, or preserves an existing
+configuration. `--listen internal|external|all|off` initializes when needed and
+updates listening; `off` preserves mounts and other data. With no option the
+command only reads. Success prints a JSON object containing `listen`; errors use
+stderr and a nonzero exit status. gmutils finds Pishoo on PATH, or via `PISHOO_BIN`.
+
+Pishoo owns database initialization. `.volume/sys/` contains `setting`, `pkg`,
+`access`, and `contact`; package registration uses `pkg/database`. New identities
+never create `sys/app` or `sys/lib`. Configuration v1/v2 and old config.db files
+are rejected with a request to reinitialize the service, without migration or
+deletion. Identity credentials remain untouched.

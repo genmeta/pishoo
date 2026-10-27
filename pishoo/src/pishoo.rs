@@ -23,3 +23,24 @@ pub use server::run;
 
 type Body = dhttp::Body;
 type Result<T> = std::result::Result<T, Error>;
+
+/// Local service configuration used by gmutils; Pishoo owns schema initialization.
+pub fn configure(
+    profile: &dhttp_home::identity::IdentityProfile,
+    mode: Option<&str>,
+    initialize: bool,
+) -> Result<serde_json::Value> {
+    if initialize {
+        setup::load_server_config(profile)?;
+    }
+    setup::config_database(
+        profile,
+        &if mode.is_some() {
+            http::Method::PATCH
+        } else {
+            http::Method::GET
+        },
+        &"/std/sys/listen".parse().unwrap(),
+        mode.map(|listen| serde_json::json!({"listen":listen})),
+    )
+}

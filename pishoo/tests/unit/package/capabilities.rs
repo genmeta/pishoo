@@ -19,19 +19,7 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
             };
             let root = tempfile::tempdir().unwrap();
             let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
-            // Exercise package registration independently of identity/ACL
-            // initialization, using the actual package schema and DB opener.
-            for name in ["setting", "pkg", "access"] {
-                let dir = profile.join(format!(".volume/sys/{name}"));
-                std::fs::create_dir_all(&dir).unwrap();
-                std::fs::File::create(dir.join("database")).unwrap();
-            }
-            let db =
-                crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
-                    .unwrap();
-            db.execute_batch(include_str!("../../../src/package/sql/schema-v3.sql"))
-                .unwrap();
-            drop(db);
+            crate::configure(&profile, None, true).unwrap();
             let mut db =
                 crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
                     .unwrap();

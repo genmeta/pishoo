@@ -72,8 +72,13 @@ fn persistent_config_connection_reads_external_commits_and_ends_each_transaction
         .unwrap();
     assert_eq!(read_server_config(&mut reader).unwrap().listen, "all");
     assert!(reader.is_autocommit());
-    // Routine reads never run the legacy schema upgrade.
-    assert!(!has_enabled_column(&writer).unwrap());
+    // Routine reads preserve the current schema.
+    assert_eq!(
+        writer
+            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
 }
 
 #[test]
@@ -814,88 +819,82 @@ fn listen_accepts_named_modes_and_preserves_mount_rules() {
 }
 
 #[test]
-fn legacy_v1_reads_without_mutation_then_migrates_disabled_to_off() {
-    for (value, enabled, expected) in [
-        (0, None, "off"),
-        (1, None, "internal"),
-        (2, Some(1), "external"),
-        (3, Some(1), "all"),
-        (2, Some(0), "off"),
-    ] {
+fn legacy_versions_are_rejected_without_mutation_or_split_registries() {
+    for version in [1, 2, 99] {
         let root = tempfile::tempdir().unwrap();
-        let profile = profile(root.path());
-        let db = Connection::open(profile.join(".volume/sys/setting/database")).unwrap();
-        db.execute_batch("DROP TABLE setting; ALTER TABLE proxy_location RENAME TO proxy_locations; CREATE TABLE settings(listen INTEGER); INSERT INTO settings VALUES(1); PRAGMA user_version=1;").unwrap();
-        db.execute("UPDATE settings SET listen=?1", [value])
-            .unwrap();
-        if let Some(enabled) = enabled {
-            db.execute_batch("ALTER TABLE settings ADD COLUMN enabled INTEGER;")
-                .unwrap();
-            db.execute("UPDATE settings SET enabled=?1", [enabled])
-                .unwrap();
-        }
-        assert_eq!(
-            config_database(
-                &profile,
-                &Method::GET,
-                &http::Uri::from_static("/std/sys/listen"),
-                None
-            )
-            .unwrap(),
-            json!({"listen":expected})
-        );
-        assert_eq!(has_enabled_column(&db).unwrap(), enabled.is_some());
-        assert_eq!(
-            db.query_row("SELECT typeof(listen) FROM settings", [], |row| row
-                .get::<_, String>(0))
-                .unwrap(),
-            "integer"
-        );
-        assert_eq!(load_server_config(&profile).unwrap().listen, expected);
-        assert!(!has_enabled_column(&db).unwrap());
-        assert_eq!(
-            db.query_row("SELECT count(*) FROM setting WHERE key='listen'", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            if expected == "off" { 0 } else { 1 }
-        );
-        assert_eq!(
+        let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+        std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
+        let path = profile.join(".volume/sys/setting/database");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(&format!("CREATE TABLE setting(key TEXT PRIMARY KEY,value TEXT); INSERT INTO setting VALUES('listen','all'); PRAGMA user_version={version};")).unwrap();
+        drop(db);
+        let before = std::fs::read(&path).unwrap();
+        let error = load_server_config(&profile).unwrap_err().to_string();
+        assert!(error.contains("reinitialize"), "{error}");
+        assert!(
             config_database(
                 &profile,
                 &Method::PATCH,
-                &http::Uri::from_static("/std/sys/listen"),
-                Some(json!({"listen":"internal"}))
+                &"/std/sys/listen".parse().unwrap(),
+                Some(json!({"listen":"off"}))
             )
-            .unwrap(),
-            json!({"listen":"internal"})
+            .is_err()
         );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        for name in ["app", "lib", "pkg", "access", "contact"] {
+            assert!(!profile.join(format!(".volume/sys/{name}")).exists());
+        }
     }
 }
 
 #[test]
-fn invalid_legacy_v1_is_not_modified_by_listen_upgrade() {
+fn local_configuration_initializes_v3_and_preserves_data_on_repeat() {
     let root = tempfile::tempdir().unwrap();
-    let profile = profile(root.path());
-    let db = Connection::open(profile.join(".volume/sys/setting/database")).unwrap();
-    db.execute_batch(
-        "DROP TABLE setting; ALTER TABLE proxy_location RENAME TO proxy_locations; CREATE TABLE settings(listen INTEGER,enabled INTEGER); INSERT INTO settings VALUES(1,9); PRAGMA user_version=1;",
-    )
-    .unwrap();
-    assert!(
-        config_database(
-            &profile,
-            &Method::PATCH,
-            &http::Uri::from_static("/std/sys/listen"),
-            Some(json!({"listen":"off"}))
-        )
-        .is_err()
-    );
-    assert!(has_enabled_column(&db).unwrap());
-    assert!(load_server_config(&profile).is_err());
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    assert!(crate::configure(&profile, None, false).is_err());
+    assert!(!profile.path().exists());
     assert_eq!(
-        db.query_row("SELECT typeof(listen) FROM settings", [], |row| row
-            .get::<_, String>(0))
+        crate::configure(&profile, Some("all"), false).unwrap(),
+        json!({"listen":"all"})
+    );
+    let db = Connection::open(profile.join(".volume/sys/setting/database")).unwrap();
+    db.execute_batch("INSERT INTO setting VALUES('theme','dark'); INSERT INTO proxy_location VALUES('/api','http://127.0.0.1:8080');").unwrap();
+    assert_eq!(
+        crate::configure(&profile, None, true).unwrap(),
+        json!({"listen":"all"})
+    );
+    assert_eq!(
+        crate::configure(&profile, Some("off"), false).unwrap(),
+        json!({"listen":"off"})
+    );
+    assert_eq!(
+        db.query_row("SELECT value FROM setting WHERE key='theme'", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap(),
+        "dark"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM proxy_location", [], |r| r
+            .get::<_, i64>(0))
             .unwrap(),
-        "integer"
+        1
+    );
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    let mut names = std::fs::read_dir(profile.join(".volume/sys"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["access", "contact", "pkg", "setting"]);
+    let pkg = Connection::open(profile.join(".volume/sys/pkg/database")).unwrap();
+    assert_eq!(
+        pkg.query_row("SELECT count(*) FROM package", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
     );
 }

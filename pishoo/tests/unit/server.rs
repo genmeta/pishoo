@@ -635,8 +635,7 @@ async fn disabled_profile_skips_credentials_libs_and_workers() {
     std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
     std::fs::create_dir_all(profile.join("lib/broken")).unwrap();
     std::fs::write(profile.join("lib/broken/.webc-proof"), b"broken").unwrap();
-    let db = rusqlite::Connection::open(profile.join(".volume/sys/setting/database")).unwrap();
-    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER); INSERT INTO settings VALUES(2, 0); CREATE TABLE proxy_locations(location TEXT, proxy_pass TEXT);").unwrap();
+    crate::configure(&profile, None, true).unwrap();
     assert!(
         load_profile(profile.clone(), Arc::new(WasmRuntime::new().unwrap()))
             .await

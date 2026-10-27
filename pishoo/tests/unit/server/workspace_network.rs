@@ -298,9 +298,7 @@ impl Resolve for PeerResolver {
 fn profile(root: &std::path::Path, name: &str) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join(name)).unwrap();
     std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
-    let db =
-        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_location(location TEXT,proxy_pass TEXT);").unwrap();
+    crate::configure(&profile, None, true).unwrap();
     profile
 }
 
