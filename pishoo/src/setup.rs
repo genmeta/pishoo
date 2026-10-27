@@ -10,7 +10,7 @@ use axum::{
 };
 use dhttp_home::identity::IdentityProfile;
 use http::{Method, Request, StatusCode, header};
-use rusqlite::{Connection, OpenFlags, TransactionBehavior, types::ValueRef};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use serde_json::{Value, json};
 
 use crate::{Error, Result, routes::reserved};
@@ -65,352 +65,6 @@ pub(crate) fn read_server_config(conn: &mut Connection) -> Result<ServerConfig> 
     Ok(config)
 }
 
-fn initialize_legacy_config(profile: &IdentityProfile) -> Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    std::fs::create_dir_all(profile.path())?;
-    if !profile.path().symlink_metadata()?.file_type().is_dir() {
-        return Err(Error::InvalidConfig(
-            "identity must be a real directory".into(),
-        ));
-    }
-    for name in [
-        ".volume",
-        ".volume/sys",
-        ".volume/sys/setting",
-        ".volume/sys/lib",
-        ".volume/sys/app",
-        ".volume/sys/access",
-        ".volume/sys/contact",
-    ] {
-        let path = profile.join(name);
-        match std::fs::DirBuilder::new()
-            .recursive(false)
-            .mode(0o700)
-            .create(&path)
-        {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
-        if !path.symlink_metadata()?.file_type().is_dir() {
-            return Err(Error::InvalidConfig(
-                "volume must contain real directories".into(),
-            ));
-        }
-    }
-    let path = profile.join(".volume/sys/setting/database");
-    if !path.try_exists()? {
-        let old = profile.config_db_path();
-        let staging = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
-        if old.try_exists()? {
-            if !old.symlink_metadata()?.file_type().is_file() {
-                return Err(Error::InvalidConfig(
-                    "legacy configuration must be a regular file".into(),
-                ));
-            }
-            let source = Connection::open_with_flags(old, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            source.backup(rusqlite::DatabaseName::Main, staging.path(), None)?;
-        }
-        staging.as_file().sync_all()?;
-        match staging.persist_noclobber(&path) {
-            Ok(_) => {}
-            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.error.into()),
-        }
-    }
-    for name in ["lib", "app", "access"] {
-        let path = profile.join(format!(".volume/sys/{name}/database"));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-        {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let mut conn = open_legacy_config(profile, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    let integrity: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
-    if integrity != "ok" {
-        return Err(Error::InvalidConfig(integrity));
-    }
-    let mut version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    let staged_legacy: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('lib','main') WHERE name='id')",
-        [],
-        |r| r.get(0),
-    )?;
-    if staged_legacy {
-        version = 1;
-    }
-    if version == 2 {
-        for (schema, table) in [
-            ("main", "setting"),
-            ("lib_registry", "lib"),
-            ("app_registry", "app"),
-            ("acl", "lib_capability_operation"),
-        ] {
-            let exists: bool = conn.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM {schema}.sqlite_master WHERE name=?1)"),
-                [table],
-                |r| r.get(0),
-            )?;
-            if !exists {
-                return Err(Error::InvalidConfig(
-                    "incomplete split database schema".into(),
-                ));
-            }
-        }
-        return Ok(());
-    }
-    if version != 0 && version != 1 {
-        return Err(Error::InvalidConfig(
-            "unsupported configuration schema".into(),
-        ));
-    }
-    if version == 0
-        && conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name NOT LIKE 'sqlite_%')",
-            [],
-            |r| r.get::<_, bool>(0),
-        )?
-    {
-        return Err(Error::InvalidConfig(
-            "unrecognized configuration database".into(),
-        ));
-    }
-    let legacy = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name='settings')",
-        [],
-        |r| r.get::<_, bool>(0),
-    )?;
-    // Read and validate the old configuration before modifying anything.
-    let kv: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name='setting')",
-        [],
-        |r| r.get(0),
-    )?;
-    let listen = if legacy || kv {
-        read_config(&conn)?.listen
-    } else {
-        "off".into()
-    };
-    for schema in ["main", "lib_registry", "app_registry", "acl"] {
-        conn.execute_batch(&format!(
-            "PRAGMA {schema}.journal_mode=DELETE; PRAGMA {schema}.synchronous=FULL;"
-        ))?;
-    }
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if staged_legacy {
-        for (singular, plural) in [
-            ("lib", "libs"),
-            ("app", "apps"),
-            ("app_dependency", "app_dependencies"),
-            ("lib_dependency", "lib_dependencies"),
-            ("lib_capability", "lib_capabilities"),
-            ("lib_capability_operation", "lib_capability_operations"),
-        ] {
-            if tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name=?1)",
-                [singular],
-                |r| r.get::<_, bool>(0),
-            )? {
-                tx.execute_batch(&format!("ALTER TABLE main.{singular} RENAME TO {plural}"))?;
-            }
-        }
-    }
-    tx.execute_batch("CREATE TABLE IF NOT EXISTS setting(key TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS proxy_location(location TEXT PRIMARY KEY NOT NULL,proxy_pass TEXT NOT NULL);")?;
-    if listen != "off" {
-        tx.execute("INSERT INTO setting VALUES('listen',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&listen])?;
-    }
-    let old_proxy: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name='proxy_locations')",
-        [],
-        |r| r.get(0),
-    )?;
-    if old_proxy {
-        tx.execute_batch("INSERT INTO proxy_location SELECT * FROM proxy_locations;")?;
-    }
-    tx.execute_batch(include_str!("package/sql/schema-v2.sql"))?;
-    for (old, schema, table) in [
-        ("libs", "lib_registry", "lib"),
-        ("apps", "app_registry", "app"),
-    ] {
-        let columns = tx
-            .prepare(&format!("PRAGMA main.table_info({old})"))?
-            .query_map([], |r| r.get::<_, String>(1))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        if columns.is_empty() {
-            continue;
-        }
-        if columns.iter().any(|c| c == "package_proof")
-            && tx.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM main.{old} WHERE package_proof IS NOT NULL)"),
-                [],
-                |r| r.get::<_, bool>(0),
-            )?
-        {
-            return Err(Error::InvalidConfig(
-                "unpublished proof layout needs explicit recovery; original data preserved".into(),
-            ));
-        }
-        let author = if columns.iter().any(|c| c == "author") {
-            "author"
-        } else {
-            "CASE WHEN instr(id,'/')=0 THEN NULL ELSE substr(id,1,instr(id,'/')-1) END"
-        };
-        let fields = [
-            "title",
-            "description",
-            "license",
-            "repository",
-            "installed_at",
-            "upgraded_at",
-        ]
-        .map(|field| {
-            if columns.iter().any(|c| c == field) {
-                field
-            } else {
-                "NULL"
-            }
-        })
-        .join(",");
-        tx.execute_batch(&format!("INSERT INTO {schema}.{table}(name,author,version,title,description,license,repository,installed_at,upgraded_at) SELECT name,{author},version,{fields} FROM main.{old}"))?;
-    }
-    for (old, schema, table, modern, legacy_sql) in [
-        (
-            "app_dependencies",
-            "app_registry",
-            "app_dependency",
-            "app_name",
-            "SELECT a.name,l.name,d.version FROM main.app_dependencies d JOIN main.apps a ON a.id=d.app_id JOIN main.libs l ON l.id=d.lib_id",
-        ),
-        (
-            "lib_dependencies",
-            "lib_registry",
-            "lib_dependency",
-            "lib_name",
-            "SELECT l.name,t.name,d.version FROM main.lib_dependencies d JOIN main.libs l ON l.id=d.lib_id JOIN main.libs t ON t.id=d.dependency_id",
-        ),
-        (
-            "lib_capabilities",
-            "acl",
-            "lib_capability",
-            "lib_name",
-            "SELECT l.name,c.capability_id,c.title FROM main.lib_capabilities c JOIN main.libs l ON l.id=c.lib_id",
-        ),
-        (
-            "lib_capability_operations",
-            "acl",
-            "lib_capability_operation",
-            "lib_name",
-            "SELECT l.name,c.capability_id,c.method,c.path FROM main.lib_capability_operations c JOIN main.libs l ON l.id=c.lib_id",
-        ),
-    ] {
-        let columns = tx
-            .prepare(&format!("PRAGMA main.table_info({old})"))?
-            .query_map([], |r| r.get::<_, String>(1))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        if columns.is_empty() {
-            continue;
-        }
-        let select = if columns.iter().any(|c| c == modern) {
-            format!("SELECT * FROM main.{old}")
-        } else {
-            legacy_sql.to_owned()
-        };
-        tx.execute_batch(&format!("INSERT INTO {schema}.{table} {select}"))?;
-        let copied: bool = tx.query_row(
-            &format!(
-                "SELECT (SELECT count(*) FROM {schema}.{table})=(SELECT count(*) FROM main.{old})"
-            ),
-            [],
-            |r| r.get(0),
-        )?;
-        if !copied {
-            return Err(Error::InvalidConfig(
-                "legacy references could not be migrated".into(),
-            ));
-        }
-    }
-    tx.execute_batch("UPDATE lib_capability_operation SET path='/'||lib_name||substr(path,5) WHERE substr(path,1,5)='/std/' AND lib_name IN (SELECT name FROM lib WHERE author IS NULL OR author<>'std.dhttp.net');")?;
-    for schema in ["lib_registry", "app_registry", "acl"] {
-        let broken = tx
-            .prepare(&format!("PRAGMA {schema}.foreign_key_check"))?
-            .exists([])?;
-        if broken {
-            return Err(Error::InvalidConfig("broken migrated foreign keys".into()));
-        }
-    }
-    let broken:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM app_dependency d LEFT JOIN lib l ON l.name=d.lib_name WHERE l.name IS NULL OR l.version<>d.version) OR EXISTS(SELECT 1 FROM lib_dependency d JOIN lib l ON l.name=d.dependency_name WHERE l.version<>d.version) OR EXISTS(SELECT 1 FROM lib_capability c LEFT JOIN lib l ON l.name=c.lib_name WHERE l.name IS NULL)",[],|r|r.get(0))?;
-    if broken {
-        return Err(Error::InvalidConfig(
-            "invalid migrated dependencies or capability owners".into(),
-        ));
-    }
-    // The original db/config.db is the backup. Drop only the migrated snapshot's tables.
-    tx.execute_batch("DROP TABLE IF EXISTS main.lib_capability_operations; DROP TABLE IF EXISTS main.lib_capabilities;
-        DROP TABLE IF EXISTS main.app_dependencies; DROP TABLE IF EXISTS main.lib_dependencies;
-        DROP TABLE IF EXISTS main.apps; DROP TABLE IF EXISTS main.libs;
-        DROP TABLE IF EXISTS main.proxy_locations; DROP TABLE IF EXISTS main.settings; PRAGMA main.user_version=2;")?;
-    tx.commit()?;
-    Ok(())
-}
-
-fn open_legacy_config(profile: &IdentityProfile, flags: OpenFlags) -> Result<Connection> {
-    let current = profile.join(".volume/sys/setting/database");
-    let db = if !current.try_exists()? && flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
-        profile.config_db_path()
-    } else {
-        current
-    };
-    if !db.symlink_metadata()?.file_type().is_file() {
-        return Err(Error::InvalidConfig(
-            "configuration must be a regular file".into(),
-        ));
-    }
-    let conn = Connection::open_with_flags(&db, flags)?;
-    conn.busy_timeout(std::time::Duration::from_secs(3))?;
-    conn.pragma_update(None, "foreign_keys", true)?;
-    if db == profile.join(".volume/sys/setting/database") {
-        for (schema, name) in [
-            ("lib_registry", "lib"),
-            ("app_registry", "app"),
-            ("acl", "access"),
-        ] {
-            let path = profile.join(format!(".volume/sys/{name}/database"));
-            if !path.try_exists()? && flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
-                let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-                if version < 2 {
-                    continue;
-                }
-            }
-            if !path.symlink_metadata()?.file_type().is_file() {
-                return Err(Error::InvalidConfig(
-                    "attached database must be a regular file".into(),
-                ));
-            }
-            // URI mode prevents reads from creating a missing attached database.
-            let mode = if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
-                "ro"
-            } else {
-                "rw"
-            };
-            let uri = format!(
-                "file:{}?mode={mode}",
-                url::Url::from_file_path(path)
-                    .map_err(|_| Error::InvalidConfig("invalid database path".into()))?
-                    .path()
-            );
-            conn.execute(&format!("ATTACH DATABASE ?1 AS {schema}"), [uri])?;
-        }
-    }
-    Ok(conn)
-}
-
 fn initialize_config(profile: &IdentityProfile) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     std::fs::create_dir_all(profile.path())?;
@@ -419,11 +73,10 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
             "identity must be a real directory".into(),
         ));
     }
-    let existing = if profile.join(".volume/sys/setting/database").try_exists()? {
-        profile.join(".volume/sys/setting/database")
-    } else {
-        profile.config_db_path()
-    };
+    if profile.config_db_path().try_exists()? {
+        return Err(Error::InvalidConfig("legacy configuration is unsupported; reinitialize the identity service (existing data preserved)".into()));
+    }
+    let existing = profile.join(".volume/sys/setting/database");
     if existing.try_exists()? {
         if !existing.symlink_metadata()?.file_type().is_file() {
             return Err(Error::InvalidConfig(
@@ -437,13 +90,10 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
             [],
             |r| r.get(0),
         )?;
-        drop(previous);
-        if version == 1 {
-            initialize_legacy_config(profile)?;
-        } else if version == 0 && occupied {
-            return Err(Error::InvalidConfig(
-                "unrecognized configuration database; existing data preserved".into(),
-            ));
+        if version != 3 && (version != 0 || occupied) {
+            return Err(Error::InvalidConfig(format!(
+                "unsupported configuration schema {version}; reinitialize the identity service (existing data preserved)"
+            )));
         }
     }
     for name in [
@@ -500,7 +150,7 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
         }
         return Ok(());
     }
-    if !matches!(version, 0 | 2) {
+    if version != 0 {
         return Err(Error::InvalidConfig(
             "unsupported configuration schema; existing data preserved".into(),
         ));
@@ -510,56 +160,10 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
             "PRAGMA {schema}.journal_mode=DELETE; PRAGMA {schema}.synchronous=FULL;"
         ))?;
     }
-    // Baseline v2 identities retain their old databases. Merge only compatible
-    // same-name resources; ambiguous author/version pairs require explicit resolution.
-    if version == 2 {
-        for (schema, name) in [("old_lib", "lib"), ("old_app", "app")] {
-            let path = profile.join(format!(".volume/sys/{name}/database"));
-            if !path.symlink_metadata()?.file_type().is_file() {
-                return Err(Error::InvalidConfig(
-                    "legacy package database must be a regular file".into(),
-                ));
-            }
-            let uri = format!(
-                "file:{}?mode=ro",
-                url::Url::from_file_path(path)
-                    .map_err(|_| Error::InvalidConfig("invalid path".into()))?
-                    .path()
-            );
-            conn.execute(&format!("ATTACH DATABASE ?1 AS {schema}"), [uri])?;
-        }
-    }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS setting(key TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS proxy_location(location TEXT PRIMARY KEY NOT NULL,proxy_pass TEXT NOT NULL);")?;
     tx.execute_batch(include_str!("package/sql/schema-v3.sql"))?;
-    if version == 2 {
-        let conflict: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM old_lib.lib l JOIN old_app.app a USING(name) WHERE l.author IS NOT a.author OR l.version<>a.version)", [], |r| r.get(0))?;
-        if conflict {
-            return Err(Error::InvalidConfig(
-                "same-name App/Lib author or version differs; existing packages preserved".into(),
-            ));
-        }
-        let dependency_conflict: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM old_lib.lib_dependency l JOIN old_app.app_dependency a ON l.lib_name=a.app_name AND l.dependency_name=a.lib_name WHERE l.lib_name<>l.dependency_name AND l.version<>a.version)",[],|r|r.get(0))?;
-        if dependency_conflict {
-            return Err(Error::InvalidConfig(
-                "conflicting exact dependencies in same-name App/Lib; existing data preserved"
-                    .into(),
-            ));
-        }
-        tx.execute_batch("INSERT INTO pkg_registry.package SELECT name,author,version,title,description,license,repository,installed_at,upgraded_at,1,0 FROM old_lib.lib;
-            INSERT INTO pkg_registry.package SELECT name,author,version,title,description,license,repository,installed_at,upgraded_at,0,1 FROM old_app.app WHERE true
-            ON CONFLICT(name) DO UPDATE SET has_app=1;
-            INSERT INTO pkg_registry.package_dependency SELECT lib_name,dependency_name,version FROM old_lib.lib_dependency WHERE lib_name<>dependency_name;
-            INSERT INTO pkg_registry.package_dependency SELECT app_name,lib_name,version FROM old_app.app_dependency WHERE app_name<>lib_name AND true
-            ON CONFLICT(package_name,dependency_name) DO NOTHING;")?;
-        let broken: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pkg_registry.package_dependency d LEFT JOIN pkg_registry.package p ON p.name=d.dependency_name WHERE p.name IS NULL OR p.version<>d.version)", [], |r|r.get(0))?;
-        if broken {
-            return Err(Error::InvalidConfig(
-                "broken package dependency; existing data preserved".into(),
-            ));
-        }
-    }
     tx.pragma_update(None, "user_version", 3)?;
     tx.commit()?;
     inherit_config_files(profile)?;
@@ -567,12 +171,10 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
 }
 
 pub(crate) fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result<Connection> {
-    let current = profile.join(".volume/sys/setting/database");
-    let db = if !current.try_exists()? && flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
-        profile.config_db_path()
-    } else {
-        current
-    };
+    if profile.config_db_path().try_exists()? {
+        return Err(Error::InvalidConfig("legacy configuration is unsupported; reinitialize the identity service (existing data preserved)".into()));
+    }
+    let db = profile.join(".volume/sys/setting/database");
     if !db.symlink_metadata()?.file_type().is_file() {
         return Err(Error::InvalidConfig(
             "configuration must be a regular file".into(),
@@ -580,35 +182,34 @@ pub(crate) fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result
     }
     let conn = Connection::open_with_flags(&db, flags)?;
     conn.busy_timeout(std::time::Duration::from_secs(3))?;
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version != 3 && !(version == 0 && flags.contains(OpenFlags::SQLITE_OPEN_READ_WRITE)) {
+        return Err(Error::InvalidConfig(format!(
+            "unsupported configuration schema {version}; reinitialize the identity service (existing data preserved)"
+        )));
+    }
+
     conn.pragma_update(None, "foreign_keys", true)?;
-    if db == profile.join(".volume/sys/setting/database") {
-        for (schema, name) in [("pkg_registry", "pkg"), ("acl", "access")] {
-            let path = profile.join(format!(".volume/sys/{name}/database"));
-            if !path.try_exists()? && flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
-                let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-                if version < 3 {
-                    continue;
-                }
-            }
-            if !path.symlink_metadata()?.file_type().is_file() {
-                return Err(Error::InvalidConfig(
-                    "attached database must be a regular file".into(),
-                ));
-            }
-            // URI mode prevents reads from creating a missing attached database.
-            let mode = if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
-                "ro"
-            } else {
-                "rw"
-            };
-            let uri = format!(
-                "file:{}?mode={mode}",
-                url::Url::from_file_path(path)
-                    .map_err(|_| Error::InvalidConfig("invalid database path".into()))?
-                    .path()
-            );
-            conn.execute(&format!("ATTACH DATABASE ?1 AS {schema}"), [uri])?;
+    for (schema, name) in [("pkg_registry", "pkg"), ("acl", "access")] {
+        let path = profile.join(format!(".volume/sys/{name}/database"));
+        if !path.symlink_metadata()?.file_type().is_file() {
+            return Err(Error::InvalidConfig(
+                "attached database must be a regular file".into(),
+            ));
         }
+        // URI mode prevents reads from creating a missing attached database.
+        let mode = if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            "ro"
+        } else {
+            "rw"
+        };
+        let uri = format!(
+            "file:{}?mode={mode}",
+            url::Url::from_file_path(path)
+                .map_err(|_| Error::InvalidConfig("invalid database path".into()))?
+                .path()
+        );
+        conn.execute(&format!("ATTACH DATABASE ?1 AS {schema}"), [uri])?;
     }
     if conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE schema='pkg_registry' AND name='package')", [], |r|r.get::<_,bool>(0))? {
         conn.execute_batch("CREATE TEMP VIEW lib AS SELECT * FROM pkg_registry.package WHERE has_lib=1;
@@ -670,100 +271,39 @@ fn inherit_config_files(profile: &IdentityProfile) -> Result<()> {
 
 fn read_config(conn: &Connection) -> Result<ServerConfig> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if !matches!(version, 1..=3) {
+    if version != 3 {
         return Err(Error::InvalidConfig(format!(
-            "unsupported schema {version}"
+            "unsupported schema {version}; reinitialize the identity service (existing data preserved)"
         )));
     }
-    let kv: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE name='setting')",
-        [],
-        |r| r.get(0),
-    )?;
-    if kv {
-        use rusqlite::OptionalExtension;
-        let listen: Option<String> = conn
-            .query_row("SELECT value FROM setting WHERE key='listen'", [], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        let listen = listen.unwrap_or_else(|| "off".into());
-        if listen != "off" && !valid_listen(&listen) {
-            return Err(Error::InvalidConfig("invalid listen mode".into()));
-        }
-        if listen == "off"
-            && conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM setting WHERE key='listen')",
-                [],
-                |r| r.get::<_, bool>(0),
-            )?
-        {
-            return Err(Error::InvalidConfig(
-                "disabled listening must have no KV record".into(),
-            ));
-        }
-        let values = conn
-            .prepare("SELECT location,proxy_pass FROM proxy_location ORDER BY location")?
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        return Ok(ServerConfig {
-            listen,
-            proxy_locations: parse_proxies(values)?,
-        });
+    use rusqlite::OptionalExtension;
+    let listen: Option<String> = conn
+        .query_row("SELECT value FROM setting WHERE key='listen'", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    let listen = listen.unwrap_or_else(|| "off".into());
+    if listen != "off" && !valid_listen(&listen) {
+        return Err(Error::InvalidConfig("invalid listen mode".into()));
     }
-    let has_enabled = has_enabled_column(conn)?;
-    let mut stmt = conn.prepare(if has_enabled {
-        "SELECT listen, enabled FROM settings"
-    } else {
-        "SELECT listen FROM settings"
-    })?;
-    let mut rows = stmt.query([])?;
-    let Some(row) = rows.next()? else {
+    if listen == "off"
+        && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM setting WHERE key='listen')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
         return Err(Error::InvalidConfig(
-            "settings must contain exactly one row".into(),
-        ));
-    };
-    // Integers and enabled are accepted only while reading legacy v1 databases.
-    let mut listen = match row.get_ref(0)? {
-        ValueRef::Text(value) => std::str::from_utf8(value)
-            .ok()
-            .filter(|value| *value == "off" || valid_listen(value))
-            .map(str::to_owned)
-            .ok_or_else(|| Error::InvalidConfig("invalid listen mode".into()))?,
-        ValueRef::Integer(value @ 0..=3) => {
-            ["off", "internal", "external", "all"][value as usize].to_owned()
-        }
-        _ => return Err(Error::InvalidConfig("invalid listen mode".into())),
-    };
-    if has_enabled {
-        match row.get_ref(1)? {
-            ValueRef::Integer(0) => listen = "off".into(),
-            ValueRef::Integer(1) => {}
-            _ => {
-                return Err(Error::InvalidConfig(
-                    "enabled must be an integer 0 or 1".into(),
-                ));
-            }
-        }
-    }
-    if rows.next()?.is_some() {
-        return Err(Error::InvalidConfig(
-            "settings must contain exactly one row".into(),
+            "disabled listening must have no KV record".into(),
         ));
     }
-    drop(rows);
-    drop(stmt);
-    let mut stmt =
-        conn.prepare("SELECT location, proxy_pass FROM proxy_locations ORDER BY location")?;
-    let values = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
+    let values = conn
+        .prepare("SELECT location,proxy_pass FROM proxy_location ORDER BY location")?
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let proxy_locations = parse_proxies(values)?;
     Ok(ServerConfig {
         listen,
-        proxy_locations,
+        proxy_locations: parse_proxies(values)?,
     })
 }
 
@@ -826,16 +366,6 @@ fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()
     Ok(())
 }
 
-fn has_enabled_column(conn: &Connection) -> Result<bool> {
-    Ok(conn
-        .prepare("PRAGMA table_info(settings)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .iter()
-        .any(|column| column == "enabled"))
-}
-
-// Called only inside an IMMEDIATE transaction. Validate before modifying legacy v1.
 fn upgrade_settings(conn: &Connection) -> Result<()> {
     let config = read_config(conn)?;
     check_proxy_mounts(conn, &config.proxy_locations)

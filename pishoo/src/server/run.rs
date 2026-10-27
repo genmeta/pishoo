@@ -206,6 +206,9 @@ pub(super) async fn load_profile(
     {
         return Ok(None);
     }
+    if profile.config_db_path().try_exists()? {
+        return Err(Error::InvalidConfig("legacy configuration is unsupported; reinitialize the identity service (existing data preserved)".into()));
+    }
     // An explicitly disabled identity needs no credentials, WASM or background workers.
     match crate::setup::config_database(
         &profile,
