@@ -1351,8 +1351,8 @@ pub(super) fn install_packages(
                     Some(lib.openapi.info.version.as_str()) == metadata["version"].as_str()
                 }))
             && (metadata["has_app"] != true
-                || sandbox.apps.get(id).is_some_and(|app| {
-                    package_metadata(app).is_ok_and(|v| v["version"] == metadata["version"])
+                || sandbox.apps.get(id).is_some_and(|(version, _)| {
+                    Some(version.as_str()) == metadata["version"].as_str()
                 }));
         if reused {
             continue;
@@ -1414,8 +1414,8 @@ pub(super) fn install_packages(
             } else {
                 dir
             };
-            let snapshot = runtime_snapshot_from(&tx, &payload, id, kind)?;
             if kind == "lib" {
+                let snapshot = runtime_snapshot_from(&tx, &payload, id, kind)?;
                 let data = profile
                     .join(".volume")
                     .join(if id.starts_with("std.dhttp.net/") {
@@ -1435,8 +1435,13 @@ pub(super) fn install_packages(
             } else {
                 apps.insert(
                     (*id).clone(),
-                    webc::Container::from_bytes_and_version(snapshot.into(), webc::Version::V3)
-                        .map_err(|_| expanded_error())?,
+                    (
+                        metadata["version"]
+                            .as_str()
+                            .ok_or_else(expanded_error)?
+                            .to_owned(),
+                        std::sync::Arc::new(payload),
+                    ),
                 );
             }
         }
@@ -1778,11 +1783,11 @@ pub(crate) fn remove_app(profile: &IdentityProfile, id: &str) -> Result<()> {
     remove_package(profile, id)
 }
 
-/// Read installed frontend resources without repeating installation validation.
+/// Open registered frontend directories without loading their contents.
 pub(crate) fn installed_apps(
     profile: &IdentityProfile,
     id: Option<&str>,
-) -> Result<std::collections::HashMap<String, webc::Container>> {
+) -> Result<std::collections::HashMap<String, (String, std::sync::Arc<std::fs::File>)>> {
     if let Some(id) = id {
         valid_id(id)?;
     }
@@ -1803,15 +1808,47 @@ pub(crate) fn installed_apps(
     let ids = registered_packages(&conn, "app", id)?;
     let mut apps = std::collections::HashMap::new();
     for (id, _) in ids {
-        let package = webc::Container::from_bytes_and_version(
-            installed_bytes(profile, &root, &id, "app")?.into(),
-            webc::Version::V3,
-        )
-        .map_err(|error| Error::InvalidComponent(error.to_string()))?;
-        package_metadata(&package)?;
-        apps.insert(id, package);
+        let metadata = registered_metadata(&conn, "app", &id)?;
+        let version = metadata["version"]
+            .as_str()
+            .ok_or_else(expanded_error)?
+            .to_owned();
+        let directory = child_dir(&root, std::ffi::OsStr::new(id.rsplit('/').next().unwrap()))?;
+        if directory.metadata()?.dev() != root.metadata()?.dev() {
+            return Err(expanded_error());
+        }
+        apps.insert(id, (version, std::sync::Arc::new(directory)));
     }
     Ok(apps)
+}
+
+/// Open one static resource beneath the retained directory, never following links.
+pub(crate) fn app_file(root: &std::fs::File, path: &str) -> Result<std::fs::File> {
+    let device = root.metadata()?.dev();
+    let mut directory = root.try_clone()?;
+    let mut parts = path.split('/').peekable();
+    while let Some(part) = parts.next() {
+        if part.is_empty()
+            || matches!(part, "." | ".." | ".transaction.json" | ".previous")
+            || part.contains(['\\', '\0'])
+        {
+            return Err(Error::RouteNotFound);
+        }
+        if parts.peek().is_some() {
+            directory = child_dir(&directory, std::ffi::OsStr::new(part))
+                .map_err(|_| Error::RouteNotFound)?;
+            if directory.metadata()?.dev() != device {
+                return Err(Error::RouteNotFound);
+            }
+        } else {
+            let file = expanded_file(&directory, part).map_err(|_| Error::RouteNotFound)?;
+            if file.metadata()?.dev() != device {
+                return Err(Error::RouteNotFound);
+            }
+            return Ok(file);
+        }
+    }
+    Err(Error::RouteNotFound)
 }
 
 #[cfg(test)]

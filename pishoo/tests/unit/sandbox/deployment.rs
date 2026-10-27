@@ -218,8 +218,8 @@ fn startup_uses_current_runtime_files_without_integrity_comparison_or_repair() {
     );
     assert_eq!(std::fs::read(&page).unwrap(), b"locally edited page");
     assert_eq!(
-        package_file(&sandbox.apps[id], "/public/index.html").unwrap(),
-        b"locally edited page".as_slice()
+        std::io::read_to_string(app_file(&sandbox.apps[id].1, "index.html").unwrap()).unwrap(),
+        "locally edited page"
     );
     assert!(profile.join(".volume/hello").is_dir());
     assert!(!profile.join("db/alice.dhttp.net").exists());
