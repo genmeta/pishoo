@@ -119,7 +119,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
     let chat_package = package_fixture(
         &chat_document,
         &chat_bytes,
-        webc::v3::write::Directory::default(),
+        std::collections::BTreeMap::new(),
         &publisher("dev.dhttp.net", 'a'),
     );
     let mut document = document;
@@ -128,7 +128,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
     let package = package_fixture(
         &document,
         &bytes,
-        webc::v3::write::Directory::default(),
+        std::collections::BTreeMap::new(),
         &publisher("dev.dhttp.net", 'a'),
     );
     let runtime = Arc::new(WasmRuntime::new().unwrap());

@@ -1,6 +1,5 @@
 use http::Method;
 use serde_json::json;
-use webc::v3::write::Directory;
 
 use super::*;
 use crate::package::tests::packages::{
@@ -45,7 +44,7 @@ async fn app_upgrades_preserve_root_rules_when_asset_names_change() {
             .await
             .unwrap();
         let mut files = frontend_files("new page");
-        files.children.insert(
+        files.insert(
             format!("chunk-{version}.js").parse().unwrap(),
             b"new asset".to_vec().into(),
         );
@@ -114,7 +113,7 @@ async fn package_upgrades_replace_apis_and_capabilities_without_changing_or_bloc
                 if doc["x-pishoo"]["kind"] == "app" {
                     frontend_files("Profile")
                 } else {
-                    Directory::default()
+                    std::collections::BTreeMap::new()
                 },
                 &authority,
             )
@@ -284,7 +283,7 @@ async fn business_read_rules_have_no_implicit_provider_exemptions() {
     let bytes = package_fixture(
         &doc,
         include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-        Directory::default(),
+        std::collections::BTreeMap::new(),
         &authority,
     );
     let package = read_package(&bytes).unwrap();

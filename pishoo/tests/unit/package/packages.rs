@@ -3,10 +3,6 @@ use std::{collections::BTreeMap, sync::Arc};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use webc::v3::{
-    SignatureAlgorithm, Timestamps,
-    write::{Directory, FileEntry, Writer},
-};
 
 use super::*;
 
@@ -36,12 +32,12 @@ pub(crate) fn publisher(name: &str, owner: char) -> dhttp::LocalAuthority {
 pub(crate) fn package_fixture(
     document: &Value,
     backend: &[u8],
-    public: Directory<'_>,
+    public: BTreeMap<String, Vec<u8>>,
     authority: &dhttp::LocalAuthority,
 ) -> Vec<u8> {
     // Test build input only. Production has one signed manifest authority.
     let app = document["x-pishoo"]["kind"] == "app";
-    let has_public = !public.children.is_empty();
+    let has_public = !public.is_empty();
     let mut api = document.clone();
     let mut annotation = json!({"title":document["info"]["title"],
         "changelog":document["x-pishoo"].get("changelog").cloned().unwrap_or_else(||"Test release; data unchanged".into()),
@@ -74,37 +70,36 @@ pub(crate) fn package_fixture(
         backend.push(n as u8);
         backend.extend(section);
     }
-    let mut manifest: webc::metadata::Manifest = serde_json::from_value(json!({
-        "package":{"wapm":{"name":format!("{}/{}",document["x-pishoo"]["publisher"].as_str().unwrap(),document["x-pishoo"]["name"].as_str().unwrap()),
-            "version":document["info"]["version"],"description":document["info"]["description"],"license":document["info"]["license"]["name"]},
-            "pishoo":annotation,"fs":if has_public {json!([{"volume_name":"public","mount_path":"/public"}])} else {json!([])}},
-        "atoms":{"backend":{"kind":"https://webc.org/kind/wasm","signature":format!("sha256:{}",STANDARD.encode(Sha256::digest(&backend)))}}
-    })).unwrap();
-    if app {
-        manifest.atoms.clear();
-    }
-    let atoms = || {
-        if app {
-            BTreeMap::new()
-        } else {
-            BTreeMap::from([(
-                "backend".parse().unwrap(),
-                FileEntry::borrowed(&backend, Timestamps::default()),
-            )])
-        }
-    };
-    let mut writer = Writer::default()
-        .write_manifest(&manifest)
+    let dependencies = annotation["dependencies"]
+        .as_array()
         .unwrap()
-        .write_atoms(atoms())
-        .unwrap();
-    if has_public {
-        writer.write_volume("public", public).unwrap();
+        .iter()
+        .map(|dep| {
+            json!({
+                "author":dep["publisher"],"name":dep["name"],"version":dep["version"]
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut manifest = json!({"format":"waz/1","package":{
+        "author":document["x-pishoo"]["publisher"],"name":document["x-pishoo"]["name"],
+        "version":document["info"]["version"],"description":document["info"]["description"],
+        "license":document["info"]["license"]["name"],"title":annotation["title"],"release-notes":annotation["changelog"]
+    },"dependencies":dependencies});
+    let mut files = BTreeMap::new();
+    if !app {
+        manifest["backend"] = "backend.wasm".into();
+        files.insert("backend.wasm".into(), backend);
     }
-    let unsigned = writer.finish(SignatureAlgorithm::None).unwrap();
-    let container =
-        webc::Container::from_bytes_and_version(unsigned.clone(), webc::Version::V3).unwrap();
-    let mut files = crate::package::format::waz_export(&container).unwrap();
+    if has_public {
+        manifest["frontend"] = "public".into();
+        for (name, data) in public {
+            files.insert(format!("public/{name}"), data);
+        }
+    }
+    files.insert(
+        "manifest.json".into(),
+        serde_json::to_vec(&manifest).unwrap(),
+    );
     let mut hash = Sha256::new();
     hash.update(b"pishoo-waz-payload-v1\0");
     for (name, bytes) in &files {
@@ -139,7 +134,7 @@ pub(crate) fn zip_files(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
 }
 
 // Preserve existing execution fixtures, extracting their legacy test-only OpenAPI
-// into a signed WEBC so the real loader always sees the production package format.
+// into a signed ZIP so the real loader always sees the production package format.
 pub(crate) fn package_component(bytes: &[u8]) -> Vec<u8> {
     let mut backend = bytes[..8].to_vec();
     let mut document = None;
@@ -208,7 +203,7 @@ pub(crate) fn package_component(bytes: &[u8]) -> Vec<u8> {
         }
     }
     let signer = publisher(doc["x-pishoo"]["publisher"].as_str().unwrap(), 'a');
-    package_fixture(&doc, &backend, Directory::default(), &signer)
+    package_fixture(&doc, &backend, std::collections::BTreeMap::new(), &signer)
 }
 
 pub(crate) fn frontend_document(version: &str) -> Value {
@@ -246,10 +241,7 @@ fn root_package_installs_and_updates_belong_to_identity_owner() {
             let app = package_fixture(
                 &document,
                 &[],
-                Directory::new(
-                    BTreeMap::from([("index.html".parse().unwrap(), b"page".to_vec().into())]),
-                    Timestamps::default(),
-                ),
+                BTreeMap::from([("index.html".parse().unwrap(), b"page".to_vec().into())]),
                 &publisher(name, 'a'),
             );
             install_app(&profile, &format!("{name}/hello"), &app).unwrap();
@@ -263,7 +255,7 @@ fn root_package_installs_and_updates_belong_to_identity_owner() {
             let lib = package_fixture(
                 &document,
                 include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-                Directory::default(),
+                std::collections::BTreeMap::new(),
                 &publisher(name, 'a'),
             );
             install_lib(&profile, &format!("{name}/hello"), &lib, &runtime).unwrap();
@@ -303,7 +295,7 @@ fn expanded_app_loads_installed_public_files_without_revalidation_and_rejects_sy
     let id = "alice.dhttp.net/hello";
     install_app(&profile, id, &frontend_package("1.0.0", "verified page")).unwrap();
     let directory = profile.join("app/hello");
-    assert!(!directory.join("app.webc").exists());
+    assert!(!directory.join("app.waz").exists());
     let index = directory.join("index.html");
     assert_eq!(std::fs::read(&index).unwrap(), b"verified page");
     std::fs::write(&index, b"modified page").unwrap();
@@ -327,27 +319,40 @@ fn expanded_app_loads_installed_public_files_without_revalidation_and_rejects_sy
     }
 }
 
-pub(crate) fn frontend_files(text: &'static str) -> Directory<'static> {
-    Directory::new(
-        BTreeMap::from([
-            (
-                "index.html".parse().unwrap(),
-                text.as_bytes().to_vec().into(),
-            ),
-            (
-                "assets".parse().unwrap(),
-                webc::v3::write::DirEntry::Dir(Directory::new(
-                    BTreeMap::from([(
-                        "app.js".parse().unwrap(),
-                        b"fetch('./hello')".to_vec().into(),
-                    )]),
-                    Timestamps::default(),
-                )),
-            ),
-        ]),
-        Timestamps::default(),
-    )
+pub(crate) fn frontend_files(text: &'static str) -> BTreeMap<String, Vec<u8>> {
+    BTreeMap::from([
+        ("index.html".into(), text.as_bytes().to_vec()),
+        ("assets/app.js".into(), b"fetch('./hello')".to_vec()),
+    ])
 }
+
+pub(crate) fn public_files(root: &std::path::Path) -> std::io::Result<BTreeMap<String, Vec<u8>>> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = BTreeMap::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                pending.push(entry.path());
+            } else if entry.file_type()?.is_file() {
+                files.insert(
+                    entry
+                        .path()
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .replace('\\', "/"),
+                    std::fs::read(entry.path())?,
+                );
+            } else {
+                return Err(std::io::Error::other("fixture must contain regular files"));
+            }
+        }
+    }
+    Ok(files)
+}
+
 fn frontend_package(version: &str, text: &'static str) -> Vec<u8> {
     package_fixture(
         &frontend_document(version),
@@ -361,10 +366,7 @@ fn frontend_package(version: &str, text: &'static str) -> Vec<u8> {
 fn package_routes_files_and_identity_are_bound_to_publisher_signature() {
     let bytes = frontend_package("1.0.0", "<h1>Old frontend</h1>");
     let package = read_package(&bytes).unwrap();
-    assert_eq!(
-        package_file(&package, "/public/assets/app.js").unwrap(),
-        "fetch('./hello')"
-    );
+    assert_eq!(&package["public/assets/app.js"], b"fetch('./hello')");
     for path in [
         "/public/../metadata/openapi.json",
         "/public//index.html",
@@ -372,7 +374,10 @@ fn package_routes_files_and_identity_are_bound_to_publisher_signature() {
         "/metadata/secret",
         "/ssl/privkey.pem",
     ] {
-        assert!(package_file(&package, path).is_err(), "{path}");
+        assert!(
+            !package.contains_key(path.trim_start_matches('/')),
+            "{path}"
+        );
     }
     let mut trailing = bytes.clone();
     trailing.push(0);
@@ -394,8 +399,8 @@ fn package_routes_files_and_identity_are_bound_to_publisher_signature() {
         serde_json::to_vec(&manifest).unwrap(),
     );
     assert!(read_package(&crate::package::format::waz_write(&invalid).unwrap()).is_err());
-    assert!(package.atoms().is_empty());
-    assert!(package_file(&package, "/metadata/openapi.json").is_err());
+    assert!(!package.contains_key("backend.wasm"));
+    assert!(package_openapi(&package).is_err());
     let wrong = package_fixture(
         &frontend_document("1.0.0"),
         include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
@@ -614,7 +619,7 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
         package_fixture(
             &doc,
             include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-            Directory::default(),
+            std::collections::BTreeMap::new(),
             &authority,
         )
     };
@@ -956,7 +961,12 @@ fn standard_lib_declarations_stay_in_the_filename_namespace() {
             "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":"profile","dependencies":[]},
             "paths":{path:{"get":{"operationId":"read","summary":"Read","responses":{"200":{"description":"ok"}}}}}
         });
-        let bytes = package_fixture(&document, backend, Directory::default(), &authority);
+        let bytes = package_fixture(
+            &document,
+            backend,
+            std::collections::BTreeMap::new(),
+            &authority,
+        );
         let result = read_package(&bytes);
         if accepted {
             result.unwrap();
@@ -983,7 +993,7 @@ async fn ordinary_lib_mounts_bind_signatures_capabilities_and_proxy_conflicts() 
         "paths":{"/std/xxxx":{"post":{"operationId":"write","summary":"write","x-pishoo":{"access-group":"journal"}}},"/contact":{"get":{"operationId":"contact","summary":"local operation"}}}});
     let backend = include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm");
     let authority = publisher("alice.dhttp.net", 'a');
-    let bytes = package_fixture(&doc, backend, Directory::default(), &authority);
+    let bytes = package_fixture(&doc, backend, std::collections::BTreeMap::new(), &authority);
     assert!(read_package(&bytes).is_ok());
     // Even the standard publisher cannot occupy a native reserved path.
     doc["x-pishoo"]["publisher"] = json!("std.dhttp.net");
@@ -991,7 +1001,7 @@ async fn ordinary_lib_mounts_bind_signatures_capabilities_and_proxy_conflicts() 
         read_package(&package_fixture(
             &doc,
             backend,
-            Directory::default(),
+            std::collections::BTreeMap::new(),
             &publisher("std.dhttp.net", 's')
         ))
         .is_err()
@@ -1002,7 +1012,7 @@ async fn ordinary_lib_mounts_bind_signatures_capabilities_and_proxy_conflicts() 
         read_package(&package_fixture(
             &doc,
             backend,
-            Directory::default(),
+            std::collections::BTreeMap::new(),
             &authority
         ))
         .unwrap_err()
@@ -1173,7 +1183,7 @@ fn access_groups_validate_modern_and_legacy_declarations() {
         package_fixture(
             doc,
             include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-            Directory::default(),
+            std::collections::BTreeMap::new(),
             &authority,
         )
     };
@@ -1302,7 +1312,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
         package_fixture(
             &doc,
             include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-            Directory::default(),
+            std::collections::BTreeMap::new(),
             &authority,
         )
     };
@@ -1600,15 +1610,15 @@ fn identity_imports_install_without_host_purpose_declarations() {
     let bytes = package_fixture(
         &document,
         backend,
-        Directory::default(),
+        std::collections::BTreeMap::new(),
         &publisher("alice.dhttp.net", 'a'),
     );
     let package = read_package(&bytes).unwrap();
-    let manifest = serde_json::to_value(package.manifest()).unwrap();
-    assert!(manifest["package"]["pishoo"].get("host").is_none());
+    let manifest: Value = serde_json::from_slice(&package["manifest.json"]).unwrap();
+    assert!(manifest["package"].get("host").is_none());
     assert!(package_metadata(&package).unwrap().get("host").is_none());
     WasmRuntime::new()
         .unwrap()
-        .compile(&package.get_atom("backend").unwrap())
+        .compile(&package.get("backend.wasm").unwrap())
         .unwrap();
 }

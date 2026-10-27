@@ -38,14 +38,6 @@ pub struct WasmRuntime {
 pub(crate) struct Lib {
     pub(crate) openapi: oas3::OpenApiV3Spec,
     component: Component,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "runtime snapshot retained by the frozen v1 contract"
-        )
-    )]
-    package: webc::Container,
     runtime: Arc<WasmRuntime>,
     filesystem: WasiFilesystemCtx,
 }

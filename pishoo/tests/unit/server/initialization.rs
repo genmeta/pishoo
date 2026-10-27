@@ -11,9 +11,9 @@ fn root_initialization_repairs_identity_directories_and_existing_packages() {
     assert!(rustix::process::geteuid().is_root());
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("app/hello/public")).unwrap();
+    std::fs::create_dir_all(profile.join("app/hello")).unwrap();
     std::fs::create_dir_all(profile.join("lib/std/hello")).unwrap();
-    let index = profile.join("app/hello/public/index.html");
+    let index = profile.join("app/hello/index.html");
     std::fs::write(&index, b"page").unwrap();
     std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o600)).unwrap();
     let outside = root.path().join("outside");
@@ -829,7 +829,7 @@ async fn root_personal_home_repairs_initially_root_owned_native_resources() {
 }
 
 #[test]
-fn legacy_layout_migration_preserves_wal_data_and_signed_app_layouts() {
+fn legacy_service_layout_preserves_wal_data_without_reinterpreting_app_contents() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("legacy")).unwrap();
     for directory in [
@@ -846,7 +846,7 @@ fn legacy_layout_migration_preserves_wal_data_and_signed_app_layouts() {
     std::fs::write(profile.join("apps/plain/public/index.html"), b"page").unwrap();
     std::fs::write(profile.join("apps/plain/public/assets/app.js"), b"script").unwrap();
     std::fs::write(
-        profile.join("apps/signed/.webc-proof"),
+        profile.join("apps/signed/.unused-payload"),
         b"signed archive proof",
     )
     .unwrap();
@@ -871,14 +871,14 @@ fn legacy_layout_migration_preserves_wal_data_and_signed_app_layouts() {
         b"request log"
     );
     assert_eq!(
-        std::fs::read(profile.join("app/plain/index.html")).unwrap(),
+        std::fs::read(profile.join("app/plain/public/index.html")).unwrap(),
         b"page"
     );
     assert_eq!(
-        std::fs::read(profile.join("app/plain/assets/app.js")).unwrap(),
+        std::fs::read(profile.join("app/plain/public/assets/app.js")).unwrap(),
         b"script"
     );
-    assert!(!profile.join("app/plain/public").exists());
+    assert!(profile.join("app/plain/public").exists());
     assert_eq!(
         std::fs::read(profile.join("app/signed/public/index.html")).unwrap(),
         b"signed page"
@@ -941,7 +941,7 @@ fn conflicting_legacy_directories_and_public_files_preserve_both_versions() {
     std::fs::create_dir_all(profile.join("app/notes/public")).unwrap();
     std::fs::write(profile.join("app/notes/public/index.html"), b"legacy page").unwrap();
     std::fs::write(profile.join("app/notes/index.html"), b"installed page").unwrap();
-    assert!(initialize_directories(&profile).is_err());
+    initialize_directories(&profile).unwrap();
     assert_eq!(
         std::fs::read(profile.join("app/notes/public/index.html")).unwrap(),
         b"legacy page"

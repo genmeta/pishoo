@@ -90,7 +90,7 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
         let bytes = crate::package::tests::package_fixture(
             &document,
             include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-            webc::v3::write::Directory::default(),
+            std::collections::BTreeMap::new(),
             &crate::package::tests::publisher(publisher, 'a'),
         );
         let id = format!("{publisher}/{name}");

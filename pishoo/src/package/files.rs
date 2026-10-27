@@ -138,15 +138,6 @@ pub(crate) fn valid_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn resource_dir(root: &std::fs::File, id: &str) -> Result<std::fs::File> {
-    valid_id(id)?;
-    let parent = resource_parent(root, id, false)?;
-    child_dir(
-        &parent,
-        std::ffi::OsStr::new(id.rsplit('/').next().unwrap()),
-    )
-}
-
 // Called under the root's exclusive commit lock. The returned handle is the
 // actual target parent; no unchecked slash-containing path reaches openat.
 fn resource_parent(root: &std::fs::File, id: &str, create: bool) -> Result<std::fs::File> {
@@ -338,11 +329,10 @@ fn check_name(conn: &rusqlite::Connection, id: &str, kind: &str) -> Result<()> {
     reason = "Keep the frozen capability tuple interface unchanged."
 )]
 fn capability_rows(
-    package: &webc::Container,
+    package: &super::PackageFiles,
 ) -> Result<Vec<(String, String, Vec<(String, String)>)>> {
-    let document: serde_json::Value =
-        serde_json::from_slice(&super::package_file(package, "/metadata/openapi.json")?)
-            .map_err(|e| Error::InvalidComponent(e.to_string()))?;
+    let document: serde_json::Value = serde_json::from_slice(super::package_openapi(package)?)
+        .map_err(|e| Error::InvalidComponent(e.to_string()))?;
     let mut rows = Vec::new();
     // Installation validation rejects duplicate modern/legacy declarations.
     if let Some(groups) = document
@@ -380,7 +370,7 @@ fn capability_rows(
 }
 
 fn package_routes(
-    package: &webc::Container,
+    package: &super::PackageFiles,
     id: &str,
     kind: &str,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
@@ -394,8 +384,7 @@ fn package_routes(
         } else {
             format!("/{}", id.rsplit('/').next().unwrap())
         };
-        let api =
-            super::validate_openapi(&super::package_file(package, "/metadata/openapi.json")?)?;
+        let api = super::validate_openapi(super::package_openapi(package)?)?;
         for (path, item) in api.paths.as_ref().unwrap() {
             routes.insert(
                 format!("{prefix}{path}"),
@@ -406,30 +395,19 @@ fn package_routes(
             );
         }
     } else {
-        let mappings = package.manifest().filesystem().unwrap().unwrap();
-        let mapping = mappings
-            .iter()
-            .find(|m| m.mount_path == "/public")
-            .ok_or_else(expanded_error)?;
-        let volume = package.get_volume(&mapping.volume_name).unwrap();
-        let root = mapping
-            .host_path
-            .as_deref()
-            .unwrap_or("/")
-            .trim_end_matches('/');
-        let mut pending = vec![format!("{root}/")];
-        while let Some(dir) = pending.pop() {
-            for (name, _, metadata) in volume.read_dir(dir.as_str()).unwrap() {
-                let child = format!("{}{name}", dir);
-                if matches!(metadata, webc::Metadata::Dir { .. }) {
-                    pending.push(format!("{child}/"));
-                } else {
-                    let suffix = child.strip_prefix(root).unwrap();
-                    let suffix = if suffix == "/index.html" { "/" } else { suffix };
-                    let path = format!("/app/{}{suffix}", id.rsplit('/').next().unwrap());
-                    routes.insert(path, vec!["GET".into(), "HEAD".into()]);
-                }
-            }
+        for path in package
+            .keys()
+            .filter_map(|path| path.strip_prefix("public/"))
+        {
+            let suffix = if path == "index.html" {
+                String::new()
+            } else {
+                path.to_owned()
+            };
+            routes.insert(
+                format!("/app/{}/{}", id.rsplit('/').next().unwrap(), suffix),
+                vec!["GET".into(), "HEAD".into()],
+            );
         }
         // The canonical root's redirect is also an actual static operation.
         routes.insert(
@@ -445,7 +423,7 @@ fn check_routes(
     conn: &rusqlite::Connection,
     id: &str,
     kind: &str,
-    package: &webc::Container,
+    package: &super::PackageFiles,
 ) -> Result<()> {
     if kind == "app" || !id.starts_with("std.dhttp.net/") {
         let mount = if kind == "app" {
@@ -476,24 +454,12 @@ fn check_routes(
     }
     let routes = package_routes(package, id, kind)?;
     for other_kind in ["lib", "app"] {
-        for (other, version) in registered_packages(conn, other_kind, None)? {
+        for (other, _) in registered_packages(conn, other_kind, None)? {
             if other == id {
                 continue;
             }
             let root = child_dir(&profile_dir(profile)?, std::ffi::OsStr::new(other_kind))?;
-            let other_package = webc::Container::from_bytes_and_version(
-                installed_bytes(profile, &root, &other, other_kind)?.into(),
-                webc::Version::V3,
-            )
-            .map_err(|_| expanded_error())?;
-            let metadata = package_metadata(&other_package)?;
-            check_resource_identity(&metadata, &other)?;
-            if metadata["version"] != version {
-                return Err(Error::InvalidConfig(format!(
-                    "registered version differs from file for {other}"
-                )));
-            }
-            for (path, methods) in package_routes(&other_package, &other, other_kind)? {
+            for (path, methods) in installed_routes(&root, &other, other_kind)? {
                 if let Some(ours) = routes.get(&path)
                     && ((kind == "lib" && other_kind == "lib")
                         || methods.iter().any(|m| ours.contains(m)))
@@ -509,6 +475,66 @@ fn check_routes(
     Ok(())
 }
 
+fn installed_routes(
+    root: &std::fs::File,
+    id: &str,
+    kind: &str,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+    if kind == "lib" {
+        let file = expanded_file(
+            &resource_parent(root, id, false)?,
+            &format!("{}.wasm", id.rsplit('/').next().unwrap()),
+        )?;
+        return package_routes(
+            &std::collections::BTreeMap::from([("backend.wasm".into(), read_runtime_wasm(file)?)]),
+            id,
+            kind,
+        );
+    }
+    let directory = child_dir(root, std::ffi::OsStr::new(id.rsplit('/').next().unwrap()))?;
+    let device = directory.metadata()?.dev();
+    let mut files = std::collections::BTreeMap::new();
+    let mut pending = vec![(directory, String::new(), 0)];
+    let mut count = 0;
+    while let Some((directory, prefix, depth)) = pending.pop() {
+        if depth > 32 {
+            return Err(expanded_error());
+        }
+        for entry in cap_std::fs::Dir::from_std_file(directory.try_clone()?).entries()? {
+            let entry = entry?;
+            count += 1;
+            if count > 10000 {
+                return Err(expanded_error());
+            }
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| expanded_error())?;
+            if matches!(name.as_str(), ".transaction.json" | ".previous") {
+                continue;
+            }
+            let path = format!("{prefix}{name}");
+            if entry.file_type()?.is_dir() {
+                let child = child_dir(&directory, std::ffi::OsStr::new(&name))?;
+                if child.metadata()?.dev() != device {
+                    return Err(expanded_error());
+                }
+                pending.push((child, format!("{path}/"), depth + 1));
+            } else if entry.file_type()?.is_file() {
+                let file = expanded_file(&directory, &name)?;
+                if file.metadata()?.dev() != device {
+                    return Err(expanded_error());
+                }
+                // Only the resource names are needed for route collision checks.
+                files.insert(format!("public/{path}"), Vec::new());
+            } else {
+                return Err(expanded_error());
+            }
+        }
+    }
+    package_routes(&files, id, kind)
+}
+
 // An existing package keeps its path-based ACLs as APIs evolve. Only a fresh
 // provider must review rules left behind before taking over those operations.
 fn check_existing_rules(
@@ -516,7 +542,7 @@ fn check_existing_rules(
     conn: &rusqlite::Connection,
     id: &str,
     kind: &str,
-    package: &webc::Container,
+    package: &super::PackageFiles,
     same_version: bool,
 ) -> Result<()> {
     if same_version {
@@ -584,7 +610,7 @@ fn save_registration(
     conn: &rusqlite::Transaction<'_>,
     id: &str,
     api: &serde_json::Value,
-    package: &webc::Container,
+    package: &super::PackageFiles,
 ) -> Result<()> {
     check_name(conn, id, "pkg")?;
     let name = id.rsplit('/').next().unwrap();
@@ -725,212 +751,49 @@ fn expanded_file(dir: &std::fs::File, path: &str) -> Result<std::fs::File> {
     Err(expanded_error())
 }
 
-// Older accepted source packages carried OpenAPI in a metadata volume. Append
-// that verified document to the runtime component; modern components stay exact.
-fn runtime_wasm(package: &webc::Container) -> Result<Vec<u8>> {
-    let mut backend = package
-        .get_atom("backend")
-        .ok_or_else(expanded_error)?
-        .to_vec();
-    let mut depth = 0;
-    let mut embedded = false;
-    for payload in wasmparser::Parser::new(0).parse_all(&backend) {
-        match payload.map_err(|_| expanded_error())? {
-            wasmparser::Payload::ModuleSection { .. }
-            | wasmparser::Payload::ComponentSection { .. } => depth += 1,
-            wasmparser::Payload::End(_) if depth > 0 => depth -= 1,
-            wasmparser::Payload::CustomSection(section)
-                if depth == 0 && section.name() == "pishoo:openapi" =>
-            {
-                embedded = true;
-                break;
-            }
-            _ => {}
-        }
-    }
-    if embedded {
-        return Ok(backend);
-    }
-    let document = super::package_file(package, "/metadata/openapi.json")?;
-    let name = b"pishoo:openapi";
-    let mut section = vec![name.len() as u8];
-    section.extend_from_slice(name);
-    section.extend_from_slice(&document);
-    backend.push(0);
-    let mut size = section.len();
-    while size >= 0x80 {
-        backend.push((size as u8 & 0x7f) | 0x80);
-        size >>= 7;
-    }
-    backend.push(size as u8);
-    backend.extend_from_slice(&section);
-    Ok(backend)
-}
-
 fn write_expanded(dir: &std::fs::File, bytes: &[u8], id: &str, kind: &str) -> Result<()> {
     let package = read_package(bytes)?;
     if kind == "lib" {
         write_component(
             dir,
             &format!("{}.wasm", id.rsplit('/').next().unwrap()),
-            &runtime_wasm(&package)?,
+            package.get("backend.wasm").ok_or_else(expanded_error)?,
         )?;
     } else {
-        let mapping = package
-            .manifest()
-            .filesystem()
-            .map_err(|_| expanded_error())?
-            .unwrap();
-        let mapping = &mapping[0];
-        let volume = package
-            .get_volume(&mapping.volume_name)
-            .ok_or_else(expanded_error)?;
-        let root = mapping
-            .host_path
-            .as_deref()
-            .unwrap_or("/")
-            .trim_end_matches('/');
-        let mut pending = vec![format!("{root}/")];
-        while let Some(path) = pending.pop() {
-            for (name, _, entry) in volume.read_dir(path.as_str()).ok_or_else(expanded_error)? {
-                let path = format!("{path}{name}");
-                if matches!(entry, webc::Metadata::Dir { .. }) {
-                    pending.push(format!("{path}/"));
-                    continue;
-                }
-                let relative = path.strip_prefix(root).unwrap().trim_start_matches('/');
-                if matches!(
-                    relative.split('/').next(),
-                    Some(".transaction.json" | ".previous")
-                ) {
-                    return Err(Error::InvalidComponent(
-                        "reserved recovery path in App".into(),
-                    ));
-                }
-                let target = relative.to_owned();
-                let mut parent = dir.try_clone()?;
-                let mut parts = target.split('/').peekable();
-                while let Some(part) = parts.next() {
-                    if parts.peek().is_some() {
-                        match rustix::fs::mkdirat(
-                            &parent,
-                            part,
-                            rustix::fs::Mode::from_raw_mode(0o700),
-                        ) {
-                            Ok(()) => parent.sync_all()?,
-                            Err(rustix::io::Errno::EXIST) => {}
-                            Err(error) => return Err(layout_error(error)),
-                        }
-                        let child = child_dir(&parent, std::ffi::OsStr::new(part))?;
-                        inherit_owner(&child, &parent)?;
-                        parent = child;
-                    } else {
-                        write_component(
-                            &parent,
-                            part,
-                            &volume
-                                .read_file(path.as_str())
-                                .ok_or_else(expanded_error)?
-                                .0,
-                        )?;
-                        parent.sync_all()?;
+        for (path, data) in &package {
+            let Some(relative) = path.strip_prefix("public/") else {
+                continue;
+            };
+            if matches!(
+                relative.split('/').next(),
+                Some(".transaction.json" | ".previous")
+            ) {
+                return Err(Error::InvalidComponent(
+                    "reserved recovery path in App".into(),
+                ));
+            }
+            let mut parent = dir.try_clone()?;
+            let mut parts = relative.split('/').peekable();
+            while let Some(part) = parts.next() {
+                if parts.peek().is_some() {
+                    match rustix::fs::mkdirat(&parent, part, rustix::fs::Mode::from_raw_mode(0o700))
+                    {
+                        Ok(()) => parent.sync_all()?,
+                        Err(rustix::io::Errno::EXIST) => {}
+                        Err(error) => return Err(layout_error(error)),
                     }
+                    let child = child_dir(&parent, std::ffi::OsStr::new(part))?;
+                    inherit_owner(&child, &parent)?;
+                    parent = child;
+                } else {
+                    write_component(&parent, part, data)?;
+                    parent.sync_all()?;
                 }
             }
         }
     }
     dir.sync_all()?;
     Ok(())
-}
-
-fn expanded_bytes(dir: &std::fs::File) -> Result<Vec<u8>> {
-    use std::io::Read;
-    let mut proof = Vec::new();
-    expanded_file(dir, ".webc-proof")?
-        .take(80 * 1024 * 1024 + 1)
-        .read_to_end(&mut proof)?;
-    restore_package(dir, &proof)
-}
-
-fn restore_package(dir: &std::fs::File, proof: &[u8]) -> Result<Vec<u8>> {
-    use std::io::Read;
-    let magic = b"pishoo-expanded-webc-v1\0";
-    if proof.len() > 80 * 1024 * 1024 || !proof.starts_with(magic) {
-        return Err(expanded_error());
-    }
-    let raw = proof
-        .get(magic.len()..magic.len() + 8)
-        .ok_or_else(expanded_error)?;
-    let header_len = usize::try_from(u64::from_le_bytes(raw.try_into().unwrap()))
-        .map_err(|_| expanded_error())?;
-    if header_len > 16 * 1024 * 1024 {
-        return Err(expanded_error());
-    }
-    let header_start = magic.len() + 8;
-    let header_end = header_start
-        .checked_add(header_len)
-        .ok_or_else(expanded_error)?;
-    let (length, files): (usize, Vec<(String, webc::v3::Span)>) = serde_json::from_slice(
-        proof
-            .get(header_start..header_end)
-            .ok_or_else(expanded_error)?,
-    )
-    .map_err(|_| expanded_error())?;
-    if length > 64 * 1024 * 1024 || files.len() > 10001 {
-        return Err(expanded_error());
-    }
-    let mut bytes = Vec::with_capacity(length);
-    let mut cursor = header_end;
-    for (path, span) in &files {
-        let end = span
-            .start
-            .checked_add(span.len)
-            .filter(|end| *end <= length)
-            .ok_or_else(expanded_error)?;
-        let gap = span
-            .start
-            .checked_sub(bytes.len())
-            .ok_or_else(expanded_error)?;
-        let stop = cursor.checked_add(gap).ok_or_else(expanded_error)?;
-        bytes.extend_from_slice(proof.get(cursor..stop).ok_or_else(expanded_error)?);
-        cursor = stop;
-        let before = bytes.len();
-        expanded_file(dir, path)?
-            .take(span.len as u64 + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() != end || bytes.len() - before != span.len {
-            return Err(expanded_error());
-        }
-    }
-    let remaining = length.checked_sub(bytes.len()).ok_or_else(expanded_error)?;
-    if proof.len().checked_sub(cursor) != Some(remaining) {
-        return Err(expanded_error());
-    }
-    bytes.extend_from_slice(&proof[cursor..]);
-    // Installation authenticated the package and wrote this layout. Reading it
-    // only reconstructs the container; it does not rehash or reverify payloads.
-    // Bounds and no-follow traversal above are necessary to read files safely.
-    Ok(bytes)
-}
-
-fn artifact_file(dir: &std::fs::File, kind: &str) -> Result<std::fs::File> {
-    use rustix::fs::{Mode, OFlags, openat};
-    let file = std::fs::File::from(
-        openat(
-            dir,
-            format!("{kind}.webc"),
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(layout_error)?,
-    );
-    if !file.metadata()?.is_file() {
-        return Err(Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "lib.webc must be a regular file",
-        )));
-    }
-    Ok(file)
 }
 
 pub(crate) fn disk_bytes(
@@ -944,255 +807,24 @@ pub(crate) fn disk_bytes(
     let locked = child_dir(root, std::ffi::OsStr::new("."))?;
     rustix::fs::flock(&locked, rustix::fs::FlockOperation::LockShared)
         .map_err(std::io::Error::from)?;
-    installed_bytes(profile, &locked, id, "lib")
-}
-
-fn installed_bytes(
-    profile: &IdentityProfile,
-    root: &std::fs::File,
-    id: &str,
-    kind: &str,
-) -> Result<Vec<u8>> {
+    valid_id(id)?;
     let mut database = installation_database(profile, false)?;
     let conn = database.transaction()?;
-    let table = match kind {
-        "app" => "app",
-        "lib" => "lib",
-        _ => "package",
-    };
-    let modern: bool = conn.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='author')"),
-        [],
-        |row| row.get(0),
-    )?;
-    if !modern {
-        return artifact_bytes(root, id, kind);
+    if registered_metadata(&conn, "lib", id)?["has_lib"] != true {
+        return Err(Error::RouteNotFound);
     }
-    let runtime = if kind == "lib" {
-        resource_parent(root, id, false).and_then(|parent| {
-            expanded_file(&parent, &format!("{}.wasm", id.rsplit('/').next().unwrap()))
-        })
-    } else {
-        let app = child_dir(root, std::ffi::OsStr::new(id.rsplit('/').next().unwrap()));
-        match app {
-            Ok(app) => {
-                // Old ordinary Apps already used apps/<name>/public. Their
-                // actual archive marker, not metadata columns, distinguishes
-                // that preserved layout after another package migrates SQLite.
-                for marker in [".webc-proof", "app.webc"] {
-                    match expanded_file(&app, marker) {
-                        Ok(_) => return artifact_bytes(root, id, kind),
-                        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error),
-                    }
-                }
-                Ok(app)
-            }
-            Err(error) => Err(error),
-        }
-    };
-    match runtime {
-        Ok(_) => runtime_snapshot(&conn, root, id, kind),
-        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            artifact_bytes(root, id, kind)
-        }
-        Err(error) => Err(error),
-    }
+    let file = resource_parent(&locked, id, false).and_then(|parent| {
+        expanded_file(&parent, &format!("{}.wasm", id.rsplit('/').next().unwrap()))
+    });
+    read_runtime_wasm(file?)
 }
 
-fn snapshot_directory(
-    dir: &std::fs::File,
-    depth: usize,
-    entries: &mut usize,
-    size: &mut usize,
-) -> Result<webc::v3::write::Directory<'static>> {
+fn read_runtime_wasm(file: std::fs::File) -> Result<Vec<u8>> {
     use std::io::Read;
-
-    use webc::v3::{
-        Timestamps,
-        write::{DirEntry, Directory, FileEntry},
-    };
-    if depth > 64 {
-        return Err(expanded_error());
-    }
-    let mut children = std::collections::BTreeMap::new();
-    let directory = cap_std::fs::Dir::from_std_file(dir.try_clone()?);
-    for entry in directory.entries()? {
-        let entry = entry?;
-        *entries += 1;
-        if *entries > 10000 {
-            return Err(expanded_error());
-        }
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| expanded_error())?;
-        if name == ".transaction.json" || name == ".previous" {
-            continue;
-        }
-        let kind = entry.file_type()?;
-        let value = if kind.is_dir() {
-            let child = child_dir(dir, std::ffi::OsStr::new(&name))?;
-            if child.metadata()?.dev() != dir.metadata()?.dev() {
-                return Err(expanded_error());
-            }
-            DirEntry::Dir(snapshot_directory(&child, depth + 1, entries, size)?)
-        } else if kind.is_file() {
-            let file = expanded_file(dir, &name)?;
-            if file.metadata()?.dev() != dir.metadata()?.dev() {
-                return Err(expanded_error());
-            }
-            let mut bytes = Vec::new();
-            file.take((64 * 1024 * 1024 - *size + 1) as u64)
-                .read_to_end(&mut bytes)?;
-            *size += bytes.len();
-            if *size > 64 * 1024 * 1024 {
-                return Err(expanded_error());
-            }
-            DirEntry::File(FileEntry::owned(bytes, Timestamps::default()))
-        } else {
-            return Err(expanded_error());
-        };
-        children.insert(name.parse().map_err(|_| expanded_error())?, value);
-    }
-    Ok(Directory::new(children, Timestamps::default()))
-}
-
-fn runtime_snapshot(
-    conn: &rusqlite::Connection,
-    root: &std::fs::File,
-    id: &str,
-    kind: &str,
-) -> Result<Vec<u8>> {
-    let payload = if kind == "lib" {
-        expanded_file(
-            &resource_parent(root, id, false)?,
-            &format!("{}.wasm", id.rsplit('/').next().unwrap()),
-        )?
-    } else {
-        child_dir(root, std::ffi::OsStr::new(id.rsplit('/').next().unwrap()))?
-    };
-    runtime_snapshot_from(conn, &payload, id, kind)
-}
-
-// Build the same installation-trusted projection from either live or staged
-// resources. This lets online updates finish all fallible loading before commit.
-fn runtime_snapshot_from(
-    conn: &rusqlite::Connection,
-    payload: &std::fs::File,
-    id: &str,
-    kind: &str,
-) -> Result<Vec<u8>> {
-    use std::io::Read;
-
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use sha2::{Digest, Sha256};
-    use webc::v3::{
-        SignatureAlgorithm, Timestamps,
-        write::{Directory, FileEntry, Writer},
-    };
-    let metadata = registered_metadata(conn, kind, id)?;
-    let description = metadata["description"].as_str().ok_or_else(|| {
-        Error::InvalidConfig("installed package is missing its description".into())
-    })?;
-    let license = metadata["license"]
-        .as_str()
-        .ok_or_else(|| Error::InvalidConfig("installed package is missing its license".into()))?;
-    let mut wapm = serde_json::json!({"name":id,"version":metadata["version"],"description":description,"license":license});
-    if let Some(repository) = metadata.get("repository").filter(|v| !v.is_null()) {
-        wapm["repository"] = repository.clone();
-    }
-    let mut annotation =
-        serde_json::json!({"title":metadata["title"],"dependencies":metadata["dependencies"]});
-    if kind == "app" {
-        annotation["entry"] = "/".into();
-    }
-    let mount = if kind == "app" { "public" } else { "metadata" };
-    let mut backend = Vec::new();
-    if kind == "lib" {
-        payload
-            .take(64 * 1024 * 1024 + 1)
-            .read_to_end(&mut backend)?;
-        if backend.len() > 64 * 1024 * 1024 {
-            return Err(expanded_error());
-        }
-    }
-    let mut manifest = serde_json::json!({"package":{"wapm":wapm,"pishoo":annotation,
-        "fs":[{"volume_name":mount,"mount_path":format!("/{mount}")}]},"atoms":{}});
-    if kind == "lib" {
-        manifest["atoms"]["backend"] = serde_json::json!({"kind":"https://webc.org/kind/wasm","signature":format!("sha256:{}",STANDARD.encode(Sha256::digest(&backend)))});
-    }
-    let manifest: webc::metadata::Manifest =
-        serde_json::from_value(manifest).map_err(|_| expanded_error())?;
-    let atoms = if kind == "lib" {
-        std::collections::BTreeMap::from([(
-            "backend".parse().unwrap(),
-            FileEntry::owned(backend, Timestamps::default()),
-        )])
-    } else {
-        std::collections::BTreeMap::new()
-    };
-    let mut writer = Writer::default()
-        .write_manifest(&manifest)
-        .map_err(|_| expanded_error())?
-        .write_atoms(atoms)
-        .map_err(|_| expanded_error())?;
-    let volume = if kind == "app" {
-        snapshot_directory(payload, 0, &mut 0, &mut 0)?
-    } else {
-        Directory::default()
-    };
-    writer
-        .write_volume(mount, volume)
-        .map_err(|_| expanded_error())?;
-    // This is an unsigned, installation-trusted runtime holder. It cannot recover
-    // or validate the original signed source archive and never enters read_package.
-    Ok(writer
-        .finish(SignatureAlgorithm::None)
-        .map_err(|_| expanded_error())?
-        .to_vec())
-}
-
-// Registered previous WEBC installations remain readable until an explicit
-// reinstall. No startup relocation, package discovery, or data migration occurs.
-fn legacy_parent(root: &std::fs::File, id: &str, kind: &str) -> Result<std::fs::File> {
-    let identity = child_dir(root, std::ffi::OsStr::new(".."))?;
-    let legacy = child_dir(&identity, std::ffi::OsStr::new(kind))?;
-    match id.split_once('/') {
-        Some((publisher, _)) => child_dir(&legacy, std::ffi::OsStr::new(publisher)),
-        None => Ok(legacy),
-    }
-}
-
-fn artifact_bytes(root: &std::fs::File, id: &str, kind: &str) -> Result<Vec<u8>> {
-    use std::io::Read;
-    valid_id(id)?;
-    let resource = if kind == "app" {
-        child_dir(root, std::ffi::OsStr::new(id.rsplit('/').next().unwrap()))
-    } else {
-        resource_dir(root, id)
-    };
-    let dir = match resource {
-        Ok(dir) => dir,
-        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => child_dir(
-            &legacy_parent(root, id, kind)?,
-            std::ffi::OsStr::new(id.rsplit('/').next().unwrap()),
-        )?,
-        Err(e) => return Err(e),
-    };
-    match expanded_file(&dir, ".webc-proof") {
-        Ok(_) => return expanded_bytes(&dir),
-        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
     let mut bytes = Vec::new();
-    artifact_file(&dir, kind)?
-        .take(64 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
+    file.take(64 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > 64 * 1024 * 1024 {
-        return Err(Error::InvalidComponent(
-            "WEBC package exceeds 64 MiB".into(),
-        ));
+        return Err(Error::InvalidComponent("component exceeds 64 MiB".into()));
     }
     Ok(bytes)
 }
@@ -1415,7 +1047,7 @@ pub(super) fn install_packages(
                 dir
             };
             if kind == "lib" {
-                let snapshot = runtime_snapshot_from(&tx, &payload, id, kind)?;
+                let wasm = read_runtime_wasm(payload)?;
                 let data = profile
                     .join(".volume")
                     .join(if id.starts_with("std.dhttp.net/") {
@@ -1428,7 +1060,7 @@ pub(super) fn install_packages(
                     Arc::new(crate::sandbox::Lib::load(
                         sandbox.runtime.clone(),
                         (*id).clone(),
-                        &snapshot,
+                        &wasm,
                         &data,
                     )?),
                 );
@@ -1485,8 +1117,8 @@ pub(crate) fn install_package(
     let package = read_package(bytes)?;
     let metadata = package_metadata(&package)?;
     check_resource_identity(&metadata, id)?;
-    if let Some(backend) = package.get_atom("backend") {
-        runtime.compile(&backend)?;
+    if let Some(backend) = package.get("backend.wasm") {
+        runtime.compile(backend)?;
     }
     let mut database = installation_database(profile, true)?;
     check_name(&database, id, "pkg")?;

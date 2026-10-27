@@ -43,7 +43,7 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
             let bytes = crate::package::tests::package_fixture(
                 &document,
                 include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-                webc::v3::write::Directory::default(),
+                std::collections::BTreeMap::new(),
                 &crate::package::tests::publisher(publisher, 'a'),
             );
             let package = read_package(&bytes).unwrap();

@@ -153,7 +153,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     let mut packages = Vec::new();
     for project in projects {
         let output = root.path().join(format!(
-            "{}.webc",
+            "{}.waz",
             project.file_name().unwrap().to_str().unwrap()
         ));
         let result = std::process::Command::new(&genmeta)
@@ -702,7 +702,7 @@ fn install_signed_workspace_in_isolated_manual_test_profile() {
     drop(db);
     let runtime = WasmRuntime::new().unwrap();
     if !has_profile {
-        let bytes = std::fs::read(artifacts.join("profile-0.2.0.webc")).unwrap();
+        let bytes = std::fs::read(artifacts.join("profile-0.2.0.waz")).unwrap();
         let installed =
             crate::package::install_lib(&profile, "std.dhttp.net/profile", &bytes, &runtime)
                 .unwrap();
@@ -712,7 +712,7 @@ fn install_signed_workspace_in_isolated_manual_test_profile() {
             installed["id"], installed["version"]
         );
     }
-    let message = std::fs::read(artifacts.join("message-0.2.0.webc")).unwrap();
+    let message = std::fs::read(artifacts.join("message-0.2.0.waz")).unwrap();
     let installed =
         crate::package::install_lib(&profile, "std.dhttp.net/message", &message, &runtime).unwrap();
     assert_eq!(installed["version"], "0.2.0");
@@ -720,7 +720,7 @@ fn install_signed_workspace_in_isolated_manual_test_profile() {
         "LOCAL LIB INSTALL {} {}",
         installed["id"], installed["version"]
     );
-    let workspace = std::fs::read(artifacts.join("workspace-0.2.0.webc")).unwrap();
+    let workspace = std::fs::read(artifacts.join("workspace-0.2.0.waz")).unwrap();
     let installed =
         crate::package::install_app(&profile, "std.dhttp.net/workspace", &workspace).unwrap();
     assert_eq!(installed["version"], "0.2.0");

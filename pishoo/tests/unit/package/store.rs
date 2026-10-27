@@ -50,7 +50,7 @@ fn release(owner: char, version: &str) -> (Vec<u8>, Value) {
     let bytes = super::super::tests::package_fixture(
         &document,
         include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-        webc::v3::write::Directory::default(),
+        std::collections::BTreeMap::new(),
         &local,
     );
     let certificates = local
@@ -71,8 +71,7 @@ fn release(owner: char, version: &str) -> (Vec<u8>, Value) {
     metadata["dependencies"] = fields["dependencies"].as_array().unwrap().iter().map(|dependency| serde_json::json!({
         "author":dependency["publisher"],"name":dependency["name"],"version":dependency["version"]
     })).collect::<Vec<_>>().into();
-    metadata["openapi"] =
-        serde_json::from_slice(&package_file(&package, "/metadata/openapi.json").unwrap()).unwrap();
+    metadata["openapi"] = serde_json::from_slice(&package_openapi(&package).unwrap()).unwrap();
     (bytes, metadata)
 }
 
@@ -196,7 +195,7 @@ fn dependency_tree_orders_transitive_libs_and_rejects_cycles() {
         let bytes = package_fixture(
             &document,
             include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-            webc::v3::write::Directory::default(),
+            std::collections::BTreeMap::new(),
             &authority,
         );
         (
@@ -230,16 +229,9 @@ fn dependency_tree_orders_transitive_libs_and_rejects_cycles() {
     assert!(order_releases(vec![package("parent", &["missing"])]).is_err());
     let (kind, id, bytes, reused) = package("parent", &["first", "second"]);
     let container = read_package(&bytes).unwrap();
-    let document: Value = serde_json::from_slice(
-        &super::super::package_file(&container, "/metadata/openapi.json").unwrap(),
-    )
-    .unwrap();
-    let signature = container
-        .get_volume("pishoo-signature")
-        .unwrap()
-        .read_file("/signature.json")
-        .unwrap()
-        .0;
+    let document: Value =
+        serde_json::from_slice(super::super::package_openapi(&container).unwrap()).unwrap();
+    let signature = (&container["signature.json"], ()).0;
     let envelope: Value = serde_json::from_slice(&signature).unwrap();
     let mut metadata = serde_json::json!({"kind":kind,"id":id,"publisher":"alice.dhttp.net","name":"parent","version":"1.0.0","author_owner_hash":"a".repeat(64),"package_sha256":format!("{:x}",Sha256::digest(&bytes)),"size":bytes.len(),"openapi":document,"dependencies":document["x-pishoo"]["dependencies"],"signer_certificates":envelope["certificates"]});
     let fields = package_metadata(&container).unwrap();
@@ -271,7 +263,7 @@ fn published_std_release_proofs_match_signed_packages() {
     ] {
         let bytes = std::fs::read(
             root.join("packages")
-                .join(format!("{name}-0.1.0-{kind}.webc")),
+                .join(format!("{name}-0.1.0-{kind}.waz")),
         )
         .unwrap();
         let metadata: Value = serde_json::from_slice(

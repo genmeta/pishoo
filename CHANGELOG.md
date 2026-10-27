@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Verify and install signed WAZ ZIP entries directly. Remove the WEBC dependency,
+  intermediate containers, legacy archive/proof readers and App directory
+  flattening. Keep installation signatures, dependency checks and atomic updates.
+- Read installed Lib WASM directly without reconstructing or retaining an archive.
+
 ## [0.9.0-preview.5] - 2026-10-23
 
 ### Changed

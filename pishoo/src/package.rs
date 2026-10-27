@@ -23,7 +23,7 @@ pub(crate) use files::{
 pub(crate) use files::{
     install_app, install_lib, install_package, installed_libs, remove_app, remove_lib,
 };
-pub(crate) use format::{package_file, package_metadata, read_package};
+pub(crate) use format::{PackageFiles, package_metadata, package_openapi, read_package};
 pub use manifest::{validate_lib, validate_openapi};
 pub(crate) use store::install_store_package;
 #[cfg(test)]
@@ -49,31 +49,25 @@ fn require_owner(
     Ok(())
 }
 
-fn lib_metadata(package: &webc::Container, id: Option<&str>) -> serde_json::Value {
+fn lib_metadata(package: &PackageFiles, id: Option<&str>) -> serde_json::Value {
     // Installed packages are trusted after installation. Catalog reads parse
     // display metadata without repeating package or OpenAPI policy validation.
     let mut value = match package_metadata(package) {
         Ok(value) => value,
         Err(error) => return serde_json::json!({"id":id,"error":error.to_string()}),
     };
-    // A runtime snapshot contains installed resources and parsed metadata only.
-    // It cannot claim to retain the original release notes.
-    if package.get_volume("pishoo-signature").is_none() {
-        value.as_object_mut().unwrap().remove("changelog");
-    }
     let mut endpoints = Vec::new();
-    if package.get_atom("backend").is_some() {
+    if package.get("backend.wasm").is_some() {
         let identity = id.unwrap_or_else(|| value["id"].as_str().unwrap());
         let prefix = if identity.starts_with("std.dhttp.net/") {
             "/std".to_owned()
         } else {
             format!("/{}", identity.rsplit('/').next().unwrap())
         };
-        let openapi: oas3::OpenApiV3Spec = match package_file(package, "/metadata/openapi.json")
-            .and_then(|bytes| {
-                serde_json::from_slice(&bytes)
-                    .map_err(|error| Error::InvalidComponent(error.to_string()))
-            }) {
+        let openapi: oas3::OpenApiV3Spec = match package_openapi(package).and_then(|bytes| {
+            serde_json::from_slice(&bytes)
+                .map_err(|error| Error::InvalidComponent(error.to_string()))
+        }) {
             Ok(openapi) => openapi,
             Err(error) => return serde_json::json!({"id":id,"error":error.to_string()}),
         };
@@ -104,9 +98,9 @@ fn lib_metadata(package: &webc::Container, id: Option<&str>) -> serde_json::Valu
 #[cfg(test)]
 pub(crate) fn check_lib(bytes: &[u8], runtime: &WasmRuntime) -> Result<oas3::OpenApiV3Spec> {
     let package = read_package(bytes)?;
-    let openapi = validate_openapi(&package_file(&package, "/metadata/openapi.json")?)?;
-    if let Some(backend) = package.get_atom("backend") {
-        runtime.compile(&backend)?;
+    let openapi = validate_openapi(package_openapi(&package)?)?;
+    if let Some(backend) = package.get("backend.wasm") {
+        runtime.compile(backend)?;
     }
     Ok(openapi)
 }

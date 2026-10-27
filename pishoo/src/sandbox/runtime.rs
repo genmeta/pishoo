@@ -27,7 +27,7 @@ use super::{
 };
 use crate::{
     Body, Error, Result,
-    package::{package_file, valid_id},
+    package::valid_id,
 };
 
 // Component compilation, per-version filesystem grants, and Store limits.
@@ -123,11 +123,36 @@ impl Lib {
         data_dir: &Path,
     ) -> Result<Self> {
         valid_id(&id).map_err(|_| Error::InvalidComponent("invalid Lib id".into()))?;
-        let package =
-            webc::Container::from_bytes_and_version(bytes.to_vec().into(), webc::Version::V3)
-                .map_err(|error| Error::InvalidComponent(error.to_string()))?;
-        let openapi = serde_json::from_slice(&package_file(&package, "/metadata/openapi.json")?)
-            .map_err(|error| Error::InvalidComponent(error.to_string()))?;
+        if bytes.len() > 64 * 1024 * 1024 {
+            return Err(Error::InvalidComponent("component exceeds 64 MiB".into()));
+        }
+        // Installation already authenticated the component. Borrow its embedded
+        // metadata directly; no container serialization, copy, or retained archive.
+        let mut document = None;
+        let mut depth = 0;
+        for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+            match payload.map_err(|error| Error::InvalidComponent(error.to_string()))? {
+                wasmparser::Payload::ModuleSection { .. }
+                | wasmparser::Payload::ComponentSection { .. } => depth += 1,
+                wasmparser::Payload::End(_) if depth > 0 => depth -= 1,
+                wasmparser::Payload::CustomSection(section)
+                    if section.name() == "pishoo:openapi" =>
+                {
+                    if depth != 0 || document.is_some() || section.data().len() > 1024 * 1024 {
+                        return Err(Error::InvalidComponent(
+                            "OpenAPI must be a unique bounded top-level section".into(),
+                        ));
+                    }
+                    document = Some(section.data());
+                }
+                _ => {}
+            }
+        }
+        let openapi = serde_json::from_slice(
+            document
+                .ok_or_else(|| Error::InvalidComponent("missing pishoo:openapi section".into()))?,
+        )
+        .map_err(|error| Error::InvalidComponent(error.to_string()))?;
         // Each Lib gets one private volume; the signed publisher selects std/.
         // Move legacy data only when its new destination does not exist.
         let parent = data_dir
@@ -178,9 +203,7 @@ impl Lib {
             }
         }
         let database_root = parent;
-        let component = runtime.compile(&package.get_atom("backend").ok_or_else(|| {
-            Error::InvalidComponent("expected a backend lib, received a frontend app".into())
-        })?)?;
+        let component = runtime.compile(bytes)?;
         let owner = database_root.symlink_metadata().map_err(Error::Io)?;
         if !owner.is_dir() {
             return Err(Error::InvalidComponent(
@@ -253,7 +276,6 @@ impl Lib {
         Ok(Self {
             openapi,
             component,
-            package,
             runtime,
             filesystem,
         })

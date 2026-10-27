@@ -10,7 +10,7 @@ fn host_keeps_only_run_reload_help_and_version() {
         vec!["listen"],
         vec!["proxy"],
         vec!["lib", "list"],
-        vec!["app", "check", "missing.webc"],
+        vec!["app", "check", "missing.waz"],
         vec!["start"],
         vec!["stop"],
         vec!["restart"],

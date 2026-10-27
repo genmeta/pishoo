@@ -76,7 +76,7 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
     let profile_package = crate::package::tests::package_fixture(
         &profile_doc,
         &std::fs::read(profile_repo.join("dist/lib.wasm")).unwrap(),
-        webc::v3::write::Directory::default(),
+        std::collections::BTreeMap::new(),
         &authority,
     );
     let probe_path = std::env::var_os("PISHOO_LIB_HTTP_PROBE")
@@ -90,7 +90,7 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
     let probe = crate::package::tests::package_fixture(
         &probe_doc,
         &std::fs::read(probe_path).expect("build lib-http-probe first"),
-        webc::v3::write::Directory::default(),
+        std::collections::BTreeMap::new(),
         &authority,
     );
     let mut chat_doc: Value =
@@ -99,7 +99,7 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
     let chat = crate::package::tests::package_fixture(
         &chat_doc,
         &std::fs::read(message_repo.join("dist/lib.wasm")).expect("build message-lib first"),
-        webc::v3::write::Directory::default(),
+        std::collections::BTreeMap::new(),
         &authority,
     );
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();

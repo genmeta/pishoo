@@ -1,7 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use serde_json::{Value, json};
-use webc::v3::{Timestamps, write::Directory};
 
 use super::*;
 use crate::package::files::install_packages;
@@ -23,15 +22,12 @@ fn release(
         "paths":{"/read":{"get":{"operationId":"read","summary":"Read","x-access-group":"read","responses":{"200":{"description":"ok"}}}}}
     });
     let files = if frontend {
-        Directory::new(
-            BTreeMap::from([(
-                "index.html".parse().unwrap(),
-                version.as_bytes().to_vec().into(),
-            )]),
-            Timestamps::default(),
-        )
+        BTreeMap::from([(
+            "index.html".parse().unwrap(),
+            version.as_bytes().to_vec().into(),
+        )])
     } else {
-        Directory::default()
+        std::collections::BTreeMap::new()
     };
     (
         format!("alice.dhttp.net/{name}"),

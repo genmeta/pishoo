@@ -1,5 +1,4 @@
 use serde_json::json;
-use webc::v3::write::Directory;
 
 use super::*;
 
@@ -51,15 +50,12 @@ fn package(version: &str, lib: bool, app: bool) -> Vec<u8> {
         &doc,
         include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
         if app {
-            Directory::new(
-                std::collections::BTreeMap::from([(
-                    "index.html".parse().unwrap(),
-                    version.as_bytes().to_vec().into(),
-                )]),
-                webc::v3::Timestamps::default(),
-            )
+            std::collections::BTreeMap::from([(
+                "index.html".parse().unwrap(),
+                version.as_bytes().to_vec().into(),
+            )])
         } else {
-            Directory::default()
+            std::collections::BTreeMap::new()
         },
         &publisher("alice.dhttp.net", 'a'),
     )

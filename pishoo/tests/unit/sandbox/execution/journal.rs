@@ -219,9 +219,9 @@ fn journal_package(kind: &str) -> Vec<u8> {
             .expect("build Journal backend first")
     };
     let public = if kind != "lib" {
-        webc::v3::write::Directory::from_path(root.join("public")).unwrap()
+        crate::package::tests::packages::public_files(&root.join("public")).unwrap()
     } else {
-        webc::v3::write::Directory::default()
+        std::collections::BTreeMap::new()
     };
     package_fixture(&document, &bytes, public, &publisher(publisher_name, 'a'))
 }
@@ -384,7 +384,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
         404,
         "the guest must not retain the package-name prefix"
     );
-    // The backend owns APIs only; the root page is served from the WEBC volume.
+    // The backend owns APIs only; the root page is served from the ZIP public files.
     assert_eq!(
         journal_call(
             &lib,
@@ -1283,8 +1283,8 @@ async fn journal_release_registers_capabilities_and_both_runtime_resources() {
     let id = "alice.smith.dhttp.net/journal";
     let bytes = journal_package("pkg");
     let package = read_package(&bytes).unwrap();
-    assert_eq!(package.atoms().len(), 1);
-    assert!(package.get_volume("public").is_some());
+    assert!(package.contains_key("backend.wasm"));
+    assert!(package.keys().any(|path| path.starts_with("public/")));
     let installed = install_package(&profile, id, &bytes, &runtime).unwrap();
     assert_eq!(installed["has_lib"], true);
     assert_eq!(installed["has_app"], true);

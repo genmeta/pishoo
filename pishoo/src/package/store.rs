@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use super::{Sandbox, installed_packages, package_metadata, read_package};
 #[cfg(test)]
-use super::{install_lib, package_file};
+use super::{install_lib, package_openapi};
 #[cfg(test)]
 use crate::sandbox::Lib;
 use crate::{Error, Result};
@@ -260,16 +260,12 @@ fn verify_release(
     {
         return Err(invalid("store package digest or size mismatch"));
     }
-    // Validate the entire signed container, not only the backend atom.
+    // Validate the entire signed ZIP package, not only the backend.
     let package = read_package(bytes)?;
     let document = package_metadata(&package)?;
-    let (data, _) = package
-        .get_volume("pishoo-signature")
-        .unwrap()
-        .read_file("/signature.json")
-        .unwrap();
+    let data = &package["signature.json"];
     let envelope: Value =
-        serde_json::from_slice(&data).map_err(|_| invalid("invalid signature envelope"))?;
+        serde_json::from_slice(data).map_err(|_| invalid("invalid signature envelope"))?;
     let dependencies = document["dependencies"]
         .as_array()
         .unwrap()
