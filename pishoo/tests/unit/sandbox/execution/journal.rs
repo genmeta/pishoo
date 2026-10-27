@@ -226,6 +226,19 @@ fn journal_package(kind: &str) -> Vec<u8> {
     package_fixture(&document, &bytes, public, &publisher(publisher_name, 'a'))
 }
 
+fn journal_app() -> (String, Arc<std::fs::File>) {
+    let package = read_package(&journal_package("app")).unwrap();
+    let version = crate::package::package_metadata(&package).unwrap()["version"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let root = std::path::PathBuf::from(std::env::var_os("PISHOO_JOURNAL_REPO").unwrap());
+    (
+        version,
+        Arc::new(std::fs::File::open(root.join("public")).unwrap()),
+    )
+}
+
 fn journal_lib(directory: &Path) -> Arc<Lib> {
     Arc::new(
         Lib::load(
@@ -1087,10 +1100,9 @@ async fn journal_browser_preview() {
     sandbox
         .libs
         .insert("alice.smith.dhttp.net/journal".into(), lib);
-    sandbox.apps.insert(
-        "alice.smith.dhttp.net/journal".into(),
-        read_package(&journal_package("app")).unwrap(),
-    );
+    sandbox
+        .apps
+        .insert("alice.smith.dhttp.net/journal".into(), journal_app());
     let app = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net")).layer(
         axum::middleware::from_fn(
             move |mut request: Request<axum::body::Body>, next: axum::middleware::Next| {
@@ -1161,9 +1173,7 @@ async fn journal_frontend_is_served_from_package_with_daccess_for_every_file() {
     let mut sandbox = Sandbox::new(lib.runtime.clone());
     let id = "alice.smith.dhttp.net/journal";
     sandbox.libs.insert(id.into(), lib.clone());
-    sandbox
-        .apps
-        .insert(id.into(), read_package(&journal_package("app")).unwrap());
+    sandbox.apps.insert(id.into(), journal_app());
     let app = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net")).layer(
         axum::middleware::from_fn_with_state(access.clone(), crate::routes::authorize),
     );

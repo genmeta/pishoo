@@ -103,6 +103,9 @@ fn dependency_update_switches_direct_and_shared_transitive_dependencies_together
     let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
     let mut sandbox = installed(&profile);
     let previous = sandbox.libs["alice.dhttp.net/profile"].clone();
+    let old_page =
+        crate::package::app_file(&sandbox.apps["alice.dhttp.net/workspace"].1, "index.html")
+            .unwrap();
     install_packages(&profile, &releases("2.0.0"), &mut sandbox).unwrap();
     let catalog = installed_packages(&profile, None).unwrap();
     for package in catalog.as_array().unwrap() {
@@ -113,6 +116,16 @@ fn dependency_update_switches_direct_and_shared_transitive_dependencies_together
     }
     assert_eq!(sandbox.libs.len(), 2);
     assert_eq!(sandbox.apps.len(), 2);
+    assert_eq!(std::io::read_to_string(old_page).unwrap(), "1.0.0");
+    assert_eq!(sandbox.apps["alice.dhttp.net/workspace"].0, "2.0.0");
+    assert_eq!(
+        std::io::read_to_string(
+            crate::package::app_file(&sandbox.apps["alice.dhttp.net/workspace"].1, "index.html")
+                .unwrap()
+        )
+        .unwrap(),
+        "2.0.0"
+    );
     assert_eq!(
         sandbox.libs["alice.dhttp.net/profile"].openapi.info.version,
         "2.0.0"

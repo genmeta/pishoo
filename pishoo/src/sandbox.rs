@@ -21,11 +21,11 @@ use crate::{Error, Result};
 mod host;
 mod runtime;
 
-use crate::package::{disk_bytes, installed_apps, lib_root, package_file};
+use crate::package::{app_file, disk_bytes, installed_apps, lib_root};
 
 pub(crate) struct Sandbox {
     pub(crate) libs: HashMap<String, Arc<Lib>>,
-    pub(crate) apps: HashMap<String, webc::Container>,
+    pub(crate) apps: HashMap<String, (String, Arc<std::fs::File>)>,
     pub(crate) runtime: Arc<WasmRuntime>,
     pub(crate) tasks: TaskTracker,
 }
@@ -281,101 +281,115 @@ impl Sandbox {
                 if !request.uri().path().starts_with("/app/") {
                     return api.oneshot(request).await.expect("route is infallible");
                 }
-                let result: Result<axum::response::Response> = (|| {
-                    use axum::response::IntoResponse;
-                    use http::{Method, StatusCode, header};
-                    let tail = request
-                        .uri()
-                        .path()
-                        .strip_prefix("/app/")
-                        .ok_or(Error::RouteNotFound)?;
-                    let name = tail.split('/').next().unwrap();
-                    let package = {
+                let result =
+                    tokio::task::spawn_blocking(move || -> Result<axum::response::Response> {
+                        use axum::response::IntoResponse;
+                        use http::{Method, StatusCode, header};
+                        let tail = request
+                            .uri()
+                            .path()
+                            .strip_prefix("/app/")
+                            .ok_or(Error::RouteNotFound)?;
+                        let name = tail.split('/').next().unwrap();
+                        // Keep installation/uninstallation from removing the selected directory
+                        // until the requested file is open. The response owns only that file.
                         let sandbox = sandbox.read().unwrap();
-                        sandbox
+                        let (_, directory) = sandbox
                             .apps
                             .iter()
                             .find(|(id, _)| id.rsplit('/').next() == Some(name))
-                            .map(|(_, package)| package.clone())
-                            .ok_or(Error::RouteNotFound)?
-                    };
-                    if !matches!(request.method(), &Method::GET | &Method::HEAD) {
-                        return Ok((
-                            StatusCode::METHOD_NOT_ALLOWED,
-                            [(header::ALLOW, "GET, HEAD")],
-                        )
-                            .into_response());
-                    }
-                    let suffix = tail.strip_prefix(name).unwrap();
-                    if suffix.is_empty() {
-                        let location = match request.uri().query() {
-                            Some(query) => format!("{}/?{query}", request.uri().path()),
-                            None => format!("{}/", request.uri().path()),
-                        };
-                        return Ok(axum::response::Redirect::temporary(&location).into_response());
-                    }
-                    let suffix = percent_encoding::percent_decode_str(suffix)
-                        .decode_utf8()
-                        .map_err(|_| Error::RouteNotFound)?;
-                    if suffix.contains(['\\', '\0', '%'])
-                        || suffix.split('/').any(|part| matches!(part, "." | ".."))
-                        || suffix.chars().any(|c| c.is_control())
-                    {
-                        return Err(Error::RouteNotFound);
-                    }
-                    let mut file = if suffix == "/" {
-                        "/public/index.html".to_owned()
-                    } else {
-                        format!("/public{suffix}")
-                    };
-                    let bytes = match package_file(&package, &file) {
-                        Ok(bytes) => bytes,
-                        Err(_) => {
-                            let resource = suffix
-                                .trim_end_matches('/')
-                                .rsplit('/')
-                                .next()
-                                .unwrap_or("");
-                            let asset = suffix.starts_with("/assets/")
-                                || suffix.starts_with("/static/")
-                                || matches!(suffix.as_ref(), "/assets" | "/static")
-                                || resource.contains('.')
-                                || request
-                                    .headers()
-                                    .get("sec-fetch-dest")
-                                    .and_then(|value| value.to_str().ok())
-                                    .is_some_and(|value| {
-                                        !matches!(value, "document" | "iframe" | "empty")
-                                    });
-                            if asset {
-                                return Err(Error::RouteNotFound);
-                            }
-                            file = "/public/index.html".to_owned();
-                            package_file(&package, &file)?
+                            .map(|(_, app)| app)
+                            .ok_or(Error::RouteNotFound)?;
+                        if !matches!(request.method(), &Method::GET | &Method::HEAD) {
+                            return Ok((
+                                StatusCode::METHOD_NOT_ALLOWED,
+                                [(header::ALLOW, "GET, HEAD")],
+                            )
+                                .into_response());
                         }
-                    };
-                    http::Response::builder()
-                        .status(StatusCode::OK)
-                        .header(
-                            header::CONTENT_TYPE,
-                            mime_guess::from_path(&file)
-                                .first_or_octet_stream()
-                                .to_string(),
-                        )
-                        .header(header::CONTENT_LENGTH, bytes.len())
-                        .header(header::CACHE_CONTROL, "no-store")
-                        .header("x-content-type-options", "nosniff")
-                        .header("referrer-policy", "no-referrer")
-                        .header("cross-origin-resource-policy", "same-origin")
-                        .header("x-frame-options", "DENY")
-                        .body(if request.method() == Method::HEAD {
-                            axum::body::Body::empty()
+                        let suffix = tail.strip_prefix(name).unwrap();
+                        if suffix.is_empty() {
+                            let location = match request.uri().query() {
+                                Some(query) => format!("{}/?{query}", request.uri().path()),
+                                None => format!("{}/", request.uri().path()),
+                            };
+                            return Ok(
+                                axum::response::Redirect::temporary(&location).into_response()
+                            );
+                        }
+                        let suffix = percent_encoding::percent_decode_str(suffix)
+                            .decode_utf8()
+                            .map_err(|_| Error::RouteNotFound)?;
+                        if suffix.contains(['\\', '\0', '%'])
+                            || suffix.split('/').any(|part| matches!(part, "." | ".."))
+                            || suffix.chars().any(|c| c.is_control())
+                        {
+                            return Err(Error::RouteNotFound);
+                        }
+                        let mut file = if suffix == "/" {
+                            "index.html".to_owned()
                         } else {
-                            axum::body::Body::from(bytes)
-                        })
-                        .map_err(Error::Http)
-                })();
-                result.unwrap_or_else(reject_api)
+                            suffix.trim_start_matches('/').to_owned()
+                        };
+                        let opened = match app_file(directory, &file) {
+                            Ok(file) => file,
+                            Err(_) => {
+                                let resource = suffix
+                                    .trim_end_matches('/')
+                                    .rsplit('/')
+                                    .next()
+                                    .unwrap_or("");
+                                let asset = suffix.starts_with("/assets/")
+                                    || suffix.starts_with("/static/")
+                                    || matches!(suffix.as_ref(), "/assets" | "/static")
+                                    || resource.contains('.')
+                                    || request
+                                        .headers()
+                                        .get("sec-fetch-dest")
+                                        .and_then(|value| value.to_str().ok())
+                                        .is_some_and(|value| {
+                                            !matches!(value, "document" | "iframe" | "empty")
+                                        });
+                                if asset {
+                                    return Err(Error::RouteNotFound);
+                                }
+                                file = "index.html".to_owned();
+                                app_file(directory, &file)?
+                            }
+                        };
+                        let length = opened.metadata()?.len();
+                        drop(sandbox);
+                        http::Response::builder()
+                            .status(StatusCode::OK)
+                            .header(
+                                header::CONTENT_TYPE,
+                                mime_guess::from_path(&file)
+                                    .first_or_octet_stream()
+                                    .to_string(),
+                            )
+                            .header(header::CONTENT_LENGTH, length)
+                            .header(header::CACHE_CONTROL, "no-store")
+                            .header("x-content-type-options", "nosniff")
+                            .header("referrer-policy", "no-referrer")
+                            .header("cross-origin-resource-policy", "same-origin")
+                            .header("x-frame-options", "DENY")
+                            .body(if request.method() == Method::HEAD {
+                                axum::body::Body::empty()
+                            } else {
+                                axum::body::Body::from_stream(
+                                    tokio_util::io::ReaderStream::with_capacity(
+                                        tokio::fs::File::from_std(opened),
+                                        16 * 1024,
+                                    ),
+                                )
+                            })
+                            .map_err(Error::Http)
+                    })
+                    .await;
+                result
+                    .map_err(Error::from)
+                    .and_then(|response| response)
+                    .unwrap_or_else(reject_api)
             }
         });
         axum::Router::new()

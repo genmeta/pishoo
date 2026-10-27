@@ -357,3 +357,114 @@ async fn routed_executions_exceed_four_concurrent_requests_and_survive_close() {
     assert_eq!(sandbox.tasks.len(), 8);
     drop(responses);
 }
+
+#[tokio::test]
+async fn app_static_files_are_read_on_demand_and_open_responses_survive_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("assets")).unwrap();
+    std::fs::write(directory.path().join("index.html"), b"first page").unwrap();
+    std::fs::write(directory.path().join("assets/app.js"), b"first script").unwrap();
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    sandbox.apps.insert(
+        "alice.dhttp.net/hello".into(),
+        (
+            "1.0.0".into(),
+            Arc::new(std::fs::File::open(directory.path()).unwrap()),
+        ),
+    );
+    let router = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net"));
+    let old_response = router
+        .clone()
+        .oneshot(request(Method::GET, "/app/hello/assets/app.js"))
+        .await
+        .unwrap();
+    std::fs::write(directory.path().join("assets/new.js"), b"new script").unwrap();
+    std::fs::rename(
+        directory.path().join("assets/new.js"),
+        directory.path().join("assets/app.js"),
+    )
+    .unwrap();
+    assert_eq!(
+        old_response.into_body().collect().await.unwrap().to_bytes(),
+        "first script"
+    );
+    let response = router
+        .clone()
+        .oneshot(request(Method::GET, "/app/hello/assets/app.js"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        "new script"
+    );
+    std::fs::write(directory.path().join("index.html"), b"new page").unwrap();
+    let response = router
+        .clone()
+        .oneshot(request(Method::GET, "/app/hello/conversations/bob"))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        "new page"
+    );
+    let response = router
+        .clone()
+        .oneshot(request(Method::HEAD, "/app/hello/"))
+        .await
+        .unwrap();
+    assert_eq!(response.headers()["content-length"], "8");
+    assert!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+    let response = router
+        .clone()
+        .oneshot(request(Method::GET, "/app/hello?tab=1"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(response.headers()["location"], "/app/hello/?tab=1");
+    for path in [
+        "/app/hello/assets/missing.js",
+        "/app/hello/%2e%2e/secret",
+        "/app/hello/%252e%252e/secret",
+        "/app/unregistered/",
+    ] {
+        assert_eq!(
+            status(&router, Method::GET, path).await,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    assert_eq!(
+        status(&router, Method::POST, "/app/hello/").await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.js"), b"private").unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.js"),
+        directory.path().join("assets/link.js"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(outside.path(), directory.path().join("escape")).unwrap();
+    for path in ["/app/hello/assets/link.js", "/app/hello/escape/secret.js"] {
+        assert_eq!(
+            status(&router, Method::GET, path).await,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    std::fs::remove_file(directory.path().join("assets/app.js")).unwrap();
+    assert_eq!(
+        status(&router, Method::GET, "/app/hello/assets/app.js").await,
+        StatusCode::NOT_FOUND
+    );
+}

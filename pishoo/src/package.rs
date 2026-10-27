@@ -17,7 +17,7 @@ mod manifest;
 mod store;
 
 pub(crate) use files::{
-    disk_bytes, installed_apps, installed_packages, lib_root, remove_package, valid_id,
+    app_file, disk_bytes, installed_apps, installed_packages, lib_root, remove_package, valid_id,
 };
 #[cfg(test)]
 pub(crate) use files::{

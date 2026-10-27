@@ -309,8 +309,9 @@ fn expanded_app_loads_installed_public_files_without_revalidation_and_rejects_sy
     std::fs::write(&index, b"modified page").unwrap();
     let apps = installed_apps(&profile, Some(id)).unwrap();
     assert_eq!(
-        package_file(&apps[id], "/public/index.html").unwrap(),
-        &b"modified page"[..]
+        std::io::read_to_string(crate::package::app_file(&apps[id].1, "index.html").unwrap())
+            .unwrap(),
+        "modified page"
     );
     std::fs::write(&index, b"verified page").unwrap();
     assert!(installed_apps(&profile, Some(id)).is_ok());
@@ -320,7 +321,8 @@ fn expanded_app_loads_installed_public_files_without_revalidation_and_rejects_sy
         let assets = directory.join("assets");
         std::fs::rename(&assets, &outside).unwrap();
         std::os::unix::fs::symlink(&outside, &assets).unwrap();
-        assert!(installed_apps(&profile, Some(id)).is_err());
+        assert!(installed_apps(&profile, Some(id)).is_ok());
+        assert!(crate::package::app_file(&apps[id].1, "assets/app.js").is_err());
         assert!(outside.join("app.js").is_file());
     }
 }
@@ -418,7 +420,7 @@ fn package_routes_files_and_identity_are_bound_to_publisher_signature() {
 }
 
 #[tokio::test]
-async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest() {
+async fn frontend_updates_switch_directories_and_open_responses_survive_removal() {
     use http::{Method, StatusCode};
     use tower::ServiceExt;
     let root = tempfile::tempdir().unwrap();
@@ -430,8 +432,37 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
     install_app(&profile, id, &frontend_package("1.0.0", "old page")).unwrap();
     let mut sandbox = Sandbox::new(runtime.clone());
     sandbox.load_libs(&profile).unwrap();
-    let old = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net"));
-    install_app(&profile, id, &frontend_package("2.0.0", "new page")).unwrap();
+    let sandbox = Arc::new(std::sync::RwLock::new(sandbox));
+    let endpoint = crate::test_identity::endpoint("alice.dhttp.net");
+    let new = Sandbox::api_router(
+        sandbox.clone(),
+        endpoint.clone(),
+        Arc::new(access_control::AccessService::new(
+            sea_orm::DatabaseConnection::default(),
+            endpoint.name(),
+        )),
+        axum::Router::new(),
+    );
+    let old_response = new
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/app/hello/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    crate::package::files::install_packages(
+        &profile,
+        &[(id.into(), frontend_package("2.0.0", "new page"))],
+        &mut sandbox.write().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        old_response.into_body().collect().await.unwrap().to_bytes(),
+        "old page"
+    );
     let before = std::fs::read(
         profile
             .join("app")
@@ -439,7 +470,14 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
             .join("index.html"),
     )
     .unwrap();
-    assert!(install_app(&profile, id, b"broken").is_err());
+    assert!(
+        crate::package::files::install_packages(
+            &profile,
+            &[(id.into(), b"broken".to_vec())],
+            &mut sandbox.write().unwrap()
+        )
+        .is_err()
+    );
     assert_eq!(
         std::fs::read(
             profile
@@ -450,9 +488,7 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
         .unwrap(),
         before
     );
-    sandbox.load_libs(&profile).unwrap();
-    let new = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net"));
-    for (router, expected) in [(&old, "old page"), (&new, "new page")] {
+    for (router, expected) in [(&new, "new page")] {
         for method in [Method::GET, Method::HEAD] {
             let response = router
                 .clone()
@@ -482,7 +518,7 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
             );
         }
     }
-    assert!(sandbox.tasks.is_empty());
+    assert!(sandbox.read().unwrap().tasks.is_empty());
     let response = new
         .clone()
         .oneshot(
@@ -523,22 +559,36 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
             .unwrap();
         assert_eq!(response.status(), status, "{path}");
     }
-    remove_app(&profile, id).unwrap();
-    assert!(!profile.join("db").join(id).exists());
-    // Running router owns the old package even after the disk resource is removed.
-    let response = old
+    let response = new
+        .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/app/{}/", id.rsplit('/').next().unwrap()))
+                .uri("/app/hello/")
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
+    {
+        let mut sandbox = sandbox.write().unwrap();
+        remove_app(&profile, id).unwrap();
+        sandbox.apps.remove(id);
+    }
+    assert!(!profile.join("db").join(id).exists());
     assert_eq!(
         response.into_body().collect().await.unwrap().to_bytes(),
-        "old page"
+        "new page"
     );
+    let response = new
+        .oneshot(
+            Request::builder()
+                .uri("/app/hello/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[test]
