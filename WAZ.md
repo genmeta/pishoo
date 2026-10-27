@@ -4,6 +4,11 @@ A `.waz` release is a standard ZIP archive with MIME `application/zip`. It can b
 listed and extracted with ordinary ZIP tools. Publication and installation accept
 this format only; previous WEBC release files must be rebuilt from source.
 
+The host operates directly on ZIP entries after verification. There is no internal
+conversion to a second archive format, no legacy archive/proof reconstruction,
+and no compatibility reader for previous installed package layouts. Runtime Libs
+read the installed WASM and its embedded OpenAPI; Apps read their installed files.
+
 ## Files
 
 ```text

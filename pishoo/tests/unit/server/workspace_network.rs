@@ -723,7 +723,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
         )
         .unwrap();
     std::fs::create_dir_all(lib.join("lib/broken")).unwrap();
-    std::fs::write(lib.join("lib/broken/.webc-proof"), b"not WASM").unwrap();
+    std::fs::write(lib.join("lib/broken/.unused-payload"), b"not WASM").unwrap();
     assert!(matches!(
         load_profile(lib, runtime).await,
         Err(Error::InvalidComponent(_))
@@ -1251,7 +1251,7 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
             root.path()
                 .join(".dhttp")
                 .as_path()
-                .join(".broken/lib/bad/.webc-proof"),
+                .join(".broken/lib/bad/.unused-payload"),
             b"broken",
         )
         .unwrap();

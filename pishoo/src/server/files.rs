@@ -135,37 +135,6 @@ pub(super) fn initialize_directories(profile: &IdentityProfile) -> Result<()> {
                 .map_err(|error| error.error)?;
         }
     }
-    for entry in std::fs::read_dir(profile.join("app"))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let app = entry.path();
-        // Old signed/expanded archives retain their literal span paths until reinstall.
-        if app.join(".webc-proof").try_exists()? || app.join("app.webc").try_exists()? {
-            continue;
-        }
-        let public = app.join("public");
-        if public.try_exists()? {
-            if !public.symlink_metadata()?.file_type().is_dir() {
-                return Err(Error::InvalidConfig(
-                    "public must be a real directory".into(),
-                ));
-            }
-            for file in std::fs::read_dir(&public)? {
-                let file = file?;
-                let target = app.join(file.file_name());
-                if target.try_exists()? {
-                    return Err(Error::InvalidConfig(
-                        "conflicting App public migration".into(),
-                    ));
-                }
-                std::fs::rename(file.path(), target)?;
-            }
-            std::fs::remove_dir(public)?;
-            std::fs::File::open(app)?.sync_all()?;
-        }
-    }
     recover_package_files(profile)?;
     if rustix::process::geteuid().is_root() {
         repair_identity_ownership(&root, &owner)?;

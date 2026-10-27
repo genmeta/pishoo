@@ -313,14 +313,15 @@ async fn note_sandbox_mounts_only_its_named_database_directory() {
     let bytes =
         std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/note/dist/lib.wasm"))
             .unwrap();
+    std::fs::create_dir_all(profile.join("lib")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
     for id in ["note", "other"] {
-        let dir = profile.join(format!("lib/{id}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(".webc-proof"), package_component(&bytes)).unwrap();
+        install_lib(&profile, id, &package_component(&bytes), &runtime).unwrap();
     }
     std::fs::create_dir_all(profile.join("db")).unwrap();
     std::fs::write(profile.join("db/config.db"), b"host-private").unwrap();
-    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    let mut sandbox = Sandbox::new(runtime);
     sandbox.load_libs(&profile).unwrap();
     let lib = sandbox.libs.get("note").unwrap();
     assert_eq!(

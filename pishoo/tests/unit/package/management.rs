@@ -66,7 +66,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     let metadata_only = package_fixture(
         &serde_json::json!({"openapi":"3.1.0","info":{"title":"Test","version":"1.0.0","description":"Test","license":{"name":"MIT"}},"x-pishoo":{"publisher":"alice.dhttp.net","name":"note"},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload","responses":{"200":{"description":"ok"}}}}}}),
         b"\0asm\x0d\0\x01\0",
-        webc::v3::write::Directory::default(),
+        std::collections::BTreeMap::new(),
         &publisher("alice.dhttp.net", 'a'),
     );
     assert!(read_package(&metadata_only).is_ok());
@@ -106,7 +106,7 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
     let runtime = WasmRuntime::new().unwrap();
     install_lib(&profile, "valid", &component("1"), &runtime).unwrap();
     std::fs::create_dir(profile.join("lib/broken")).unwrap();
-    std::fs::write(profile.join("lib/broken/.webc-proof"), b"bad").unwrap();
+    std::fs::write(profile.join("lib/broken/.unused-payload"), b"bad").unwrap();
     let list = installed_libs(&profile, None).unwrap();
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert_eq!(list[0]["id"], "valid");
@@ -132,7 +132,7 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
     );
     let outside = root.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
-    std::fs::write(outside.join(".webc-proof"), b"do not change").unwrap();
+    std::fs::write(outside.join(".unused-payload"), b"do not change").unwrap();
     std::os::unix::fs::symlink(&outside, profile.join("lib/escape")).unwrap();
     assert!(install_lib(&profile, "escape", &component("1"), &runtime).is_err());
     remove_lib(&profile, "escape").unwrap();
@@ -146,30 +146,30 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
     );
     std::fs::remove_file(profile.join("lib/escape")).unwrap();
     std::os::unix::fs::symlink(
-        outside.join(".webc-proof"),
-        profile.join("lib/broken/.webc-proof-link"),
+        outside.join(".unused-payload"),
+        profile.join("lib/broken/.unused-payload-link"),
     )
     .unwrap();
-    std::fs::remove_file(profile.join("lib/broken/.webc-proof")).unwrap();
+    std::fs::remove_file(profile.join("lib/broken/.unused-payload")).unwrap();
     std::fs::rename(
-        profile.join("lib/broken/.webc-proof-link"),
-        profile.join("lib/broken/.webc-proof"),
+        profile.join("lib/broken/.unused-payload-link"),
+        profile.join("lib/broken/.unused-payload"),
     )
     .unwrap();
     // The active WASM target must reject symlinks independently of unused
     // legacy sidecars or other Libs' now-isolated routes.
-    std::os::unix::fs::symlink(outside.join(".webc-proof"), profile.join("lib/broken.wasm"))
+    std::os::unix::fs::symlink(outside.join(".unused-payload"), profile.join("lib/broken.wasm"))
         .unwrap();
     assert!(install_lib(&profile, "broken", &component("1"), &runtime).is_err());
     assert!(remove_lib(&profile, "broken").is_err());
     assert_eq!(
-        std::fs::read(outside.join(".webc-proof")).unwrap(),
+        std::fs::read(outside.join(".unused-payload")).unwrap(),
         b"do not change"
     );
     // Cleanup must unlink nested symlinks without following them.
     std::os::unix::fs::symlink(&outside, profile.join("lib/foreign")).unwrap();
     remove_lib(&profile, "valid").unwrap();
-    assert!(outside.join(".webc-proof").exists());
+    assert!(outside.join(".unused-payload").exists());
     for id in ["../outside", "A", "", "note.wasm", "%6Eote"] {
         assert!(remove_lib(&profile, id).is_err());
     }

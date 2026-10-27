@@ -1,5 +1,4 @@
 use serde_json::json;
-use webc::v3::write::Directory;
 
 use super::*;
 use crate::package::tests::{
@@ -76,15 +75,17 @@ fn successful_load_replaces_libs_and_removes_missing_versions() {
 }
 
 #[test]
-fn startup_trusts_runtime_snapshots_while_inputs_require_source_signatures() {
+fn startup_reads_raw_components_while_inputs_require_source_signatures() {
     let directory = tempfile::tempdir().unwrap();
     let profile = profile(directory.path());
     let root = lib_root(&profile).unwrap();
     let bytes = disk_bytes(&profile, &root, "alpha").unwrap();
     assert!(read_package(&bytes).is_err());
-    let package =
-        webc::Container::from_bytes_and_version(bytes.clone().into(), webc::Version::V3).unwrap();
-    assert!(package.get_volume("pishoo-signature").is_none());
+    assert!(wasmparser::Parser::is_component(&bytes));
+    assert_eq!(
+        bytes,
+        std::fs::read(profile.join("lib/alpha.wasm")).unwrap()
+    );
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     assert!(install_lib(&profile, "alpha", &bytes, &runtime).is_err());
     let mut sandbox = Sandbox::new(runtime);
@@ -135,7 +136,7 @@ fn database_registration_controls_loading_without_revalidating_versions() {
     let mut sandbox = Sandbox::new(runtime);
     std::fs::create_dir_all(profile.join("lib/extra")).unwrap();
     std::fs::write(
-        profile.join("lib/extra/.webc-proof"),
+        profile.join("lib/extra/.unused-payload"),
         component("extra", "1"),
     )
     .unwrap();
@@ -176,7 +177,7 @@ fn startup_uses_current_runtime_files_without_integrity_comparison_or_repair() {
     let source = package_fixture(
         &document,
         include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-        Directory::default(),
+        std::collections::BTreeMap::new(),
         &publisher("alice.dhttp.net", 'a'),
     );
     install_lib(&profile, id, &source, &runtime).unwrap();
@@ -213,7 +214,7 @@ fn startup_uses_current_runtime_files_without_integrity_comparison_or_repair() {
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(std::fs::read(&wasm).unwrap(), changed);
     assert_eq!(
-        sandbox.libs[id].package.get_atom("backend").unwrap(),
+        disk_bytes(&profile, &lib_root(&profile).unwrap(), id).unwrap(),
         changed
     );
     assert_eq!(std::fs::read(&page).unwrap(), b"locally edited page");
@@ -225,4 +226,74 @@ fn startup_uses_current_runtime_files_without_integrity_comparison_or_repair() {
     assert!(!profile.join("db/alice.dhttp.net").exists());
     assert!(!profile.join("lib/alice.dhttp.net").exists());
     assert!(!profile.join("app/alice.dhttp.net").exists());
+}
+
+#[test]
+fn raw_component_loading_rejects_missing_duplicate_and_oversized_metadata() {
+    fn append(bytes: &mut Vec<u8>, data: &[u8]) {
+        let name = b"pishoo:openapi";
+        let mut section = vec![name.len() as u8];
+        section.extend_from_slice(name);
+        section.extend_from_slice(data);
+        bytes.push(0);
+        let mut length = section.len();
+        while length >= 128 {
+            bytes.push((length as u8 & 127) | 128);
+            length >>= 7;
+        }
+        bytes.push(length as u8);
+        bytes.extend(section);
+    }
+    let root = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
+    let original = include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm");
+    assert!(
+        Lib::load(
+            runtime.clone(),
+            "raw".into(),
+            original,
+            &root.path().join("missing")
+        )
+        .is_err()
+    );
+    let document =
+        br#"{"openapi":"3.1.0","info":{"title":"Raw component","version":"1.0.0"},"paths":{}}"#;
+    let mut bytes = original.to_vec();
+    append(&mut bytes, document);
+    assert_eq!(
+        Lib::load(
+            runtime.clone(),
+            "raw".into(),
+            &bytes,
+            &root.path().join("valid")
+        )
+        .unwrap()
+        .openapi
+        .info
+        .version,
+        "1.0.0"
+    );
+    append(&mut bytes, document);
+    assert!(
+        Lib::load(
+            runtime.clone(),
+            "raw".into(),
+            &bytes,
+            &root.path().join("duplicate")
+        )
+        .is_err()
+    );
+    let mut bytes = original.to_vec();
+    append(&mut bytes, &vec![b' '; 1024 * 1024 + 1]);
+    assert!(
+        Lib::load(
+            runtime,
+            "raw".into(),
+            &bytes,
+            &root.path().join("oversized")
+        )
+        .is_err()
+    );
+    assert!(!root.path().join("duplicate").exists());
+    assert!(!root.path().join("oversized").exists());
 }

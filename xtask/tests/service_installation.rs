@@ -91,7 +91,7 @@ fn rpm_hooks() -> (String, String) {
     assert!(output.status.success(), "{output:?}");
     let spec = fs::read_to_string(out.join("rpmbuild/SPECS/pishoo-common.spec")).unwrap();
     assert!(
-        !spec.contains(".webc"),
+        !spec.contains(".waz"),
         "host RPM must not bundle business packages"
     );
     assert!(

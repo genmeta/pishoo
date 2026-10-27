@@ -107,15 +107,12 @@ async fn store_app_updates_exact_dependencies_through_the_management_api() {
                 "x-pishoo":{"kind":if frontend {"app"} else {"lib"},"publisher":"alice.dhttp.net","name":name,"entry":"/","dependencies":dependencies},
                 "paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload"}}}});
             let public = if frontend {
-                webc::v3::write::Directory::new(
-                    BTreeMap::from([(
-                        "index.html".parse().unwrap(),
-                        version.as_bytes().to_vec().into(),
-                    )]),
-                    webc::v3::Timestamps::default(),
-                )
+                BTreeMap::from([(
+                    "index.html".parse().unwrap(),
+                    version.as_bytes().to_vec().into(),
+                )])
             } else {
-                webc::v3::write::Directory::default()
+                std::collections::BTreeMap::new()
             };
             let bytes = package_fixture(
                 &document,
@@ -156,12 +153,7 @@ async fn store_app_updates_exact_dependencies_through_the_management_api() {
             }
             proof["size"] = bytes.len().into();
             proof["package_sha256"] = format!("{:x}", Sha256::digest(&bytes)).into();
-            let signature = package
-                .get_volume("pishoo-signature")
-                .unwrap()
-                .read_file("/signature.json")
-                .unwrap()
-                .0;
+            let signature = (&package["signature.json"], ()).0;
             let envelope: Value = serde_json::from_slice(&signature).unwrap();
             proof["signer_certificates"] = envelope["certificates"].clone();
             files.insert(prefix, serde_json::to_vec(&proof).unwrap());
@@ -263,7 +255,9 @@ async fn store_app_updates_exact_dependencies_through_the_management_api() {
         for name in ["profile", "message"] {
             let lib = &loaded.libs[&format!("alice.dhttp.net/{name}")];
             assert_eq!(lib.openapi.info.version, version);
-            assert!(lib.package.get_volume("pishoo-signature").is_none());
+            assert!(wasmparser::Parser::is_component(
+                &std::fs::read(profile.join(format!("lib/{name}.wasm"))).unwrap()
+            ));
         }
         assert_eq!(
             std::fs::read(profile.join("app/workspace/index.html")).unwrap(),

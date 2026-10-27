@@ -634,7 +634,7 @@ async fn disabled_profile_skips_credentials_libs_and_workers() {
     let profile = IdentityProfile::try_from(root.path().join("disabled")).unwrap();
     std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
     std::fs::create_dir_all(profile.join("lib/broken")).unwrap();
-    std::fs::write(profile.join("lib/broken/.webc-proof"), b"broken").unwrap();
+    std::fs::write(profile.join("lib/broken/.unused-payload"), b"broken").unwrap();
     crate::configure(&profile, None, true).unwrap();
     assert!(
         load_profile(profile.clone(), Arc::new(WasmRuntime::new().unwrap()))
@@ -838,7 +838,7 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
     let package = crate::package::tests::package_fixture(
         &doc,
         include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm"),
-        webc::v3::write::Directory::default(),
+        std::collections::BTreeMap::new(),
         &crate::package::tests::publisher("alice.dhttp.net", 'a'),
     );
     let runtime = server.sandbox.read().unwrap().runtime.clone();
@@ -1080,10 +1080,6 @@ async fn introduction_static_reads_require_explicit_grant_without_management_acc
 
     use http::{Method, StatusCode};
     use serde_json::json;
-    use webc::v3::{
-        Timestamps,
-        write::{DirEntry, Directory},
-    };
     let root = tempfile::tempdir().unwrap();
     let mut server = server(root.path()).await;
     server.access = load_access(
@@ -1096,22 +1092,10 @@ async fn introduction_static_reads_require_explicit_grant_without_management_acc
         "info":{"title":"Introduction","version":"1.0.0","description":"Public introduction","license":{"name":"MIT"}},
         "x-pishoo":{"kind":"app","publisher":"std.dhttp.net","name":"introduction","entry":"/","dependencies":[]}
     });
-    let public = Directory::new(
-        BTreeMap::from([
-            (
-                "index.html".parse().unwrap(),
-                b"public introduction".to_vec().into(),
-            ),
-            (
-                "assets".parse().unwrap(),
-                DirEntry::Dir(Directory::new(
-                    BTreeMap::from([("app.js".parse().unwrap(), b"export {}".to_vec().into())]),
-                    Timestamps::default(),
-                )),
-            ),
-        ]),
-        Timestamps::default(),
-    );
+    let public = BTreeMap::from([
+        ("index.html".into(), b"public introduction".to_vec()),
+        ("assets/app.js".into(), b"export {}".to_vec()),
+    ]);
     let package = crate::package::tests::package_fixture(
         &document,
         &[],
@@ -1131,7 +1115,7 @@ async fn introduction_static_reads_require_explicit_grant_without_management_acc
     let profile_package = crate::package::tests::package_fixture(
         &profile_document,
         include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm"),
-        Directory::default(),
+        std::collections::BTreeMap::new(),
         &crate::package::tests::publisher("std.dhttp.net", 'a'),
     );
     let runtime = server.sandbox.read().unwrap().runtime.clone();
