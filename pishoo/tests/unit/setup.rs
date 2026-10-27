@@ -819,8 +819,8 @@ fn listen_accepts_named_modes_and_preserves_mount_rules() {
 }
 
 #[test]
-fn legacy_versions_are_rejected_without_mutation_or_split_registries() {
-    for version in [1, 2, 99] {
+fn unknown_versions_are_rejected_without_mutation_or_split_registries() {
+    for version in [99] {
         let root = tempfile::tempdir().unwrap();
         let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
         std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
@@ -830,7 +830,7 @@ fn legacy_versions_are_rejected_without_mutation_or_split_registries() {
         drop(db);
         let before = std::fs::read(&path).unwrap();
         let error = load_server_config(&profile).unwrap_err().to_string();
-        assert!(error.contains("reinitialize"), "{error}");
+        assert!(error.contains("unsupported configuration"), "{error}");
         assert!(
             config_database(
                 &profile,
@@ -897,4 +897,111 @@ fn local_configuration_initializes_v3_and_preserves_data_on_repeat() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn current_configuration_ignores_legacy_residue_without_mutating_it() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    crate::configure(&profile, Some("internal"), false).unwrap();
+    std::fs::create_dir_all(profile.join("db")).unwrap();
+    let legacy = profile.config_db_path();
+    std::fs::write(&legacy, b"untouched legacy configuration").unwrap();
+    assert_eq!(load_server_config(&profile).unwrap().listen, "internal");
+    assert_eq!(
+        crate::configure(&profile, None, true).unwrap(),
+        json!({"listen":"internal"})
+    );
+    assert_eq!(
+        crate::configure(&profile, Some("all"), false).unwrap(),
+        json!({"listen":"all"})
+    );
+    assert_eq!(
+        std::fs::read(&legacy).unwrap(),
+        b"untouched legacy configuration"
+    );
+    assert!(!profile.join(".volume/sys/app").exists());
+    assert!(!profile.join(".volume/sys/lib").exists());
+}
+
+#[test]
+fn legacy_path_and_empty_current_initialize_without_importing_old_data() {
+    for empty_new in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+        std::fs::create_dir_all(profile.join("db")).unwrap();
+        let legacy = profile.config_db_path();
+        std::fs::write(&legacy, b"legacy data").unwrap();
+        let current = profile.join(".volume/sys/setting/database");
+        if empty_new {
+            std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+            std::fs::write(&current, b"").unwrap();
+        }
+        for mode in [None, Some("all")] {
+            assert!(crate::configure(&profile, mode, true).is_ok());
+        }
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"legacy data");
+        assert!(current.is_file());
+        assert_eq!(
+            crate::configure(&profile, None, false).unwrap(),
+            json!({"listen":"all"})
+        );
+        assert!(profile.join(".volume/sys/pkg/database").exists());
+    }
+}
+
+#[test]
+fn old_setting_versions_are_archived_and_replaced_by_fresh_defaults() {
+    for version in [1, 2] {
+        let root = tempfile::tempdir().unwrap();
+        let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+        crate::configure(&profile, Some("all"), false).unwrap();
+        let path = profile.join(".volume/sys/setting/database");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(&format!("INSERT INTO proxy_location VALUES('/old','http://127.0.0.1:8080'); PRAGMA user_version={version};")).unwrap();
+        drop(db);
+        let before = std::fs::read(&path).unwrap();
+        let registry = std::fs::read(profile.join(".volume/sys/pkg/database")).unwrap();
+        assert_eq!(
+            crate::configure(&profile, None, true).unwrap(),
+            json!({"listen":"off"})
+        );
+        let archives = std::fs::read_dir(profile.join(".volume/sys"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".setting-v")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(archives.len(), 1);
+        assert_eq!(
+            std::fs::read(archives[0].path().join("setting/database")).unwrap(),
+            before
+        );
+        assert_eq!(
+            std::fs::read(profile.join(".volume/sys/pkg/database")).unwrap(),
+            registry
+        );
+        let db = Connection::open(&path).unwrap();
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM proxy_location", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            crate::configure(&profile, Some("internal"), false).unwrap(),
+            json!({"listen":"internal"})
+        );
+        assert!(!profile.join(".volume/sys/app").exists());
+        assert!(!profile.join(".volume/sys/lib").exists());
+    }
 }

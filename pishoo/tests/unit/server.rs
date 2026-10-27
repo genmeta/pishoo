@@ -800,7 +800,7 @@ async fn discovery_failure_retains_servers_and_deleted_identity_is_removed() {
 }
 
 #[tokio::test]
-async fn unloaded_empty_configuration_waits_for_credential_validation_before_initializing() {
+async fn empty_configuration_gets_disabled_defaults_without_loading_credentials() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("empty")).unwrap();
     std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
@@ -812,14 +812,10 @@ async fn unloaded_empty_configuration_waits_for_credential_validation_before_ini
             .is_none()
     );
     assert_eq!(
-        profile
-            .join(".volume/sys/setting/database")
-            .metadata()
-            .unwrap()
-            .len(),
-        0
+        crate::configure(&profile, None, false).unwrap(),
+        serde_json::json!({"listen":"off"})
     );
-    assert!(!profile.join(".volume/sys/access/database").exists());
+    assert!(profile.join(".volume/sys/access/database").exists());
 }
 
 #[tokio::test]
@@ -1430,4 +1426,57 @@ async fn permission_catalog_qualifies_group_titles_and_preserves_legacy_registra
             .unwrap();
         assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
     }
+}
+
+#[tokio::test]
+async fn reconciliation_isolates_bad_profiles_and_preserves_current_with_legacy_residue() {
+    let root = tempfile::tempdir().unwrap();
+    dhttp::DhttpNetwork::init().await.unwrap();
+    let mut prepared = server(root.path()).await;
+    let profile = prepared.profile.clone();
+    let name = prepared.name().to_owned();
+    let runtime = prepared.sandbox.read().unwrap().runtime.clone();
+    prepared.listener = Some(prepared.listen().await.unwrap());
+    std::fs::create_dir_all(profile.join("db")).unwrap();
+    let legacy = profile.config_db_path();
+    std::fs::write(&legacy, b"old residue").unwrap();
+    let old = root.path().join("aaa.old/db");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("config.db"), b"old-only configuration").unwrap();
+    let broken = root.path().join("bbb.broken/.volume/sys/setting");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(broken.join("database"), b"broken database").unwrap();
+    std::fs::create_dir_all(root.path().join("aaa.old/ssl")).unwrap();
+    std::fs::create_dir_all(root.path().join("bbb.broken/ssl")).unwrap();
+    let home = DhttpHome::new(root.path().to_path_buf());
+    assert_eq!(home.discover_identity_profiles().unwrap().len(), 3);
+    let mdns = ddns::mdns::MdnsResolverSet::new("pishoo-test.local");
+    let mut servers = BTreeMap::from([(name.clone(), prepared)]);
+    assert!(
+        !reconcile_profiles(&mdns, &home, None, &mut servers, runtime.clone())
+            .await
+            .unwrap()
+    );
+    assert_eq!(servers.len(), 1);
+    assert!(servers[&name].listener.is_some());
+    assert!(
+        !reconcile_profiles(&mdns, &home, None, &mut servers, runtime)
+            .await
+            .unwrap()
+    );
+    assert_eq!(std::fs::read(&legacy).unwrap(), b"old residue");
+    assert_eq!(
+        std::fs::read(old.join("config.db")).unwrap(),
+        b"old-only configuration"
+    );
+    assert_eq!(
+        std::fs::read(broken.join("database")).unwrap(),
+        b"broken database"
+    );
+    assert!(
+        root.path()
+            .join("aaa.old/.volume/sys/setting/database")
+            .is_file()
+    );
+    servers.get_mut(&name).unwrap().close().await.unwrap();
 }

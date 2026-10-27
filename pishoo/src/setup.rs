@@ -73,9 +73,6 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
             "identity must be a real directory".into(),
         ));
     }
-    if profile.config_db_path().try_exists()? {
-        return Err(Error::InvalidConfig("legacy configuration is unsupported; reinitialize the identity service (existing data preserved)".into()));
-    }
     let existing = profile.join(".volume/sys/setting/database");
     if existing.try_exists()? {
         if !existing.symlink_metadata()?.file_type().is_file() {
@@ -90,9 +87,68 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
             [],
             |r| r.get(0),
         )?;
-        if version != 3 && (version != 0 || occupied) {
+        if matches!(version, 1 | 2) {
+            // Old settings are not migration input. Preserve the whole directory,
+            // including SQLite sidecars, and initialize the current schema afresh.
+            drop(previous);
+            let lock = std::fs::File::from(
+                rustix::fs::open(
+                    profile.path(),
+                    rustix::fs::OFlags::RDONLY
+                        | rustix::fs::OFlags::DIRECTORY
+                        | rustix::fs::OFlags::NOFOLLOW
+                        | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                )
+                .map_err(std::io::Error::from)?,
+            );
+            rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
+                .map_err(std::io::Error::from)?;
+            // Another initializer may already have archived this database.
+            if existing.try_exists()? {
+                let current =
+                    Connection::open_with_flags(&existing, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                let current_version: i64 =
+                    current.pragma_query_value(None, "user_version", |r| r.get(0))?;
+                drop(current);
+                if matches!(current_version, 1 | 2) {
+                    let parent = existing.parent().unwrap();
+                    for path in [
+                        profile.join(".volume"),
+                        profile.join(".volume/sys"),
+                        parent.to_path_buf(),
+                    ] {
+                        if !path.symlink_metadata()?.file_type().is_dir() {
+                            return Err(Error::InvalidConfig(
+                                "configuration directory must be a real directory".into(),
+                            ));
+                        }
+                    }
+                    let archive = tempfile::Builder::new()
+                        .prefix(&format!(".setting-v{current_version}-"))
+                        .tempdir_in(parent.parent().unwrap())?;
+                    if rustix::process::geteuid().is_root() {
+                        use std::os::unix::fs::MetadataExt;
+                        let owner = profile.path().metadata()?;
+                        rustix::fs::fchown(
+                            std::fs::File::open(archive.path())?,
+                            Some(rustix::fs::Uid::from_raw(owner.uid())),
+                            Some(rustix::fs::Gid::from_raw(owner.gid())),
+                        )
+                        .map_err(std::io::Error::from)?;
+                    }
+                    std::fs::rename(parent, archive.path().join("setting"))?;
+                    let archive = archive.keep();
+                    tracing::warn!(identity = profile.name(), path = %archive.display(), "Old configuration archived; creating fresh v3 defaults");
+                } else if current_version != 0 && current_version != 3 {
+                    return Err(Error::InvalidConfig(format!(
+                        "unsupported configuration schema {current_version}; existing data preserved"
+                    )));
+                }
+            }
+        } else if version != 3 && (version != 0 || occupied) {
             return Err(Error::InvalidConfig(format!(
-                "unsupported configuration schema {version}; reinitialize the identity service (existing data preserved)"
+                "unsupported configuration schema {version}; existing data preserved"
             )));
         }
     }
@@ -171,9 +227,6 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
 }
 
 pub(crate) fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result<Connection> {
-    if profile.config_db_path().try_exists()? {
-        return Err(Error::InvalidConfig("legacy configuration is unsupported; reinitialize the identity service (existing data preserved)".into()));
-    }
     let db = profile.join(".volume/sys/setting/database");
     if !db.symlink_metadata()?.file_type().is_file() {
         return Err(Error::InvalidConfig(
@@ -235,6 +288,12 @@ fn inherit_config_files(profile: &IdentityProfile) -> Result<()> {
             )
             .map_err(std::io::Error::from)?,
         );
+        rustix::fs::fchown(
+            &directory,
+            Some(rustix::fs::Uid::from_raw(owner.uid())),
+            Some(rustix::fs::Gid::from_raw(owner.gid())),
+        )
+        .map_err(std::io::Error::from)?;
         for file in [
             "database",
             "database-wal",

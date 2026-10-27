@@ -46,15 +46,9 @@ pub async fn run() -> Result<()> {
         // OCSP bootstrap uses ordinary HTTPS and qtls's configured trust roots.
         dhttp::DhttpNetwork::init().await?;
         let user_homes = multiuser.then(account_homes).transpose()?;
-        for profile in discover_profiles(&home, user_homes.as_deref())? {
-            if let Some(server) = load_profile(profile, runtime.clone()).await? {
-                servers.insert(server.name().to_owned(), server);
-            }
-        }
-        for server in servers.values_mut().filter(|s| s.config.listen != "off") {
-            server.listener = Some(server.listen().await?);
-            tracing::trace!(endpoint = server.name(), listen = server.config.listen, "Pishoo listener ready");
-        }
+        // Startup and later scans isolate per-identity load/listen failures alike.
+        // A stale or damaged profile must not prevent healthy identities from serving.
+        reconcile_profiles(&mdns, &home, user_homes.as_deref(), &mut servers, runtime.clone()).await?;
         let mut config_ticks = tokio::time::interval_at(
             Instant::now() + std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(1),
@@ -206,31 +200,17 @@ pub(super) async fn load_profile(
     {
         return Ok(None);
     }
-    if profile.config_db_path().try_exists()? {
-        return Err(Error::InvalidConfig("legacy configuration is unsupported; reinitialize the identity service (existing data preserved)".into()));
-    }
-    // An explicitly disabled identity needs no credentials, WASM or background workers.
-    match crate::setup::config_database(
+    // Existing hosting intent (including an old config) gets current defaults.
+    // Read-only success is the fast path; initialization never imports old settings.
+    let settings = crate::setup::config_database(
         &profile,
         &http::Method::GET,
         &http::Uri::from_static("/std/sys/listen"),
         None,
-    ) {
-        Ok(settings) if settings["listen"] == "off" => return Ok(None),
-        Ok(_) => {}
-        Err(error) => {
-            // Preserve startup recovery of a genuinely empty database, but do not
-            // initialize it before validating this identity's credentials.
-            let empty = profile.join(".volume/sys/setting/database").symlink_metadata()?.file_type().is_file()
-                && rusqlite::Connection::open_with_flags(profile.join(".volume/sys/setting/database"),
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                    .ok().is_some_and(|conn| conn.query_row(
-                        "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%') AND (SELECT user_version FROM pragma_user_version) = 0",
-                        [], |row| row.get::<_, bool>(0)).unwrap_or(false));
-            if !empty {
-                return Err(error);
-            }
-        }
+    )
+    .or_else(|_| crate::configure(&profile, None, true))?;
+    if settings["listen"] == "off" {
+        return Ok(None);
     }
     match Server::load(profile, runtime).await {
         Ok(mut server) if server.config.listen == "off" => {

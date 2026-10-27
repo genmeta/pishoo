@@ -373,11 +373,13 @@ async fn cli_run_deadline_cancels_and_reaps_the_store_task() {
     reaped(&tasks).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn outgoing_default_options_preserve_review_wait_and_body_idle_timeout() {
     use wasmtime_wasi_http::{Error as HttpError, WasiHttpHooks};
     let endpoint = endpoint();
     let (access, _) = native(&endpoint).await;
+    // SQLite initializes on worker threads; freeze time only after its pool is ready.
+    tokio::time::pause();
     let api = axum::Router::new().route(
         "/wait",
         axum::routing::get(|| async {

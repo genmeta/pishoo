@@ -113,7 +113,7 @@ fn run_command(args: Vec<std::ffi::OsString>) -> Result<(), pishoo::Error> {
     if args.len() == 1 {
         if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
             println!(
-                "Usage: pishoo [configure --profile PATH [--init | --listen MODE] | reload [--pid PID] | --help | --version]\n\nRun configured identities in the foreground. Identities without .volume/sys/setting/database are skipped.\n\nReload sends SIGHUP to the running service; use --pid for a foreground process. System services are managed with systemctl or brew services.\n\nManagement commands are provided by gmutils:\n  genmeta listen --id NAME [internal|external|all|off]\n  genmeta install --list --id NAME\n  genmeta install --info PACKAGE --id NAME\n  genmeta mount --id NAME [PATH URL]\n  genmeta unmount --id NAME PATH URL\n  genmeta --help"
+                "Usage: pishoo [configure --profile PATH [--init | --listen MODE] | reload [--pid PID] | --help | --version]\n\nRun configured identities in the foreground. Legacy host configuration gets fresh v3 defaults; identities without host configuration are skipped.\n\nReload sends SIGHUP to the running service; use --pid for a foreground process. System services are managed with systemctl or brew services.\n\nManagement commands are provided by gmutils:\n  genmeta listen --id NAME [internal|external|all|off]\n  genmeta install --list --id NAME\n  genmeta install --info PACKAGE --id NAME\n  genmeta mount --id NAME [PATH URL]\n  genmeta unmount --id NAME PATH URL\n  genmeta --help"
             );
             return Ok(());
         }
