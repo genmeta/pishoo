@@ -44,7 +44,7 @@ jobs:
           import tomllib
           from pathlib import Path
 
-          manifest = tomllib.loads(Path("../pishoo/Cargo.toml").read_text())
+          manifest = tomllib.loads(Path("../Cargo.toml").read_text())
           package = manifest.get("package", manifest.get("workspace", {}).get("package", {}))
           expected = f"v{package['version']}"
           if sys.argv[1] != expected:

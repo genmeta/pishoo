@@ -55,7 +55,7 @@ ifdef TRIPLE
 		export CARGO_ZIGBUILD_ZIG_PATH=/tmp/pishoo-aarch64-zig; \
 		export RUSTFLAGS="$$RUSTFLAGS -Z unstable-options -Clinker-flavor=gnu-lld-cc"; \
 	fi && \
-	cargo zigbuild --locked $(CARGO_PROFILE_ARGS) --manifest-path pishoo/Cargo.toml --target $(ZIG_TARGET)$(if $(CARGO_FEATURES), --features $(CARGO_FEATURES))
+	cargo zigbuild --locked $(CARGO_PROFILE_ARGS) --manifest-path Cargo.toml --target $(ZIG_TARGET)$(if $(CARGO_FEATURES), --features $(CARGO_FEATURES))
 endif
 
 override_dh_auto_install:

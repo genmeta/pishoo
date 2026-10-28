@@ -33,7 +33,7 @@ and WASM components. See the [Pishoo documentation](https://docs.dhttp.net/en/do
 Dependencies are resolved from Cargo.lock, including the crates.io release of daccess 0.2.0; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
 
 ```sh
-git clone --branch release/v0.9.0.preview.5 https://github.com/genmeta/pishoo.git
+git clone --branch release/0.9.0 https://github.com/genmeta/pishoo.git
 cd pishoo
 cargo build --locked -p pishoo --bin pishoo
 cargo test --locked --workspace -- --test-threads=1
@@ -140,9 +140,9 @@ and capability changes preserve existing ACL rules and private data. See the
 
 ### Configuration
 
-Database SQL files live beside their owning modules in [contact/sql](pishoo/src/contact/sql/) and [package/sql](pishoo/src/package/sql/), with schema versions and migration source/target versions in their filenames.
+Database SQL files live beside their owning modules in [contact/sql](src/contact/sql/) and [package/sql](src/package/sql/), with schema versions and migration source/target versions in their filenames.
 
-Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's home. Listening is stored in `<identity>/.volume/sys/setting/database` as the `setting` key `listen`; an absent key keeps the identity stopped across discovery and restarts. `genmeta listen --id NAME internal` opts in, `all` selects both internal and external scopes, and `genmeta listen --id NAME off` deletes the key after confirmation. Proxy rows use `proxy_location`. Old `db/config.db` and configuration v1/v2 are rejected without migration; explicitly reinitialize the service before using this release. Endpoint and shared Network lifetimes are unchanged. See [Review implementation](REVIEW-IMPLEMENTATION-2026-10-21.md).
+Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's home. Listening is stored in `<identity>/.volume/sys/setting/database` as the `setting` key `listen`; an absent key keeps the identity stopped across discovery and restarts. `genmeta listen --id NAME internal` opts in, `all` selects both internal and external scopes, and `genmeta listen --id NAME off` deletes the key after confirmation. Proxy rows use `proxy_location`. Legacy `db/config.db` is preserved but ignored. Current-path setting v1/v2 directories, including SQLite sidecars, are archived before fresh v3 initialization; old listener and proxy settings are not migrated. Valid v3 settings are retained. Endpoint and shared Network lifetimes are unchanged. See [Review implementation](REVIEW-IMPLEMENTATION-2026-10-21.md).
 
 Local proxies support HTTP/3 WebSocket extended CONNECT (`:protocol=websocket`, version 13), translating the upstream HTTP/1.1 upgrade into an H3 200 and streaming opaque frames in both directions. Handshake attempts have bounded timeouts; established sessions have no 30-second lifetime limit. All system HTTP routes are reserved under `/std`, including Lib execution for authenticated publisher `std.dhttp.net` at its declared path prefixed with `/std`. Other Libs use `/<name>` plus their declared path; a nonstandard journal declaring `/std/xxxx` is exposed only at `/journal/std/xxxx`. Missing system paths return 404 and unsupported Lib methods return 405 without reaching proxies. Ordinary `/api/*` and `/file/*` belong to configured proxies independently of loaded Libs. Home Assistant and OpenCode can use their native upstream paths.
 
@@ -150,9 +150,9 @@ Database configuration is available over H3 through `GET/PATCH/DELETE /std/sys/l
 
 ACL management selects resources through query parameters: `/std/acl/access?api=PATH`, `/std/acl/allow?name=NAME`, `/std/acl/review?id=ID` for expired review deletion, and `/std/acl/status?id=ID`. Review lists use `/std/acl/review/list`; decisions still use `PATCH /std/acl/review` with a JSON body. Local contact submissions require the verified owner; authenticated outbound peer bindings use daccess internally, without contact HTTP PUT. The contact queue stores selected operation snapshots and persists the review ID, verified peer, method and operation path in schema v5, so a historical POST message selection is never reinterpreted as PUT. Pending jobs poll `/std/acl/status?id=ID` rather than replaying business calls. Denial or expiry ends that task without changing the contact relationship.
 
-`GET /std/acl/permissions` exposes installed Lib declarations. Owner-only PUT and DELETE with `?name=NAME` replace or remove declarations, preserving ACL rules. Package installation, updates, reinstallation, removal and HTTP writes call the same internal `permissions` operation. It receives the caller's SQLite transaction, replaces or deletes declarations, and leaves locking and commit/rollback to that caller; package files and registration retain the existing recovery mechanism. Profile 0.2.0 uses independent nickname and avatar endpoints; Message 0.2.0 uses PUT for sending, receiving and retrying. Existing POST grants and approvals remain separate and do not authorize PUT.
+`GET /std/acl/permissions` exposes installed Lib declarations. Owner-only PUT and DELETE with `?name=NAME` replace or remove declarations, preserving ACL rules. Package installation, updates, reinstallation, removal and HTTP writes call the same internal `permissions` operation. It receives the caller's SQLite transaction, replaces or deletes declarations, and leaves locking and commit/rollback to that caller; package files and registration retain the existing recovery mechanism. Profile 0.3.0 uses independent profile-field and avatar endpoints; Message 0.2.1 uses PUT for sending, receiving and retrying. Existing POST grants and approvals remain separate and do not authorize PUT.
 
-Startup creates `.volume/sys/{setting,pkg,access,contact}/`, `lib/std/`, `app/`, `log/`, and `repo/`. New configuration stays stopped until listening is explicitly configured. New ACLs contain only native contact and permission-discovery rules. Business pages and APIs, including Workspace, Introduction and Profile, have no preconfigured grants or denials. Install Workspace and configure access as the verified owner; publishing an App does not publish its backend APIs. Existing authorization decisions are preserved. No business package or templates directory is created automatically. Package registration, dependencies, capability catalog and legacy data migrate before runtime loading; Libs load before Apps.
+Startup creates `.volume/sys/{setting,pkg,access,contact}/`, `lib/std/`, `app/`, `log/`, and `repo/`. New configuration stays stopped until listening is explicitly configured. New ACLs contain only native contact and permission-discovery rules. Business pages and APIs, including Workspace, Introduction and Profile, have no preconfigured grants or denials. Install Workspace and configure access as the verified owner; publishing an App does not publish its backend APIs. Existing authorization decisions are preserved. No business package or templates directory is created automatically. Package registration and the capability catalog are initialized before runtime loading; Libs load before Apps. Legacy archive layouts require explicit reinstallation.
 
 Native ACL defaults are written once when initializing a new authorization database: authenticated identities may POST/GET `/std/contact` and GET `/std/acl/status`, GET `/std/contact/list` is denied to visitors, and GET `/std/acl/permissions` is public. There is no defaults configuration file or provider exemption during installation. Access is managed in Workspace or with `genmeta access`; restarts and package installation never reapply defaults. New providers must not inherit existing ACL rules for their routes.
 
@@ -164,23 +164,29 @@ The same-identity DHTTP forwarding route streams request bytes through the nativ
 
 ### Run
 
-Start the development build as the account that owns the identities in `~/.dhttp`. Identities and configuration load at startup; the running process automatically discovers new identities and applies enabled, listen, and proxy changes. Disabling a Server preserves its listening scope and data. Loaded identities require restart or disable/enable to replace certificate/key credentials. Libs load at startup, while online installation/update/removal changes the running Lib collection immediately. SIGHUP requests the existing serial identity/configuration reconciliation. Every 72 hours after startup, Pishoo fetches and validates fresh OCSP proofs for loaded identities, atomically updates their caches, and refreshes TLS registration, DNS publishers, and application outbound credentials. A failed refresh logs the identity and reason and retains its previous in-memory credentials; the next attempt is at the next scheduled refresh. Refreshes do not renew expired identity certificates.
+Start the development build as the account that owns the identities in `~/.dhttp`. Identities and configuration load at startup; the running process automatically discovers new identities and applies listen and proxy changes. Setting listen to off stops hosting and preserves mounts and business data. Loaded identities require restart or disable/enable to replace certificate/key credentials. Libs load at startup, while online installation/update/removal changes the running Lib collection immediately. SIGHUP requests the existing serial identity/configuration reconciliation. Every 72 hours after startup, Pishoo fetches and validates fresh OCSP proofs for loaded identities, atomically updates their caches, and refreshes TLS registration, DNS publishers, and application outbound credentials. A failed refresh logs the identity and reason and retains its previous in-memory credentials; the next attempt is at the next scheduled refresh. Refreshes do not renew expired identity certificates.
 
-Startup skips identities with invalid credentials, including expired certificates, and logs the identity name and reason. Other identities continue loading. A skipped identity is retried by the periodic identity scan. Invalid configuration, database, or Lib errors still stop startup. Missing or invalid local OCSP caches are prepared during startup; the running process refreshes OCSP every 72 hours, while certificate/key changes require restart.
+Startup skips identities with invalid credentials, including expired certificates, and logs the identity name and reason. Other identities continue loading. A skipped identity is retried by the periodic identity scan. Per-identity configuration, database, Lib and listener failures are logged and retried without stopping healthy identities. Missing or invalid local OCSP caches are prepared during startup; the running process refreshes OCSP every 72 hours, while certificate/key changes require restart.
 
 The `pishoo` executable appends runtime diagnostics to `<identity-home>/log/error.log` (Linux root default `/etc/dhttp/log/error.log`; other runs `~/.dhttp/log/error.log`) and also writes them to stderr. This process-wide log includes shared network diagnostics and identity failures. The default level is `warn`; set `RUST_LOG=debug` for more detail in the same file. New log directories and files use permissions 0700 and 0600 on Unix. Failure to open the log stops startup with a stderr diagnostic. Each listening identity appends request records to its own `log/access.log`, including the timestamp, server and verified peer names (or anonymous), HTTP version, method, path, and response status. These records are written when response headers are ready, independently of `RUST_LOG`; request bodies and query strings are not logged. HTTP 5xx responses and access-log write failures also produce diagnostics in the global `error.log`. Failure to open an identity’s access log fails its listener setup. Per-identity `log/cert.log` remains the certificate-operation history written by gmutils.
 
 For an interactive Echo over QUIC, use an already running Pishoo endpoint and a configured local DHTTP identity:
 
 ```sh
-./pishoo/examples/echo-interactive.py \
+python3 tests/scripts/echo-interactive.py \
   --transport quic --identity client.dhttp.net \
   --url https://server.dhttp.net/std/echo
 ```
 
-This example assumes an installed Lib published by `std.dhttp.net` declaring `POST /echo`, exposed as `/std/echo`. The endpoint must be reachable, and daccess must allow that source identity to call it. The example builds the native client and opens one full-duplex POST. Type lines and see each `echo>` reply without ending the upload; Ctrl-D finishes the request and Ctrl-C exits the client.
+This diagnostic assumes an installed Lib published by `std.dhttp.net` declaring `POST /echo`, exposed as `/std/echo`. The endpoint must be reachable, and daccess must allow that source identity to call it. The script builds the isolated test-tool client and opens one full-duplex POST. Type lines and see each `echo>` reply without ending the upload; Ctrl-D finishes the request and Ctrl-C exits the client.
 
 ### Testing
+
+The root Cargo package builds only the host. Private unit tests use ordinary
+`mod tests` modules beside the implementation in `src/`; `tests/` holds CLI
+integration tests, WASM fixtures and opt-in scripts. Diagnostic binaries have an
+independent, unpublished manifest at `tests/tools/Cargo.toml` and are not host
+example targets. SDK/WIT and release tooling remain in `wit/` and `xtask/`.
 
 Run the normal Rust checks from a release checkout with its registry lockfile:
 
@@ -192,8 +198,8 @@ cargo check --locked --workspace --all-targets
 For isolated real QUIC/H3 transport tests:
 
 ```sh
-python3 pishoo/tests/run-transport.py --soak-seconds 1800
-python3 pishoo/tests/run-transport.py --case process
+python3 tests/scripts/run-transport.py --soak-seconds 1800
+python3 tests/scripts/run-transport.py --case process
 ```
 
 The transport runner creates temporary test identities and local upstreams.
@@ -210,10 +216,10 @@ anonymous authorization rules. Older named clients that omit OCSP must upgrade.
 
 A Lib exports a standard WASI HTTP backend. Package metadata and exact runtime dependencies belong to one manifest. A package may contain a backend, static pages, or both; its OpenAPI describes business APIs and is embedded in the backend component.
 
-Rust components can use the [Pishoo SDK](wit/README.md) for verified identity and signature interfaces. Run `python3 pishoo/tools/package-sdk.py` to produce a verified SDK `.crate` and a standalone archive containing SDK source, WIT, the README and packaging tools. The SDK is not yet published to crates.io.
+Rust components can use the [Pishoo SDK](wit/README.md) for verified identity and signature interfaces. Run `python3 tools/package-sdk.py` to produce a verified SDK `.crate` and a standalone archive containing SDK source, WIT and documentation. The SDK is not yet published to crates.io.
 
 1. Build the WASI HTTP backend and separate browser frontend, with the required package metadata and exact package dependencies.
-2. Use `genmeta build` to create a signed .waz release locally.
+2. Use `jade build` to create a signed .waz release locally.
 3. Publish the signed source package to a compatible store, then install its exact release with `genmeta install`. Workspace uses the same store-only installation path; local .waz upload and `--file` installation are not supported.
 
 Online installation/update/removal publishes runtime changes immediately. `pishoo reload` is for identity/configuration reconciliation and is not an extra package activation step.
@@ -257,7 +263,7 @@ App pages, assets and deep links share one `GET /app/<name>` access rule, includ
 
 Access review decisions require an explicit boolean `remember` alongside `id`, `kind` and `action` (`allow` or `deny`). Only remembered choices write ACL rules. Once allowance admits the next call matching verified name, SubjectId, method and normalized path; query, body and message IDs do not participate. It expires after ten minutes and is consumed atomically on admission, including when the business operation later fails. Live once decisions release only the selected waiter. Review lists advertise `decision_modes: ["once", "always"]`; visitor-scoped status supports `consumed` and does not consume an allowance. Authorization schema v3 preserves historical decisions and IDs across restart.
 
-Pishoo uses daccess 0.2.0 from crates.io in `pishoo/Cargo.toml`, with the exact resolved package and checksum recorded in `Cargo.lock`. Host compilation and VM testing should use the locked dependencies and Message 0.2.1 / Workspace 0.3.2.
+Pishoo uses daccess 0.2.0 from crates.io in `Cargo.toml`, with the exact resolved package and checksum recorded in `Cargo.lock`. Host compilation and VM testing should use the locked dependencies and matching independently built business packages.
 
 App and Lib developers must distinguish `202 pending_review` from accepted business jobs. See the [approval integration guide](docs/approval-handling.md) for response handling, live waits, timeouts, identity-bound status queries, idempotency and pending-state UI guidance.
 

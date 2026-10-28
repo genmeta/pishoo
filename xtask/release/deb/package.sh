@@ -24,14 +24,7 @@ prepare_product_source() {
         --exclude='./target' \
         --exclude='./xtask' \
         -cf - . | tar -C "$dest" -xf -
-    python3 - "$dest/Cargo.toml" <<'PY'
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-text = path.read_text()
-text = text.replace('members = ["gateway", "pishoo", "xtask"]', 'members = ["gateway", "pishoo"]')
-path.write_text(text)
-PY
+
 }
 
 cd "${XTASK_RELEASE_REPO_ROOT:?}"

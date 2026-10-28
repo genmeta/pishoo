@@ -1,5 +1,5 @@
 [package.pishoo]
-manifest = "pishoo/Cargo.toml"
+manifest = "Cargo.toml"
 
 [package.pishoo.build.env.DHTTP_ROOT_CA_PEM]
 env = "DHTTP_ROOT_CA_PEM"

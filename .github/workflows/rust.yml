@@ -53,8 +53,8 @@ jobs:
           binary = binaries[0]
           listed = subprocess.check_output([binary, "--list", "--ignored"], text=True)
           for test in [
-              "server::initialization_tests::root_initialization_repairs_identity_directories_and_existing_packages",
-              "server::initialization_tests::root_personal_home_repairs_initially_root_owned_native_resources",
+              "server::tests::initialization::root_initialization_repairs_identity_directories_and_existing_packages",
+              "server::tests::initialization::root_personal_home_repairs_initially_root_owned_native_resources",
               "package::tests::packages::root_package_installs_and_updates_belong_to_identity_owner",
               "sandbox::tests::execution::isolation::root_guest_error_and_cancellation_repair_actual_preopened_directory",
           ]:
