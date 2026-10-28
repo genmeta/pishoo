@@ -449,7 +449,7 @@ async fn pkg_management_request(
         }
         remove_package(&profile, &registered)?;
         sandbox.apps.remove(&registered);
-        sandbox.libs.remove(&registered);
+        if let Some(old) = sandbox.libs.remove(&registered) { old.stream_retired.cancel(); }
         Ok(())
     })
     .await??;

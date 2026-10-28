@@ -57,3 +57,15 @@ signed WAZ packages with Jade; the retired embedded-signature packer is not bund
 Business App/Lib sources are maintained in independent product repositories and are
 not bundled with the SDK. Online package installation applies runtime resources
 immediately and does not change access rules.
+
+
+## Lib-local change hints
+
+`pishoo:events/change@0.1.0` is exposed as `pishoo_sdk::events` by the streaming-capable
+host. Read `current()` before a durable query, then `wait(generation, timeout_ms)`;
+wait is asynchronous in the host and capped at 15 seconds. Commit durable changes
+before `notify()`. Hints coalesce, are isolated to the current identity/Lib, and do
+not survive host restart. They must never substitute for durable replay cursors.
+An older host will reject a component importing this interface at link validation.
+
+`wait` returns `None` on invocation cancellation; finish the stream and release database resources promptly. The host allows at most three seconds for cooperative cleanup.

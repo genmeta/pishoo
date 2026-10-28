@@ -1,0 +1,12 @@
+[package]
+name = "lib-stream-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[workspace]
+[lib]
+path = "src/lib_stream_probe.rs"
+crate-type = ["cdylib"]
+[dependencies]
+wasip2 = "=1.0.4"
+wit-bindgen = "=0.51.0"

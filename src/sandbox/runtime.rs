@@ -1,13 +1,17 @@
 //! Component loading, Store isolation, invocation execution, and response lifecycle.
 
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use http::{Request, Response};
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, StreamBody};
 use tokio::sync::oneshot;
 use tokio_util::task::TaskTracker;
 use wasmtime::{
-    Config, Engine, Store, StoreLimits,
+    Config, Engine, Store, StoreLimitsBuilder, UpdateDeadline,
     component::{Component, Linker, ResourceTable},
 };
 use wasmtime_wasi::{
@@ -23,7 +27,7 @@ use wasmtime_wasi_http::{
 
 use super::{
     Invocation, Lib, Outgoing, Sandbox, StoreData, WasmRuntime,
-    host::{identity, identity_v2},
+    host::{events, identity, identity_v2},
 };
 use crate::{Body, Error, Result, package::valid_id};
 
@@ -35,6 +39,7 @@ impl WasmRuntime {
         config
             .wasm_component_model(true)
             .consume_fuel(true)
+            .epoch_interruption(true)
             .wasm_threads(false);
         // Installation checks and Lib::load compile the same backend. Reuse
         // Wasmtime's version/configuration/content-keyed machine code across
@@ -97,7 +102,29 @@ impl WasmRuntime {
             |state| state,
         )
         .map_err(Error::Guest)?;
-        Ok(Self { engine, linker })
+        events::pishoo::events::change::add_to_linker::<_, wasmtime::component::HasSelf<StoreData>>(
+            &mut linker, |state| state,
+        ).map_err(Error::Guest)?;
+        // The sender lives exactly as long as this runtime. The thread owns
+        // only Engine, never Arc<WasmRuntime>, so there is no ownership cycle.
+        let (shutdown, stopped) = std::sync::mpsc::channel();
+        let clock_engine = engine.clone();
+        std::thread::Builder::new()
+            .name("wasm-epoch".into())
+            .spawn(move || {
+                while matches!(
+                    stopped.recv_timeout(Duration::from_millis(10)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    clock_engine.increment_epoch();
+                }
+            })
+            .map_err(Error::Io)?;
+        Ok(Self {
+            engine,
+            linker,
+            _epoch_shutdown: shutdown,
+        })
     }
 
     pub fn compile(&self, bytes: &[u8]) -> Result<Component> {
@@ -271,6 +298,9 @@ impl Lib {
             .map_err(Error::Guest)?;
         let filesystem = builder.build().filesystem().clone();
         Ok(Self {
+            id,
+            changes: tokio::sync::watch::channel(0).0,
+            stream_retired: tokio_util::sync::CancellationToken::new(),
             openapi,
             component,
             runtime,
@@ -363,24 +393,36 @@ impl Invocation {
             tasks,
             outgoing,
         } = self;
-
-        // Each invocation owns its WASI state.
+        // Selected by installed identity + exact operation, never request
+        // headers, guest OpenAPI, or a response MIME type.
+        let streaming = stream_operation(&lib.id, request.method(), request.uri().path())
+            && request
+                .headers()
+                .get_all(http::header::ACCEPT)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .any(accepts_events);
+        let cancelled = if streaming {
+            lib.stream_retired.child_token()
+        } else {
+            tokio_util::sync::CancellationToken::new()
+        };
+        // Construct before spawning/awaiting; even an unpolled returned Body
+        // must cancel. Transfer this guard from execute to its response body.
+        let cancel_on_drop = cancelled.clone().drop_guard();
         let mut wasi = WasiCtx::builder().build();
         *wasi.filesystem() = lib.filesystem.clone();
         let store_data = StoreData {
+            cancelled: cancelled.clone(),
+            changes: lib.changes.clone(),
             table: ResourceTable::new(),
             wasi,
             http: WasiHttpCtx::new(),
-            // Per invocation Store: Wasmtime defaults allow 10,000 instances,
-            // memories, and tables, with no extra per-memory byte or per-table
-            // element ceiling. Use StoreLimitsBuilder for explicit ceilings.
-            memory: StoreLimits::default(),
+            memory: execution_limits(),
             outgoing,
             local,
             remote,
         };
-
-        // Keep execution tracked after execute returns or is dropped.
         let (response_tx, response_rx) = oneshot::channel();
         let execution_task = tasks.spawn(async move {
             let _ownership = scopeguard::guard(lib.filesystem.clone(), |filesystem| {
@@ -388,46 +430,43 @@ impl Invocation {
                     tracing::error!(%error, "cannot restore Lib data ownership");
                 }
             });
-            let mut store = Store::new(&lib.runtime.engine, store_data);
-            store.limiter(|state| &mut state.memory);
-            store.set_fuel(100_000_000).map_err(Error::Guest)?;
-            store
-                .fuel_async_yield_interval(Some(10_000))
-                .map_err(Error::Guest)?;
-            let proxy = Proxy::instantiate_async(&mut store, &lib.component, &lib.runtime.linker)
-                .await
-                .map_err(Error::Guest)?;
-            let scheme = match request
-                .uri()
-                .scheme_str()
-                .expect("dhttp requests have a :scheme")
-            {
-                "http" => types::Scheme::Http,
-                "https" => types::Scheme::Https,
-                other => types::Scheme::Other(other.to_owned()),
+            let execute = async {
+                let mut store = Store::new(&lib.runtime.engine, store_data);
+                store.limiter(|state| &mut state.memory);
+                configure_execution(&mut store, streaming).map_err(Error::Guest)?;
+                let proxy = Proxy::instantiate_async(&mut store, &lib.component, &lib.runtime.linker)
+                    .await.map_err(Error::Guest)?;
+                let scheme = match request.uri().scheme_str().expect("dhttp requests have a :scheme") {
+                    "http" => types::Scheme::Http,
+                    "https" => types::Scheme::Https,
+                    other => types::Scheme::Other(other.to_owned()),
+                };
+                let request = request.map(|body| body.map_err(|error|
+                    types::ErrorCode::InternalError(Some(error.to_string()))));
+                let incoming = store.data_mut().http().new_incoming_request(scheme, request)
+                    .map_err(Error::Guest)?;
+                let outparam = store.data_mut().http().new_response_outparam(response_tx)
+                    .map_err(Error::Guest)?;
+                proxy.wasi_http_incoming_handler().call_handle(&mut store, incoming, outparam)
+                    .await.map_err(Error::Guest)
             };
-            let request = request.map(|body| {
-                body.map_err(|error| types::ErrorCode::InternalError(Some(error.to_string())))
-            });
-            let incoming = store
-                .data_mut()
-                .http()
-                .new_incoming_request(scheme, request)
-                .map_err(Error::Guest)?;
-            let outparam = store
-                .data_mut()
-                .http()
-                .new_response_outparam(response_tx)
-                .map_err(Error::Guest)?;
-            proxy
-                .wasi_http_incoming_handler()
-                .call_handle(&mut store, incoming, outparam)
-                .await
-                .map_err(Error::Guest)
+            tokio::pin!(execute);
+            let result = tokio::select! {
+                biased;
+                _ = cancelled.cancelled() => {
+                    // Let cooperative guests leave wait(), finish transactions
+                    // and close SQLite's dotfile locks before dropping Store.
+                    // Misbehaving code remains bounded by fuel and this grace.
+                    tokio::time::timeout(Duration::from_secs(3), &mut execute).await
+                        .unwrap_or_else(|_| Err(Error::Guest(wasmtime::Error::msg("invocation cancellation deadline"))))
+                },
+                result = &mut execute => result,
+            };
+            if let Err(error) = &result {
+                tracing::warn!(%error, streaming, "WASM HTTP execution stopped");
+            }
+            result
         });
-
-        // The task owns the sender, directly or through its Store. Exiting
-        // without a response drops it and wakes the receiver.
         let response = match response_rx.await {
             Ok(response) => response,
             Err(_) => {
@@ -436,12 +475,20 @@ impl Invocation {
             }
         }
         .map_err(Error::GuestRejectedResponse)?;
-
-        // Dropping the JoinHandle detaches the guest; TaskTracker still owns
-        // its lifecycle. The existing WASI body supplies frames and errors.
-        Ok(response.map(|body| {
-            body.map_err(|error| Error::Guest(wasmtime::Error::new(error)).body_error())
-                .boxed_unsync()
+        // Captures are owned before first poll; cancellation does not depend
+        // on downstream ever polling the body. Frames/trailers stay unchanged.
+        Ok(response.map(|mut body| {
+            let frames = async_stream::try_stream! {
+                let _cancel_on_drop = cancel_on_drop;
+                let _execution_task = execution_task;
+                while let Some(frame) = body.frame().await {
+                    yield frame.map_err(|error| Error::Guest(wasmtime::Error::new(error)).body_error())?;
+                }
+                // EOF also cancels a guest that finishes its response but
+                // continues waiting/computing. Never wait on it to deliver EOF.
+                // WASI body errors propagate above; the tracker owns cleanup.
+            };
+            StreamBody::new(frames).boxed_unsync()
         }))
     }
 
@@ -484,20 +531,19 @@ impl Invocation {
                 let mut store = Store::new(
                     &lib.runtime.engine,
                     StoreData {
+                        cancelled: tokio_util::sync::CancellationToken::new(),
                         table: ResourceTable::new(),
                         wasi,
                         http: WasiHttpCtx::new(),
-                        memory: StoreLimits::default(),
+                        memory: execution_limits(),
+                        changes: lib.changes.clone(),
                         outgoing,
                         local,
                         remote: None,
                     },
                 );
                 store.limiter(|state| &mut state.memory);
-                store.set_fuel(100_000_000).map_err(Error::Guest)?;
-                store
-                    .fuel_async_yield_interval(Some(10_000))
-                    .map_err(Error::Guest)?;
+                configure_execution(&mut store, false).map_err(Error::Guest)?;
                 let command = wasmtime_wasi::p2::bindings::Command::instantiate_async(
                     &mut store,
                     &lib.component,
@@ -661,3 +707,85 @@ impl Sandbox {
         })).await;
     }
 }
+
+// Conservative starting limits, not process-wide memory accounting. Two
+// memories accommodate adapted components; each is bounded independently.
+fn execution_limits() -> wasmtime::StoreLimits {
+    StoreLimitsBuilder::new()
+        .memory_size(128 * 1024 * 1024)
+        .memories(2)
+        .tables(8)
+        .table_elements(100_000)
+        .instances(32)
+        .build()
+}
+
+fn stream_operation(id: &str, method: &http::Method, path: &str) -> bool {
+    id.split_once('/').is_some_and(|(author, name)| {
+        crate::package::is_standard_author(author) && name == "message"
+    }) && method == http::Method::GET
+        && path == "/message/list"
+}
+
+fn accepts_events(value: &str) -> bool {
+    value.split(',').any(|range| {
+        let mut parts = range.split(';');
+        if !parts
+            .next()
+            .unwrap_or("")
+            .trim()
+            .eq_ignore_ascii_case("text/event-stream")
+        {
+            return false;
+        }
+        parts.all(|parameter| {
+            let Some((key, value)) = parameter.trim().split_once('=') else {
+                return false;
+            };
+            !key.trim().eq_ignore_ascii_case("q")
+                || value
+                    .trim()
+                    .parse::<f64>()
+                    .is_ok_and(|q| q > 0.0 && q <= 1.0)
+        })
+    })
+}
+
+const BURST_FUEL: u64 = 100_000_000;
+const REFILL_FUEL_PER_SECOND: u64 = 10_000_000;
+
+fn replenished_fuel(remaining: u64, elapsed: Duration) -> u64 {
+    let refill = elapsed
+        .as_nanos()
+        .saturating_mul(u128::from(REFILL_FUEL_PER_SECOND))
+        / 1_000_000_000;
+    u128::from(remaining)
+        .saturating_add(refill)
+        .min(u128::from(BURST_FUEL)) as u64
+}
+
+fn configure_execution<T: Send + 'static>(
+    store: &mut Store<T>,
+    streaming: bool,
+) -> wasmtime::Result<()> {
+    store.set_fuel(BURST_FUEL)?;
+    store.fuel_async_yield_interval(Some(10_000))?;
+    store.set_epoch_deadline(1);
+    if streaming {
+        let mut accounted_at = Instant::now();
+        store.epoch_deadline_callback(move |mut context| {
+            let now = Instant::now();
+            let fuel = replenished_fuel(context.get_fuel()?, now.duration_since(accounted_at));
+            accounted_at = now;
+            context.set_fuel(fuel)?;
+            Ok(UpdateDeadline::Yield(1))
+        });
+    } else {
+        store.epoch_deadline_async_yield_and_update(1);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "../../tests/unit/sandbox/runtime/streaming.rs"]
+mod streaming_tests;

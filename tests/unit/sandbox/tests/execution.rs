@@ -128,3 +128,6 @@ mod streaming;
 
 #[path = "execution/host_client.rs"]
 mod host_client;
+
+#[path = "execution/message_stream.rs"]
+mod message_stream;

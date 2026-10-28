@@ -17,6 +17,8 @@ async fn guest_http_outgoing_is_denied() {
 async fn identity_signatures_enforce_bounds_and_handshake_scope() {
     use identity::pishoo::identity::signatures::{Host, SignError, VerifyError};
     let mut store = StoreData {
+        cancelled: tokio_util::sync::CancellationToken::new(),
+        changes: tokio::sync::watch::channel(0).0,
         table: ResourceTable::new(),
         wasi: WasiCtx::builder().build(),
         http: WasiHttpCtx::new(),

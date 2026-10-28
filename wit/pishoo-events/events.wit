@@ -1,0 +1,13 @@
+package pishoo:events@0.1.0;
+
+/// Process-local change hints, isolated to the invoking identity and Lib.
+/// Persist business changes before notifying. Hints can coalesce or be lost
+/// on restart; the database remains authoritative.
+interface change {
+    current: func() -> u64;
+    notify: func();
+    /// Returns the current generation on change or timeout (at most 15000ms).
+    /// Register/read current before querying durable state, then wait with it.
+    /// None requests cooperative cleanup on disconnect/retirement.
+    wait: func(after: u64, timeout-ms: u32) -> option<u64>;
+}

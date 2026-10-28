@@ -10,6 +10,13 @@ use wasmtime_wasi_http::{Error as HttpError, RequestOptions, WasiBody, WasiHttpH
 use super::super::Outgoing;
 
 impl WasiHttpHooks for Outgoing {
+    fn p2_outgoing_body_buffer_chunks(&mut self) -> usize {
+        2
+    }
+    fn p2_outgoing_body_chunk_size(&mut self) -> usize {
+        16 * 1024
+    }
+
     fn send_request(
         &mut self,
         mut request: Request<WasiBody>,

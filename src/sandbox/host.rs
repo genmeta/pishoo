@@ -148,3 +148,42 @@ impl identity::pishoo::identity::signatures::Host for StoreData {
         Err(VerifyError::Unavailable)
     }
 }
+
+// No caller-selected namespace: the Store receives only its own Lib sender.
+pub(super) mod events {
+    wasmtime::component::bindgen!({
+        path: "wit/pishoo-events",
+        inline: "package pishoo:host-events; world events-host { import pishoo:events/change@0.1.0; }",
+        imports: { default: async },
+    });
+}
+
+impl events::pishoo::events::change::Host for StoreData {
+    async fn current(&mut self) -> u64 {
+        *self.changes.borrow()
+    }
+
+    async fn notify(&mut self) {
+        self.changes
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    async fn wait(&mut self, after: u64, timeout_ms: u32) -> Option<u64> {
+        if self.cancelled.is_cancelled() {
+            return None;
+        }
+        let mut receiver = self.changes.subscribe();
+        let current = *receiver.borrow_and_update();
+        if current != after {
+            return Some(current);
+        }
+        tokio::select! {
+            biased;
+            _ = self.cancelled.cancelled() => None,
+            _ = tokio::time::timeout(
+                std::time::Duration::from_millis(u64::from(timeout_ms.min(15_000))),
+                receiver.changed(),
+            ) => Some(*receiver.borrow_and_update()),
+        }
+    }
+}

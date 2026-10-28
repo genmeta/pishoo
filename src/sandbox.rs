@@ -34,9 +34,13 @@ pub(crate) struct Sandbox {
 pub struct WasmRuntime {
     engine: Engine,
     linker: Linker<StoreData>,
+    _epoch_shutdown: std::sync::mpsc::Sender<()>,
 }
 
 pub(crate) struct Lib {
+    id: String,
+    changes: tokio::sync::watch::Sender<u64>,
+    pub(crate) stream_retired: tokio_util::sync::CancellationToken,
     pub(crate) openapi: oas3::OpenApiV3Spec,
     component: Component,
     runtime: Arc<WasmRuntime>,
@@ -44,6 +48,8 @@ pub(crate) struct Lib {
 }
 
 struct StoreData {
+    cancelled: tokio_util::sync::CancellationToken,
+    changes: tokio::sync::watch::Sender<u64>,
     table: ResourceTable,
     wasi: WasiCtx,
     http: WasiHttpCtx,
@@ -88,6 +94,13 @@ impl Sandbox {
     /// Close WASM task tracking and discard the published Lib set.
     /// Server separately clears the HTTP router.
     pub(crate) fn close(&mut self) {
+        for lib in self
+            .libs
+            .values()
+            .chain(self.dev_libs.values().map(|(_, lib)| lib))
+        {
+            lib.stream_retired.cancel();
+        }
         self.tasks.close();
         self.libs.clear();
         self.apps.clear();
@@ -181,6 +194,9 @@ impl Sandbox {
             Err(error) => return Err(error),
         }
         let apps = installed_apps(profile, None)?;
+        for lib in self.libs.values() {
+            lib.stream_retired.cancel();
+        }
         self.libs = candidates;
         self.apps = apps;
         Ok(())

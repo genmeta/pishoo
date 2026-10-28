@@ -125,6 +125,8 @@ async fn large_echo_reports_fuel_exhaustion() {
     let mut store = Store::new(
         &lib.runtime.engine,
         StoreData {
+            cancelled: tokio_util::sync::CancellationToken::new(),
+            changes: tokio::sync::watch::channel(0).0,
             table: wasmtime::component::ResourceTable::new(),
             wasi,
             http: WasiHttpCtx::new(),
@@ -135,6 +137,8 @@ async fn large_echo_reports_fuel_exhaustion() {
         },
     );
     store.limiter(|data| &mut data.memory);
+    store.set_epoch_deadline(1);
+    store.epoch_deadline_async_yield_and_update(1);
     store.set_fuel(100_000_000).unwrap();
     store.fuel_async_yield_interval(Some(10_000)).unwrap();
     let proxy = Proxy::instantiate_async(&mut store, &lib.component, &lib.runtime.linker)

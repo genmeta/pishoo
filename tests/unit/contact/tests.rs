@@ -765,3 +765,41 @@ fn v4_contact_migration_preserves_review_tracking_across_reopen() {
         )
     );
 }
+
+#[tokio::test]
+async fn completed_contact_applications_never_reenter_the_delivery_queue() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let endpoint = crate::test_support::identity::endpoint("alice.dhttp.net");
+    // Any attempted local contact lookup would fail against this empty service.
+    let access = Arc::new(AccessService::new(
+        sea_orm::DatabaseConnection::default(),
+        endpoint.name(),
+    ));
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(include_str!("../../../src/contact/sql/schema.sql"))
+        .unwrap();
+    for status in ["active", "denied", "expired", "failed", "revoked"] {
+        db.execute("INSERT INTO outbound_contact_request(target_name,status,expired_after,delivery_deadline,next_attempt_at,attempt_count,created_at,updated_at) VALUES(?1,?2,?3,?3,0,7,1,1)",params![format!("{status}.dhttp.net"),status,now()+3600]).unwrap();
+    }
+    // An already-expired pending request must also stop, even with a stale lease.
+    db.execute("INSERT INTO outbound_contact_request(target_name,status,expired_after,delivery_deadline,next_attempt_at,lease_until,created_at,updated_at) VALUES('pending.dhttp.net','pending',?1,?1,0,?2,1,1)",params![now()-1,now()+120]).unwrap();
+    let db = Arc::new(Mutex::new(db));
+    for _ in 0..3 {
+        contact_jobs(&profile, &endpoint, &access, &db)
+            .await
+            .unwrap();
+    }
+    let db = db.lock().unwrap();
+    assert_eq!(db.query_row("SELECT count(*) FROM outbound_contact_request WHERE attempt_count=7 AND lease_until IS NULL AND last_checked_at IS NULL",[],|r|r.get::<_,i64>(0)).unwrap(),5);
+    assert_eq!(
+        db.query_row(
+            "SELECT status FROM outbound_contact_request WHERE target_name='pending.dhttp.net'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "expired"
+    );
+    assert!(db.is_autocommit());
+}

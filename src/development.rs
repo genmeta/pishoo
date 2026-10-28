@@ -52,11 +52,13 @@ pub(crate) fn router(
                 let local_exists = package::valid_id(name).is_ok()
                     && profile.join("dev").join(name).try_exists()?;
                 if !local_exists {
-                    sandbox
-                        .write()
-                        .unwrap()
-                        .dev_libs
-                        .retain(|id, _| id.rsplit('/').next() != Some(name));
+                    sandbox.write().unwrap().dev_libs.retain(|id, (_, lib)| {
+                        let keep = id.rsplit('/').next() != Some(name);
+                        if !keep {
+                            lib.stream_retired.cancel();
+                        }
+                        keep
+                    });
                 }
                 if package::valid_id(name).is_err()
                     || (!frontend
@@ -255,11 +257,13 @@ fn load(
     let (_root, mut file, author) = match opened {
         Ok(opened) => opened,
         Err(error) => {
-            sandbox
-                .write()
-                .unwrap()
-                .dev_libs
-                .retain(|id, _| id.rsplit('/').next() != Some(name));
+            sandbox.write().unwrap().dev_libs.retain(|id, (_, lib)| {
+                let keep = id.rsplit('/').next() != Some(name);
+                if !keep {
+                    lib.stream_retired.cancel();
+                }
+                keep
+            });
             return Err(error);
         }
     };
@@ -275,9 +279,13 @@ fn load(
         return Ok(lib.clone());
     }
     // Changed or removed files never fall back to stale executable code.
-    state
-        .dev_libs
-        .retain(|id, _| id.rsplit('/').next() != Some(name));
+    state.dev_libs.retain(|id, (_, lib)| {
+        let keep = id.rsplit('/').next() != Some(name);
+        if !keep {
+            lib.stream_retired.cancel();
+        }
+        keep
+    });
     let mut bytes = Vec::new();
     (&mut file)
         .take(64 * 1024 * 1024 + 1)

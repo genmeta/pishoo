@@ -1120,7 +1120,9 @@ pub(super) fn install_packages(
     // Everything below is infallible. New requests see the whole new graph;
     // in-flight requests continue to own their original Arc<Lib> snapshots.
     for (id, _, _, _) in changed {
-        sandbox.libs.remove(id);
+        if let Some(old) = sandbox.libs.remove(id) {
+            old.stream_retired.cancel();
+        }
         sandbox.apps.remove(id);
     }
     sandbox.libs.extend(libs);
