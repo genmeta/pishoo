@@ -52,7 +52,8 @@ by Pishoo. They cannot run as a native client or authenticate a caller themselve
 Ordinary installed Libs use standard WASI HTTP through their Endpoint and native API resources; daccess still authorizes each
 complete HTTP method/path. Use a Pishoo host with the request-identity interface.
 
-The developer bundle contains the SDK, WIT, documentation and `tools/package-lib.py`.
+The developer bundle contains the SDK, WIT and documentation. Build and publish
+signed WAZ packages with Jade; the retired embedded-signature packer is not bundled.
 Business App/Lib sources are maintained in independent product repositories and are
 not bundled with the SDK. Online package installation applies runtime resources
 immediately and does not change access rules.

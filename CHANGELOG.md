@@ -2,10 +2,37 @@
 
 ## Unreleased
 
+### Changed
+
+- Move the host crate to the repository root with the standard `src/lib.rs` entry.
+  Keep private unit tests beside their modules with ordinary `mod tests` imports,
+  integration tests and fixtures in `tests/`, diagnostic binaries in `tests/tools/`, and SDK
+  distribution tooling in `tools/`. Update build, CI and release paths and retire
+  obsolete TCP-mock and legacy packaging helpers.
+- Upgrade Wasmtime, WASI and WASI HTTP from 47.0.4 to 49.0.4, retaining WASI P2
+  and existing guest interfaces. Adapt outgoing HTTP and private-directory hooks
+  to the updated runtime APIs.
 - Verify and install signed WAZ ZIP entries directly. Remove the WEBC dependency,
   intermediate containers, legacy archive/proof readers and App directory
   flattening. Keep installation signatures, dependency checks and atomic updates.
+  Previous installed archive layouts require explicit reinstallation; private
+  business data is preserved.
 - Read installed Lib WASM directly without reconstructing or retaining an archive.
+- Serve registered App files from disk on demand through retained directory
+  handles and asynchronous file bodies, rather than keeping frontend contents in
+  memory. Preserve root authorization, deep links and in-flight file responses.
+- Allow one permission group to include its own package's App entry with
+  `app: true`. Derive the exact root GET operation from the verified package;
+  registering a declaration does not grant access.
+
+### Fixed
+
+- Let Pishoo own local configuration initialization through `pishoo configure`,
+  used by matching gmutils releases. Initialize schema v3 directly, preserve valid
+  v3 settings, and leave new configuration stopped until explicitly enabled.
+- Ignore legacy `db/config.db`; archive setting schema v1/v2 directories with
+  their SQLite sidecars before creating fresh defaults. Isolate identity loading
+  and listening failures so other identities can start and later scans can retry.
 
 ## [0.9.0-preview.5] - 2026-10-23
 

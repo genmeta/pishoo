@@ -239,7 +239,7 @@ fn packaging_tools_belong_to_gmutils() {
         "xtask/templates/pishoo.rb.in",
         "xtask/deb/rules",
         "xtask/release/rpm/package.sh",
-        "pishoo/Cargo.toml",
+        "Cargo.toml",
     ] {
         let text = std::fs::read_to_string(root.join(path)).unwrap();
         assert!(

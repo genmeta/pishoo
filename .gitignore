@@ -23,6 +23,8 @@ tarpaulin-report.html
 .idea/
 *.log
 .DS_Store
+__pycache__/
+*.pyc
 
 # Local environment configuration (keep the shared template in version control)
 .env
@@ -63,9 +65,9 @@ pishoo.pid
 /IMPLEMENTATION.md
 /test.txt
 /design/
-/pishoo/DACCESS.md
 
 # Local development and release documentation
-/pishoo/docs/
+/docs/local/
 /RELEASING.md
+/RELEASE-*.md
 /REVIEW-IMPLEMENTATION-*.md

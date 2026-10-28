@@ -49,7 +49,7 @@ jobs:
           import tomllib
           from pathlib import Path
 
-          version = tomllib.loads(Path("pishoo/Cargo.toml").read_text())["package"]["version"]
+          version = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
           expected = f"v{version}"
           if sys.argv[1] != expected:
               raise SystemExit(f"release tag {sys.argv[1]} must match {expected}")

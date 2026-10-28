@@ -152,10 +152,10 @@ fn brew_archive_packages_only_host_binaries_without_business_artifacts() {
     let bin = root.path().join("bin");
     let out = root.path().join("out");
     let source = root.path().join("source");
-    fs::create_dir_all(source.join("pishoo")).unwrap();
+    fs::create_dir_all(source.join("src")).unwrap();
     fs::write(
         source.join("Cargo.toml"),
-        "[workspace]\nmembers = [\"gateway\", \"pishoo\"]\n",
+        "[package]\nname = \"pishoo\"\nversion = \"0.9.0-preview.5\"\n",
     )
     .unwrap();
     executable(
@@ -170,7 +170,7 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
-release="$(dirname "$(dirname "$manifest")")/target/$target/release"
+release="$(dirname "$manifest")/target/$target/release"
 mkdir -p "$release"
 for binary in pishoo; do
     printf '#!/bin/sh\nexit 0\n' > "$release/$binary"

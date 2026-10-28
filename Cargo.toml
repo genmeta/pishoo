@@ -1,7 +1,85 @@
+[package]
+name = "pishoo"
+description = "modern, secure, QUIC-powered web/proxy engine"
+homepage = "https://www.dhttp.net"
+version = "0.9.0-preview.5"
+edition = "2024"
+license = "Apache-2.0"
+autobins = false
+default-run = "pishoo"
+
+[dependencies]
+zip = { version = "6", default-features = false, features = ["deflate"] }
+clap = "4"
+url = "2"
+dirs = "6"
+ddns = { version = "0.8.0", package = "dyns", features = ["h3", "mdns"] }
+qprotocol = { version = "0.7.0" }
+dhttp = { version = "0.7.1" }
+h3x = { version = "0.7.0" }
+dhttp-home = { version = "0.6.1" }
+qtls = { version = "0.1.0" }
+access_control = { package = "daccess", version = "0.2.0" }
+axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio"] }
+sea-orm = { version = "2", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+rusqlite = { version = "0.32.1", features = ["bundled", "backup"] }
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+der = "0.7"
+sha1 = "0.10"
+x509-cert = "0.2"
+x509-ocsp = "0.2"
+x509-parser = "0.18"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+sha2 = "0.10"
+scopeguard = "1"
+tower = { version = "0.5", features = ["util"] }
+cap-std = "4"
+getrandom = "0.4"
+rustix = { version = "1", features = ["fs", "process"] }
+toml = "0.9"
+form_urlencoded = "1"
+percent-encoding = "2"
+mime_guess = "2"
+wasmparser = "0.259.0"
+
+bytes = "1"
+async-stream = "0.3"
+base64 = "0.22"
+chrono = "0.4"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+futures = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "io-std", "fs", "signal", "net", "process"] }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
+wasmtime = "49.0.4"
+wasmtime-wasi = { version = "49.0.4", features = ["p2"] }
+wasmtime-wasi-http = { version = "49.0.4", default-features = false, features = ["p2"] }
+oas3 = { version = "0.22.0", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+imagesize = { version = "0.14", default-features = false, features = ["jpeg", "png", "webp"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+qbase = { version = "0.7.0" }
+hyper = { version = "1", features = ["server", "http1"] }
+tokio = { version = "1", features = ["test-util"] }
+rcgen = "0.14"
+wat = "1"
+
+[[bin]]
+name = "pishoo"
+path = "src/main.rs"
+
 [workspace]
 resolver = "2"
-members = ["pishoo"]
-exclude = ["xtask"]
+members = ["."]
+exclude = ["xtask", "wit", "tests/tools"]
 
 # Lib installation compiles WASM inside the host. Optimize the compiler hot
 # paths even in development builds, while keeping Pishoo itself debuggable.

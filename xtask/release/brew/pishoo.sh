@@ -10,14 +10,7 @@ prepare_product_source() {
         --exclude='./target' \
         --exclude='./xtask' \
         -cf - . | tar -C "$dest" -xf -
-    python3 - "$dest/Cargo.toml" <<'PY'
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-text = path.read_text()
-text = text.replace('members = ["gateway", "pishoo", "xtask"]', 'members = ["gateway", "pishoo"]')
-path.write_text(text)
-PY
+
 }
 
 cd "${XTASK_RELEASE_REPO_ROOT:?}"
@@ -29,7 +22,7 @@ rm -rf "$out/staging"
 mkdir -p "$out/staging"
 product_source="$out/product-source"
 prepare_product_source "$product_source"
-args=(build --locked --release --manifest-path "$product_source/pishoo/Cargo.toml" --target "$target")
+args=(build --locked --release --manifest-path "$product_source/Cargo.toml" --target "$target")
 if [ -n "$features" ]; then
     args+=(--features "$features")
 fi
