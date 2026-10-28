@@ -96,6 +96,18 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<PackageFiles> {
             return Err(invalid("OpenAPI version differs from package version"));
         }
         validate_declarations(&document)?;
+        let groups = document
+            .get("x-access-groups")
+            .or_else(|| document["x-pishoo"].get("access-groups"));
+        if metadata["has_app"] != true
+            && groups
+                .and_then(Value::as_object)
+                .is_some_and(|groups| groups.values().any(|group| group["app"] == true))
+        {
+            return Err(invalid(
+                "app capability requires this package's public resources",
+            ));
+        }
     }
     verify_signature(&files, &metadata)?;
     Ok(files)
@@ -436,6 +448,7 @@ fn validate_declarations(document: &Value) -> Result<()> {
     }
     let mut declared = BTreeMap::<String, HashSet<String>>::new();
     let mut members = HashSet::new();
+    let mut app_group = false;
     if let Some(groups) = groups {
         for (name, group) in groups
             .as_object()
@@ -453,6 +466,15 @@ fn validate_declarations(document: &Value) -> Result<()> {
                 text(&group["title"], "zh-CN")?;
             } else {
                 text(group, "title")?;
+            }
+            if group.get("app").is_some_and(|app| !app.is_boolean()) {
+                return Err(invalid("group app must be a boolean"));
+            }
+            if group["app"] == true {
+                if app_group {
+                    return Err(invalid("app entry belongs to multiple groups"));
+                }
+                app_group = true;
             }
             let ids = group["operations"]
                 .as_array()
