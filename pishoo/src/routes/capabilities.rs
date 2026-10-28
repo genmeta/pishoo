@@ -197,16 +197,16 @@ fn write_declarations(
     rustix::fs::flock(&directory, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
     let mut conn = crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let author: Option<Option<String>> = tx
+    let installed: Option<(Option<String>, bool)> = tx
         .query_row(
-            "SELECT author FROM package WHERE name=?1 AND has_lib=1",
+            "SELECT author,has_app FROM package WHERE name=?1 AND has_lib=1",
             [name],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
     // DELETE remains idempotent after package removal, but can still clean any
     // leftover declaration. PUT only describes an installed business Lib.
-    if *method == Method::PUT && author.is_none() {
+    if *method == Method::PUT && installed.is_none() {
         return Err(Error::RouteNotFound);
     }
     let groups = groups
@@ -217,12 +217,15 @@ fn write_declarations(
     let mut available = BTreeSet::new();
     if *method == Method::PUT && !groups.is_empty() {
         let standard =
-            author.as_ref().and_then(|author| author.as_deref()) == Some("std.dhttp.net");
+            installed.as_ref().and_then(|(author, _)| author.as_deref()) == Some("std.dhttp.net");
         let prefix = if standard {
             "/std".to_owned()
         } else {
             format!("/{name}")
         };
+        if installed.as_ref().is_some_and(|(_, has_app)| *has_app) {
+            available.insert(("GET".to_owned(), format!("/app/{name}")));
+        }
         let root = cap_std::fs::Dir::from_std_file(crate::package::lib_root(profile)?);
         let file = root.open(if standard {
             format!("std/{name}.wasm")

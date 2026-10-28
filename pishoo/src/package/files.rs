@@ -673,6 +673,27 @@ fn save_registration(
             }
         }
     }
+    // App authority comes from this validated package, never from a guest path.
+    if api["has_lib"] == true {
+        let document: serde_json::Value = serde_json::from_slice(super::package_openapi(package)?)
+            .map_err(|e| Error::InvalidComponent(e.to_string()))?;
+        let declarations = document
+            .get("x-access-groups")
+            .or_else(|| document["x-pishoo"].get("access-groups"));
+        for (id, _, endpoints) in &mut groups {
+            if declarations
+                .and_then(|groups| groups.get(id.as_str()))
+                .is_some_and(|group| group["app"] == true)
+            {
+                if api["has_app"] != true {
+                    return Err(Error::InvalidComponent(
+                        "app capability requires this package's public resources".into(),
+                    ));
+                }
+                endpoints.push(("GET".into(), format!("/app/{name}")));
+            }
+        }
+    }
     crate::routes::permissions(conn, name, &groups)
 }
 

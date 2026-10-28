@@ -90,7 +90,14 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
         let bytes = crate::package::tests::package_fixture(
             &document,
             include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-            std::collections::BTreeMap::new(),
+            if name == "notes" {
+                std::collections::BTreeMap::from([(
+                    "index.html".parse().unwrap(),
+                    b"notes".to_vec().into(),
+                )])
+            } else {
+                std::collections::BTreeMap::new()
+            },
             &crate::package::tests::publisher(publisher, 'a'),
         );
         let id = format!("{publisher}/{name}");
@@ -109,6 +116,83 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
             "alice.dhttp.net/notes · Original":{"/notes/entries":["GET"]}
         })
     );
+    // Only the exact root GET of this installed package is available.
+    for (name, method, path) in [
+        ("message", "GET", "/app/message"), // no frontend in this package
+        ("notes", "GET", "/app/message"),
+        ("notes", "GET", "/app/notes-evil"),
+        ("notes", "GET", "/app"),
+        ("notes", "GET", "/"),
+        ("notes", "GET", "/std/acl"),
+        ("notes", "GET", "/app/notes/"),
+        ("notes", "GET", "/app/notes/../workspace"),
+        ("notes", "GET", "/app/notes%2f..%2fworkspace"),
+        ("notes", "POST", "/app/notes"),
+        ("notes", "HEAD", "/app/notes"),
+    ] {
+        let response = call(
+            &router,
+            &local,
+            "PUT",
+            &format!("/std/acl/permissions?name={name}"),
+            Some(json!([{"id":"read","title":"Read","endpoints":[{"method":method,"path":path}]}])),
+            true,
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{name} {method} {path}"
+        );
+        assert_eq!(catalog(&router, &local).await, original);
+    }
+    let notes = json!([{"id":"read","title":"Original","endpoints":[
+        {"method":"GET","path":"/notes/entries"}, {"method":"GET","path":"/app/notes"}]}]);
+    assert_eq!(
+        call(
+            &router,
+            &local,
+            "PUT",
+            "/std/acl/permissions?name=notes",
+            Some(notes.clone()),
+            true
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        catalog(&router, &local).await["alice.dhttp.net/notes · Original"],
+        json!({"/notes/entries":["GET"],"/app/notes":["GET"]})
+    );
+    // A declaration does not create an allow policy.
+    let db = rusqlite::Connection::open(profile.join(".volume/sys/access/database")).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM access_rules WHERE api='/app/notes'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    drop(db);
+    let mut notes = notes;
+    notes[0]["endpoints"].as_array_mut().unwrap().pop();
+    assert_eq!(
+        call(
+            &router,
+            &local,
+            "PUT",
+            "/std/acl/permissions?name=notes",
+            Some(notes),
+            true
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(catalog(&router, &local).await, original);
     let replacement = json!([{"id":"message","title":"Receive","endpoints":[{"method":"PUT","path":"/std/message"}]}]);
     for method in ["PUT", "DELETE"] {
         let body = (method == "PUT").then(|| replacement.clone());
