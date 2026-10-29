@@ -155,7 +155,7 @@ fn brew_archive_packages_only_host_binaries_without_business_artifacts() {
     fs::create_dir_all(source.join("src")).unwrap();
     fs::write(
         source.join("Cargo.toml"),
-        "[package]\nname = \"pishoo\"\nversion = \"0.9.0-preview.5\"\n",
+        "[package]\nname = \"pishoo\"\nversion = \"0.9.0\"\n",
     )
     .unwrap();
     executable(

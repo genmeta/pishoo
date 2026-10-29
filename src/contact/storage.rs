@@ -117,28 +117,34 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
         if count != 0 {
             return Err(fail(500, "unrecognized contact database"));
         }
-        tx.execute_batch(include_str!("sql/schema-v5.sql"))
+        tx.execute_batch(include_str!("sql/schema.sql"))
             .map_err(storage)?;
         tx.pragma_update(None, "user_version", 5).map_err(storage)?;
     } else if version == 1 {
-        tx.execute_batch(include_str!("sql/migrate-v1-to-v2.sql"))
-            .map_err(storage)?;
+        tx.execute_batch(include_str!(
+            "sql/migrations/v2_bind_contact_generation.sql"
+        ))
+        .map_err(storage)?;
         tx.pragma_update(None, "user_version", 2).map_err(storage)?;
     } else if !(2..=5).contains(&version) {
         return Err(fail(500, "unsupported contact database version"));
     }
     if version == 1 || version == 2 {
-        tx.execute_batch(include_str!("sql/migrate-v2-to-v3.sql"))
-            .map_err(storage)?;
+        tx.execute_batch(include_str!(
+            "sql/migrations/v3_rename_outbound_request.sql"
+        ))
+        .map_err(storage)?;
         tx.pragma_update(None, "user_version", 3).map_err(storage)?;
     }
     if (1..=3).contains(&version) {
-        tx.execute_batch(include_str!("sql/migrate-v3-to-v4.sql"))
-            .map_err(storage)?;
+        tx.execute_batch(include_str!(
+            "sql/migrations/v4_add_permission_snapshots.sql"
+        ))
+        .map_err(storage)?;
         tx.pragma_update(None, "user_version", 4).map_err(storage)?;
     }
     if (1..=4).contains(&version) {
-        tx.execute_batch(include_str!("sql/migrate-v4-to-v5.sql"))
+        tx.execute_batch(include_str!("sql/migrations/v5_add_review_tracking.sql"))
             .map_err(storage)?;
         tx.pragma_update(None, "user_version", 5).map_err(storage)?;
     }

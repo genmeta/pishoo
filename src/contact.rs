@@ -594,6 +594,7 @@ async fn dispatch(
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/contact/tests.rs"]
 mod tests;
 
 fn request_expiry(body: &Value) -> Result<i64, Failure> {

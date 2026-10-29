@@ -303,7 +303,7 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                 .as_str()
                 .ok_or_else(|| Error::InvalidConfig("missing recovery facts".into()))?;
             let current: String = tx.query_row(
-                include_str!("../package/sql/registration-facts-v3.sql"),
+                include_str!("../package/sql/compat/v3/registration_facts.sql"),
                 [short],
                 |r| r.get(0),
             )?;

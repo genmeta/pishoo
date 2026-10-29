@@ -29,10 +29,8 @@ pub async fn run() -> Result<()> {
         DhttpHome::load(dhttp_home::HomeScope::Global)
             .map_err(|e| Error::InvalidConfig(e.to_string()))?
     } else {
-        DhttpHome::for_user_home_dir(
-            dirs::home_dir()
-                .ok_or_else(|| Error::InvalidConfig("cannot locate user home directory".into()))?,
-        )
+        DhttpHome::load(dhttp_home::HomeScope::User)
+            .map_err(|e| Error::InvalidConfig(e.to_string()))?
     };
     let runtime = Arc::new(WasmRuntime::new()?);
     let mdns = dns::install()?;

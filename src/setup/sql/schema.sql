@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS setting (
+    key TEXT PRIMARY KEY NOT NULL,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS proxy_location (
+    location TEXT PRIMARY KEY NOT NULL,
+    proxy_pass TEXT NOT NULL
+);

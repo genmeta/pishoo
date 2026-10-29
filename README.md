@@ -30,7 +30,7 @@ and WASM components. See the [Pishoo documentation](https://docs.dhttp.net/en/do
 
 ### Local development build
 
-Rust 1.96 or newer is required by Wasmtime 49. Dependencies are resolved from Cargo.lock, including the crates.io release of daccess 0.2.0; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
+Dependencies are resolved from Cargo.lock, including the crates.io release of daccess 0.2.0; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
 
 ```sh
 git clone --branch release/0.9.0 https://github.com/genmeta/pishoo.git
@@ -44,7 +44,7 @@ The host build is independent of frontend tooling. Business products live in six
 
 ### Package releases
 
-New `.waz` releases are standard ZIP archives with a signed JSON manifest, runtime files and optional README.md/CHANGELOG.md. See [WAZ v1](WAZ.md). Publication and installation reject legacy WEBC releases; rebuild application packages and update both registry and host readers before rollout. Existing installations using the current WASM/App directory layout and private data are retained. Legacy archive layouts require explicit reinstallation. Stored releases are not converted or re-signed.
+New `.waz` releases are standard ZIP archives with a signed JSON manifest, runtime files and optional README.md/CHANGELOG.md. See [WAZ v1](WAZ.md). Publication and installation reject legacy WEBC releases; rebuild application packages and update both registry and host readers before rollout. Existing installed resources and private data are retained. This preparation does not migrate, delete or re-sign stored releases.
 
 ### Install Pishoo
 
@@ -59,7 +59,7 @@ wget -qO- https://download.dhttp.net/ppa/key/public.key | gpg --dearmor | sudo t
 sudo tee /etc/apt/sources.list.d/genmeta.sources > /dev/null <<'EOF'
 Types: deb
 URIs: https://download.dhttp.net/ppa/genmeta
-Suites: stable
+Suites: stable preview
 Components: main
 Signed-By: /etc/apt/keyrings/genmeta.gpg
 EOF
@@ -84,8 +84,8 @@ uses `DHTTP_HOME`. No `dhttp` group membership is required.
 #### macOS
 
 ```sh
-brew tap genmeta/stable https://github.com/genmeta/homebrew-stable
-brew trust genmeta/stable
+brew tap genmeta/preview https://github.com/genmeta/homebrew-preview
+brew trust genmeta/preview
 brew update
 brew install pishoo gmutils
 ```
@@ -136,11 +136,11 @@ validated and committed together at the exact versions declared by the new packa
 matching loaded dependencies are reused. Conflicts with other installed applications
 reject the update, and failures restore the previous installation. Same-author API
 and capability changes preserve existing ACL rules and private data. See the
-[0.9.0 release notes](CHANGELOG.md#090---2026-10-29).
+[preview.5 release notes](CHANGELOG.md#090-preview5---2026-10-23).
 
 ### Configuration
 
-Database SQL files live beside their owning modules in [contact/sql](src/contact/sql/) and [package/sql](src/package/sql/), with schema versions and migration source/target versions in their filenames.
+Database SQL files stay with their owning modules (`src/package/sql/`, `src/contact/sql/`, `src/setup/sql/`). See the [SQL layout and naming rules](docs/sql.md). Test-only historical schemas remain in `tests/fixtures/`.
 
 Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's home. Listening is stored in `<identity>/.volume/sys/setting/database` as the `setting` key `listen`; an absent key keeps the identity stopped across discovery and restarts. `genmeta listen --id NAME internal` opts in, `all` selects both internal and external scopes, and `genmeta listen --id NAME off` deletes the key after confirmation. Proxy rows use `proxy_location`. Legacy `db/config.db` is preserved but ignored. Current-path setting v1/v2 directories, including SQLite sidecars, are archived before fresh v3 initialization; old listener and proxy settings are not migrated. Valid v3 settings are retained. Endpoint and shared Network lifetimes are unchanged. See [Review implementation](REVIEW-IMPLEMENTATION-2026-10-21.md).
 
@@ -182,11 +182,13 @@ This diagnostic assumes an installed Lib published by `std.dhttp.net` declaring 
 
 ### Testing
 
-The root Cargo package builds only the host. Private unit tests use ordinary
-`mod tests` modules beside the implementation in `src/`; `tests/` holds CLI
-integration tests, WASM fixtures and opt-in scripts. Diagnostic binaries have an
-independent, unpublished manifest at `tests/tools/Cargo.toml` and are not host
-example targets. SDK/WIT and release tooling remain in `wit/` and `xtask/`.
+The root Cargo package builds only the host. Private unit tests live in
+`tests/unit/`, with shared test-only helpers in `tests/common/`. Production `src/`
+contains only cfg-gated test module declarations, reexports and injection hooks.
+`tests/` also holds CLI integration tests, WASM fixtures and opt-in scripts.
+Diagnostic binaries have an independent, unpublished manifest at
+`tests/tools/Cargo.toml` and are not host example targets. SDK/WIT and release
+tooling remain in `wit/` and `xtask/`. See [test layout](docs/testing-layout.md).
 
 Run the normal Rust checks from a release checkout with its registry lockfile:
 
@@ -298,3 +300,21 @@ are logged and retried without stopping healthy identities. Identities with old 
 empty host configuration get fresh defaults; credentials alone do not enable hosting.
 Unsupported future schemas, corrupt databases and filesystem errors are reported
 without overwriting those files or terminating the whole host.
+
+Developer-signed package installation requires Pishoo 0.9.0 or later.
+The host independently checks the whole exact dependency closure, signed
+Registry publication receipts and independently distributed issuer CRLs.
+See [developer installation policy](docs/developer-install-policy.md) for the
+schema migration, structured errors and offline trust configuration. Historical
+compliant versions do not require the author to keep paying a current annual
+subscription. This source update does not publish replacement official packages
+or switch the Workspace bootstrap default.
+
+Debug sandbox builds may set PISHOO_REGISTRY_NAME and PISHOO_REGISTRY_OWNER_HASH
+at compile time together with an isolated DHTTP_ROOT_CA_PEM and target directory.
+Release builds reject either Registry override, even if its value is empty.
+The official Registry pins are used when no override is supplied; setting these
+variables when running an already built executable does not change its pins.
+Pishoo startup and logging honor DHTTP_HOME. Registry supports REGISTRY_SCOPE=internal
+with local mDNS discovery, or REGISTRY_SCOPE=loopback for explicit localhost peers;
+the default scope remains external.

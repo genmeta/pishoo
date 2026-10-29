@@ -7,13 +7,12 @@ use std::{
 
 use dhttp_home::identity::IdentityProfile;
 
-#[cfg(test)]
-use crate::sandbox::WasmRuntime;
 use crate::{Error, Result, sandbox::Sandbox};
 
 mod files;
 mod format;
 mod manifest;
+mod signing;
 mod store;
 
 pub(crate) use files::{
@@ -23,7 +22,15 @@ pub(crate) use files::{
 pub(crate) use files::{
     install_app, install_lib, install_package, installed_libs, remove_app, remove_lib,
 };
-pub(crate) use format::{PackageFiles, package_metadata, package_openapi, read_package};
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "Preserve the frozen current-time package inspection seam."
+    )
+)]
+pub(crate) use format::read_package;
+pub(crate) use format::{PackageFiles, package_metadata, package_openapi};
 pub use manifest::{validate_lib, validate_openapi};
 pub(crate) use store::install_store_package;
 #[cfg(test)]
@@ -65,7 +72,7 @@ fn lib_metadata(package: &PackageFiles, id: Option<&str>) -> serde_json::Value {
             format!("/{}", identity.rsplit('/').next().unwrap())
         };
         let openapi: oas3::OpenApiV3Spec = match package_openapi(package).and_then(|bytes| {
-            serde_json::from_slice(&bytes)
+            serde_json::from_slice(bytes)
                 .map_err(|error| Error::InvalidComponent(error.to_string()))
         }) {
             Ok(openapi) => openapi,
@@ -93,16 +100,6 @@ fn lib_metadata(package: &PackageFiles, id: Option<&str>) -> serde_json::Value {
         value["id"] = id.into();
     }
     value
-}
-
-#[cfg(test)]
-pub(crate) fn check_lib(bytes: &[u8], runtime: &WasmRuntime) -> Result<oas3::OpenApiV3Spec> {
-    let package = read_package(bytes)?;
-    let openapi = validate_openapi(package_openapi(&package)?)?;
-    if let Some(backend) = package.get("backend.wasm") {
-        runtime.compile(backend)?;
-    }
-    Ok(openapi)
 }
 
 // Installation metadata belongs to config.db. Neither payload availability nor
@@ -147,6 +144,12 @@ pub(crate) fn pkg_management_router(
             let mut response = pkg_management_request(profile, endpoint, sandbox, request)
                 .await
                 .unwrap_or_else(|error| {
+                    if let Error::PackagePolicy { code, status } = &error {
+                        return (*status, axum::Json(serde_json::json!({"error":{"code":code,"retryable":false}}))).into_response();
+                    }
+                    if matches!(error, Error::SigningStatusUnavailable) {
+                        return (http::StatusCode::SERVICE_UNAVAILABLE, [(http::header::RETRY_AFTER,"30")], axum::Json(serde_json::json!({"error":{"code":"signing_status_unavailable","retryable":true}}))).into_response();
+                    }
                     let status = match &error {
                         Error::InvalidComponent(_) => http::StatusCode::BAD_REQUEST,
                         Error::Io(io) if io.kind() == std::io::ErrorKind::InvalidInput => {
@@ -167,6 +170,9 @@ pub(crate) fn pkg_management_router(
             response
                 .headers_mut()
                 .insert("supported-versions", "v1".parse().unwrap());
+            response
+                .headers_mut()
+                .insert("pishoo-version", env!("CARGO_PKG_VERSION").parse().unwrap());
             response
         }
     };
@@ -444,4 +450,11 @@ async fn pkg_management_request(
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/package/tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "../tests/common/package.rs"]
+mod test_support;
+#[cfg(test)]
+pub(crate) use test_support::check_lib;

@@ -9,6 +9,7 @@ mod server;
 mod setup;
 
 #[cfg(test)]
+#[path = "../tests/common/test_support.rs"]
 mod test_support;
 
 pub use error::Error;

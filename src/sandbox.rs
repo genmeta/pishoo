@@ -406,4 +406,5 @@ fn reject_api(error: Error) -> axum::response::Response {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/sandbox/tests.rs"]
 pub(crate) mod tests;

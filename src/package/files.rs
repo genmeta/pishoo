@@ -4,13 +4,13 @@
 use std::os::unix::fs::MetadataExt;
 
 use dhttp_home::identity::IdentityProfile;
+use rusqlite::OptionalExtension;
 
-#[cfg(test)]
-use super::{WasmRuntime, lib_metadata};
-use super::{package_metadata, read_package};
+use super::package_metadata;
 use crate::{Error, Result};
 
 #[cfg(test)]
+#[path = "../../tests/unit/package/files/tests.rs"]
 mod tests;
 
 fn child_dir(parent: &std::fs::File, name: &std::ffi::OsStr) -> Result<std::fs::File> {
@@ -227,7 +227,7 @@ fn migrate_registration(conn: &mut rusqlite::Connection) -> Result<()> {
         tx.execute_batch(
             "ALTER TABLE acl.lib_capability_operation RENAME TO pishoo_legacy_operation",
         )?;
-        tx.execute_batch(include_str!("sql/schema-v3.sql"))?;
+        tx.execute_batch(include_str!("sql/compat/v3/schema.sql"))?;
         tx.execute_batch("INSERT INTO acl.lib_capability_operation SELECT * FROM acl.pishoo_legacy_operation; DROP TABLE acl.pishoo_legacy_operation;")?;
     }
 
@@ -614,6 +614,21 @@ fn save_registration(
     check_name(conn, id, "pkg")?;
     let name = id.rsplit('/').next().unwrap();
     let author = id.split_once('/').map(|(author, _)| author);
+    let previous_owner: Option<Option<String>> = conn
+        .query_row(
+            "SELECT author_owner_hash FROM package WHERE name=?1",
+            [name],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(Some(owner)) = previous_owner
+        && api["author_owner_hash"].as_str() != Some(&owner)
+    {
+        return Err(super::signing::policy(
+            "publisher_ownership_conflict",
+            http::StatusCode::CONFLICT,
+        ));
+    }
     let required = conn.prepare(
         "SELECT CASE WHEN p.author IS NULL THEN p.name ELSE p.author||'/'||p.name END,d.version FROM package_dependency d JOIN package p ON p.name=d.package_name WHERE d.dependency_name=?1 AND d.version<>?2 ORDER BY p.name",
     )?.query_map(rusqlite::params![name, api["version"].as_str().unwrap()], |r| {
@@ -628,10 +643,10 @@ fn save_registration(
             ),
         )));
     }
-    conn.execute("INSERT INTO package(name,author,version,title,description,license,repository,installed_at,upgraded_at,has_lib,has_app)
-        VALUES(?1,?2,?3,?4,?5,?6,?7,unixepoch(),NULL,?8,?9) ON CONFLICT(name) DO UPDATE SET author=excluded.author,version=excluded.version,title=excluded.title,
-        description=excluded.description,license=excluded.license,repository=excluded.repository,upgraded_at=unixepoch(),has_lib=excluded.has_lib,has_app=excluded.has_app",
-        rusqlite::params![name,author,api["version"].as_str(),api["title"].as_str(),api["description"].as_str(),api["license"].as_str(),api["repository"].as_str(),api["has_lib"].as_bool().unwrap(),api["has_app"].as_bool().unwrap()])?;
+    conn.execute("INSERT INTO package(name,author,version,title,description,license,repository,installed_at,upgraded_at,has_lib,has_app,author_owner_hash,package_sha256,signer_leaf_fingerprint_sha256)
+        VALUES(?1,?2,?3,?4,?5,?6,?7,unixepoch(),NULL,?8,?9,?10,?11,?12) ON CONFLICT(name) DO UPDATE SET author=excluded.author,version=excluded.version,title=excluded.title,
+        description=excluded.description,license=excluded.license,repository=excluded.repository,upgraded_at=unixepoch(),has_lib=excluded.has_lib,has_app=excluded.has_app,author_owner_hash=excluded.author_owner_hash,package_sha256=excluded.package_sha256,signer_leaf_fingerprint_sha256=excluded.signer_leaf_fingerprint_sha256",
+        rusqlite::params![name,author,api["version"].as_str(),api["title"].as_str(),api["description"].as_str(),api["license"].as_str(),api["repository"].as_str(),api["has_lib"].as_bool().unwrap(),api["has_app"].as_bool().unwrap(),api["author_owner_hash"].as_str(),api["package_sha256"].as_str(),api["signer_leaf_fingerprint_sha256"].as_str()])?;
     conn.execute(
         "DELETE FROM package_dependency WHERE package_name=?1",
         [name],
@@ -771,8 +786,12 @@ fn expanded_file(dir: &std::fs::File, path: &str) -> Result<std::fs::File> {
     Err(expanded_error())
 }
 
-fn write_expanded(dir: &std::fs::File, bytes: &[u8], id: &str, kind: &str) -> Result<()> {
-    let package = read_package(bytes)?;
+fn write_expanded(
+    dir: &std::fs::File,
+    package: &super::PackageFiles,
+    id: &str,
+    kind: &str,
+) -> Result<()> {
     if kind == "lib" {
         write_component(
             dir,
@@ -780,7 +799,7 @@ fn write_expanded(dir: &std::fs::File, bytes: &[u8], id: &str, kind: &str) -> Re
             package.get("backend.wasm").ok_or_else(expanded_error)?,
         )?;
     } else {
-        for (path, data) in &package {
+        for (path, data) in package {
             let Some(relative) = path.strip_prefix("public/") else {
                 continue;
             };
@@ -855,11 +874,11 @@ fn registered_metadata(
     id: &str,
 ) -> Result<serde_json::Value> {
     use rusqlite::OptionalExtension;
-    let mut value = conn.query_row("SELECT name,author,version,title,description,license,repository,installed_at,upgraded_at,has_lib,has_app FROM package WHERE (CASE WHEN author IS NULL THEN name ELSE author||'/'||name END)=?1", [id], |r| {
+    let mut value = conn.query_row("SELECT name,author,version,title,description,license,repository,installed_at,upgraded_at,has_lib,has_app,author_owner_hash,package_sha256,signer_leaf_fingerprint_sha256 FROM package WHERE (CASE WHEN author IS NULL THEN name ELSE author||'/'||name END)=?1", [id], |r| {
         let name: String = r.get(0)?;
         Ok(serde_json::json!({"id":id,"name":name,"author":r.get::<_,Option<String>>(1)?,"version":r.get::<_,String>(2)?,
             "title":r.get::<_,Option<String>>(3)?.unwrap_or(name),"description":r.get::<_,Option<String>>(4)?,"license":r.get::<_,Option<String>>(5)?,"repository":r.get::<_,Option<String>>(6)?,
-            "installed_at":r.get::<_,Option<i64>>(7)?,"upgraded_at":r.get::<_,Option<i64>>(8)?,"has_lib":r.get::<_,bool>(9)?,"has_app":r.get::<_,bool>(10)?,"endpoints":[]}))
+            "installed_at":r.get::<_,Option<i64>>(7)?,"upgraded_at":r.get::<_,Option<i64>>(8)?,"has_lib":r.get::<_,bool>(9)?,"has_app":r.get::<_,bool>(10)?,"author_owner_hash":r.get::<_,Option<String>>(11)?,"package_sha256":r.get::<_,Option<String>>(12)?,"signer_leaf_fingerprint_sha256":r.get::<_,Option<String>>(13)?,"endpoints":[]}))
     }).optional()?.ok_or(Error::RouteNotFound)?;
     let dependencies = conn.prepare("SELECT p.author,p.name,d.version FROM package_dependency d JOIN package p ON p.name=d.dependency_name WHERE d.package_name=?1 ORDER BY p.author,p.name")?
         .query_map([id.rsplit('/').next().unwrap()], |r| Ok(serde_json::json!({"publisher":r.get::<_,Option<String>>(0)?,"name":r.get::<_,String>(1)?,"version":r.get::<_,String>(2)?})))?
@@ -884,27 +903,6 @@ pub(crate) fn installed_packages(
         .collect::<Result<Vec<_>>>()?;
     if id.is_some() {
         values.pop().ok_or(Error::RouteNotFound)
-    } else {
-        Ok(values.into())
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn installed_libs(
-    profile: &IdentityProfile,
-    id: Option<&str>,
-) -> Result<serde_json::Value> {
-    if let Some(id) = id {
-        valid_id(id)?;
-    }
-    let mut database = installation_database(profile, false)?;
-    let conn = database.transaction()?;
-    let mut values = Vec::new();
-    for (registered, _) in registered_packages(&conn, "lib", id)? {
-        values.push(registered_metadata(&conn, "lib", &registered)?);
-    }
-    if id.is_some() {
-        Ok(values.pop().unwrap())
     } else {
         Ok(values.into())
     }
@@ -952,7 +950,7 @@ fn write_component(dir: &std::fs::File, name: &str, bytes: &[u8]) -> Result<()> 
 /// root last. The caller holds the existing Sandbox write lock throughout.
 pub(super) fn install_packages(
     profile: &IdentityProfile,
-    packages: &[(String, Vec<u8>)],
+    packages: &[(String, Vec<u8>, serde_json::Value)],
     sandbox: &mut super::Sandbox,
 ) -> Result<()> {
     use std::sync::Arc;
@@ -973,7 +971,7 @@ pub(super) fn install_packages(
     let tx = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let mut names = std::collections::HashSet::new();
     let mut changed = Vec::new();
-    for (index, (id, bytes)) in packages.iter().enumerate() {
+    for (index, (id, bytes, proof)) in packages.iter().enumerate() {
         valid_id(id)?;
         let short = id.rsplit('/').next().unwrap();
         if short == "std" || !names.insert(short) {
@@ -981,8 +979,29 @@ pub(super) fn install_packages(
                 "reserved or duplicate package name".into(),
             ));
         }
-        let package = read_package(bytes)?;
-        let metadata = package_metadata(&package)?;
+        let (author, name) = id.split_once('/').ok_or_else(|| {
+            super::signing::policy("signing_identity_mismatch", http::StatusCode::FORBIDDEN)
+        })?;
+        let version = proof["version"].as_str().ok_or_else(|| {
+            super::signing::policy(
+                "package_policy_upgrade_required",
+                http::StatusCode::UNPROCESSABLE_ENTITY,
+            )
+        })?;
+        super::store::verify_release(bytes, proof, author, name, version)?;
+        let at = proof["signature"]["verified_at"].as_i64().unwrap();
+        let package = super::format::read_package_at(bytes, at)?;
+        let facts = super::signing::facts(&package, author, at)?;
+        super::signing::check_revocations(
+            &package,
+            &profile.join("trust/code-signing"),
+            &proof["revocation_list"],
+            chrono::Utc::now().timestamp(),
+        )?;
+        let mut metadata = package_metadata(&package)?;
+        metadata["author_owner_hash"] = facts["author_owner_hash"].clone();
+        metadata["package_sha256"] = proof["package_sha256"].clone();
+        metadata["signer_leaf_fingerprint_sha256"] = facts["leaf_fingerprint_sha256"].clone();
         check_resource_identity(&metadata, id)?;
         check_name(&tx, id, "pkg")?;
         let current = match registered_metadata(&tx, "pkg", id) {
@@ -990,13 +1009,61 @@ pub(super) fn install_packages(
             Err(Error::RouteNotFound) => None,
             Err(error) => return Err(error),
         };
+        if let Some(current) = &current {
+            let original_owner = if current["author_owner_hash"].is_null() {
+                let previous = &proof["_previous_release"];
+                if previous["id"] != *id
+                    || previous["author"] != author
+                    || previous["name"] != name
+                    || previous["version"] != current["version"]
+                    || previous["signature"]["purpose"] != "code_signing"
+                {
+                    return Err(super::signing::policy(
+                        "publisher_ownership_conflict",
+                        http::StatusCode::CONFLICT,
+                    ));
+                }
+                let previous_at =
+                    previous["signature"]["verified_at"]
+                        .as_i64()
+                        .ok_or_else(|| {
+                            super::signing::policy(
+                                "publisher_ownership_conflict",
+                                http::StatusCode::CONFLICT,
+                            )
+                        })?;
+                super::signing::verify_receipt(previous, previous_at)?;
+                &previous["author_owner_hash"]
+            } else {
+                &current["author_owner_hash"]
+            };
+            if original_owner != &metadata["author_owner_hash"] {
+                return Err(super::signing::policy(
+                    "publisher_ownership_conflict",
+                    http::StatusCode::CONFLICT,
+                ));
+            }
+            if current["version"] == metadata["version"]
+                && !current["package_sha256"].is_null()
+                && current["package_sha256"] != metadata["package_sha256"]
+            {
+                return Err(super::signing::policy(
+                    "package_version_conflict",
+                    http::StatusCode::CONFLICT,
+                ));
+            }
+        }
         let same_version = current
             .as_ref()
             .is_some_and(|v| v["version"] == metadata["version"]);
         let reused = index + 1 != packages.len()
             && same_version
             && current.as_ref().is_some_and(|v| {
-                v["has_lib"] == metadata["has_lib"] && v["has_app"] == metadata["has_app"]
+                v["package_sha256"] == metadata["package_sha256"]
+                    && v["signer_leaf_fingerprint_sha256"]
+                        == metadata["signer_leaf_fingerprint_sha256"]
+                    && v["has_lib"] == metadata["has_lib"]
+                    && v["has_app"] == metadata["has_app"]
             })
             && (metadata["has_lib"] != true
                 || sandbox.libs.get(id).is_some_and(|lib| {
@@ -1042,7 +1109,7 @@ pub(super) fn install_packages(
     let mut stages = Vec::new();
     let mut libs = std::collections::HashMap::new();
     let mut apps = std::collections::HashMap::new();
-    for (id, bytes, _, metadata) in &changed {
+    for (id, _, package, metadata) in &changed {
         let short = id.rsplit('/').next().unwrap();
         mkdirat(&stage, short, Mode::from_raw_mode(0o700)).map_err(layout_error)?;
         let package_stage = child_dir(&stage, std::ffi::OsStr::new(short))?;
@@ -1060,7 +1127,7 @@ pub(super) fn install_packages(
             .map_err(layout_error)?;
             let dir = child_dir(&package_stage, std::ffi::OsStr::new(&candidate))?;
             inherit_owner(&dir, &parent)?;
-            write_expanded(&dir, bytes, id, kind)?;
+            write_expanded(&dir, package, id, kind)?;
             let payload = if kind == "lib" {
                 expanded_file(&dir, &format!("{short}.wasm"))?
             } else {
@@ -1105,6 +1172,17 @@ pub(super) fn install_packages(
         .zip(&stages)
         .map(|((id, _, _, _), dir)| (id.as_str(), id.rsplit('/').next().unwrap(), dir))
         .collect::<Vec<_>>();
+    // Recheck cached evidence locally after compilation; never perform network I/O under transaction locks.
+    for (_, bytes, proof) in packages {
+        let at = proof["signature"]["verified_at"].as_i64().unwrap();
+        let package = super::format::read_package_at(bytes, at)?;
+        super::signing::check_revocations(
+            &package,
+            &profile.join("trust/code-signing"),
+            &proof["revocation_list"],
+            chrono::Utc::now().timestamp(),
+        )?;
+    }
     scopeguard::ScopeGuard::into_inner(cleanup);
     commit_packages_files(profile, &entries, &parent, &stage, &name, tx)?;
     // Everything below is infallible. New requests see the whole new graph;
@@ -1116,65 +1194,6 @@ pub(super) fn install_packages(
     sandbox.libs.extend(libs);
     sandbox.apps.extend(apps);
     Ok(())
-}
-
-// Isolated acceptance still installs individual signed files directly. Online
-// installation always uses the complete dependency transaction above.
-#[cfg(test)]
-pub(crate) fn install_package(
-    profile: &IdentityProfile,
-    id: &str,
-    bytes: &[u8],
-    runtime: &WasmRuntime,
-) -> Result<serde_json::Value> {
-    use rustix::fs::{FlockOperation, Mode, flock, mkdirat};
-    valid_id(id)?;
-    if id.rsplit('/').next() == Some("std") {
-        return Err(Error::BadRequest("std is reserved".into()));
-    }
-    let parent = initialized_profile(profile)?;
-    flock(&parent, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
-    let package = read_package(bytes)?;
-    let metadata = package_metadata(&package)?;
-    check_resource_identity(&metadata, id)?;
-    if let Some(backend) = package.get("backend.wasm") {
-        runtime.compile(backend)?;
-    }
-    let mut database = installation_database(profile, true)?;
-    check_name(&database, id, "pkg")?;
-    let same_version = registered_packages(&database, "pkg", Some(id))
-        .ok()
-        .and_then(|r| r.first().map(|r| r.1.clone()))
-        .as_deref()
-        == metadata["version"].as_str();
-    let name = temporary_name()?;
-    mkdirat(&parent, &name, Mode::from_raw_mode(0o700)).map_err(layout_error)?;
-    let cleanup_dir = cap_std::fs::Dir::from_std_file(parent.try_clone()?);
-    let cleanup = scopeguard::guard((), |_| {
-        let _ = cleanup_dir.remove_dir_all(&name);
-    });
-    let stage = child_dir(&parent, std::ffi::OsStr::new(&name))?;
-    inherit_owner(&stage, &parent)?;
-    for kind in ["lib", "app"] {
-        if metadata[format!("has_{kind}")] != true {
-            continue;
-        }
-        mkdirat(&stage, format!("new-{kind}"), Mode::from_raw_mode(0o700)).map_err(layout_error)?;
-        let dir = child_dir(&stage, std::ffi::OsStr::new(&format!("new-{kind}")))?;
-        inherit_owner(&dir, &parent)?;
-        write_expanded(&dir, bytes, id, kind)?;
-    }
-    let tx = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    for kind in ["lib", "app"] {
-        if metadata[format!("has_{kind}")] == true {
-            check_routes(profile, &tx, id, kind, &package)?;
-            check_existing_rules(profile, &tx, id, kind, &package, same_version)?;
-        }
-    }
-    save_registration(&tx, id, &metadata, &package)?;
-    scopeguard::ScopeGuard::into_inner(cleanup);
-    commit_package_files(profile, id, &parent, &stage, &name, tx)?;
-    Ok(lib_metadata(&package, Some(id)))
 }
 
 // Single-package installation and removal use the same commit/recovery path.
@@ -1266,11 +1285,10 @@ fn commit_packages_files(
             resources.push(serde_json::json!({"kind":kind,"old":old,"new":new}));
             targets.push((package_stage, kind, target, leaf, old, new));
         }
-        let facts: String = tx.query_row(
-            include_str!("sql/registration-facts-v3.sql"),
-            [short],
-            |r| r.get(0),
-        )?;
+        let facts: String =
+            tx.query_row(include_str!("sql/registration_facts.sql"), [short], |r| {
+                r.get(0)
+            })?;
         packages.push(
             serde_json::json!({"id":id,"directory":directory,"resources":resources,"facts":facts}),
         );
@@ -1409,32 +1427,6 @@ pub(crate) fn remove_package(profile: &IdentityProfile, id: &str) -> Result<()> 
     commit_package_files(profile, id, &parent, &stage, &name, tx)
 }
 
-#[cfg(test)]
-pub(crate) fn install_lib(
-    profile: &IdentityProfile,
-    id: &str,
-    bytes: &[u8],
-    runtime: &WasmRuntime,
-) -> Result<serde_json::Value> {
-    install_package(profile, id, bytes, runtime)
-}
-#[cfg(test)]
-pub(crate) fn install_app(
-    profile: &IdentityProfile,
-    id: &str,
-    bytes: &[u8],
-) -> Result<serde_json::Value> {
-    install_package(profile, id, bytes, &WasmRuntime::new()?)
-}
-#[cfg(test)]
-pub(crate) fn remove_lib(profile: &IdentityProfile, id: &str) -> Result<()> {
-    remove_package(profile, id)
-}
-#[cfg(test)]
-pub(crate) fn remove_app(profile: &IdentityProfile, id: &str) -> Result<()> {
-    remove_package(profile, id)
-}
-
 /// Open registered frontend directories without loading their contents.
 pub(crate) fn installed_apps(
     profile: &IdentityProfile,
@@ -1502,3 +1494,11 @@ pub(crate) fn app_file(root: &std::fs::File, path: &str) -> Result<std::fs::File
     }
     Err(Error::RouteNotFound)
 }
+
+#[cfg(test)]
+#[path = "../../tests/common/package_files.rs"]
+mod test_support;
+#[cfg(test)]
+pub(crate) use test_support::{
+    install_app, install_lib, install_package, installed_libs, remove_app, remove_lib,
+};

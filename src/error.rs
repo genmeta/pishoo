@@ -6,6 +6,11 @@ pub enum Error {
     InvalidConfig(String),
     InvalidComponent(String),
     InvalidIdentity(String),
+    PackagePolicy {
+        code: &'static str,
+        status: StatusCode,
+    },
+    SigningStatusUnavailable,
     IdentityMismatch,
     MissingHandshake,
     RouteNotFound,
@@ -27,6 +32,8 @@ pub enum Error {
 impl Error {
     pub(crate) fn status(&self) -> StatusCode {
         match self {
+            Self::PackagePolicy { status, .. } => *status,
+            Self::SigningStatusUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::IdentityMismatch => StatusCode::MISDIRECTED_REQUEST,
             Self::RouteNotFound => StatusCode::NOT_FOUND,
@@ -45,6 +52,8 @@ impl Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::PackagePolicy { code, .. } => f.write_str(code),
+            Self::SigningStatusUnavailable => f.write_str("signing_status_unavailable"),
             Self::BadRequest(s)
             | Self::InvalidConfig(s)
             | Self::InvalidComponent(s)

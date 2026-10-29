@@ -180,4 +180,5 @@ pub(crate) async fn publish(
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/dns/tests.rs"]
 mod tests;

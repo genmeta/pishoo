@@ -20,9 +20,7 @@ async fn main() {
     let home = if multiuser {
         dhttp_home::DhttpHome::load(dhttp_home::HomeScope::Global).map_err(std::io::Error::other)
     } else {
-        dirs::home_dir()
-            .map(dhttp_home::DhttpHome::for_user_home_dir)
-            .ok_or_else(|| std::io::Error::other("cannot locate user home directory"))
+        dhttp_home::DhttpHome::load(dhttp_home::HomeScope::User).map_err(std::io::Error::other)
     };
     let subscriber = home.and_then(|home| logging(&home));
     match subscriber {
@@ -195,4 +193,5 @@ fn reload(args: &[std::ffi::OsString]) -> Result<(), pishoo::Error> {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/cli.rs"]
 mod tests;

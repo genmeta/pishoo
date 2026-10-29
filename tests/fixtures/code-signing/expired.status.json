@@ -1,0 +1,19 @@
+{
+  "domain": "developer.dhttp.net",
+  "purpose": "code_signing",
+  "kind": "primary",
+  "sequence": 5,
+  "ski": "5:0:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "issuer_id": "f93deceb020423c4e102910dcfb14ae358309cea6c5d8faa64d8ede5fd1b5687",
+  "serial_number": "1005",
+  "fingerprint_sha256": "d4042108f318a7ef9598010bb0da5a5d1cce1c33624d58b61c3f92fc714992e4",
+  "cert_pem": "-----BEGIN CERTIFICATE-----\nMIICMzCCAbigAwIBAgICEAUwCgYIKoZIzj0EAwMwIDEeMBwGA1UEAwwVVEVTVCBP\nTkxZIGNvZGUtaXNzdWVyMB4XDTI0MDEwMjAwMDAwMFoXDTI0MTIzMTAwMDAwMFow\nHjEcMBoGA1UEAwwTZGV2ZWxvcGVyLmRodHRwLm5ldDB2MBAGByqGSM49AgEGBSuB\nBAAiA2IABE4LIKptULPiZ6y9GogvUwTIugWiXwlYtmWwb6RLeAfUnA7wvjbUW9Ny\nWH9XjDXSQ6QFbtRtxWiIT1ceZlnSC0fFUu40m3lmJFOETAI+PaKYQX1k6selNcng\n6ToGst4zoqOBxjCBwzAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIHgDAeBgNV\nHREEFzAVghNkZXZlbG9wZXIuZGh0dHAubmV0ME0GA1UdDgRGBEQ1OjA6YWFhYWFh\nYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh\nYWFhYWFhYWFhYTAfBgNVHSMEGDAWgBSqpw2Zf01GkdpzEUkXJ44PBh7NHDATBgNV\nHSUEDDAKBggrBgEFBQcDAzAKBggqhkjOPQQDAwNpADBmAjEAq5YexgS5ilDxdXLE\ncJsjRhqasWHJTX1H9ikrQBBQeUvJtF3G/yOi2WKHE5bd6LqBAjEAhsVaSnIaMsGx\nQCD+oNy/UL4PYvIh5F8biY6bVtUrN6b92XY96SyYijCnG3Uz6AAr\n-----END CERTIFICATE-----\n",
+  "valid_not_before": 1704153600,
+  "valid_not_after": 1735603200,
+  "revoked_at": null,
+  "revocation_reason": null,
+  "checked_at": 1793183948,
+  "revocation_status": "good",
+  "issuer_status": "trusted",
+  "publication_allowed": false
+}

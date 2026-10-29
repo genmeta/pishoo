@@ -3429,6 +3429,7 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "rustix",
+ "rustls-webpki",
  "scopeguard",
  "sea-orm",
  "serde",

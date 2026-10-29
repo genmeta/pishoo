@@ -40,6 +40,7 @@ struct Server {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/server/tests.rs"]
 mod tests;
 
 fn dhttp_router(endpoint: dhttp::Endpoint) -> Router {

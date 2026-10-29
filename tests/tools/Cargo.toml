@@ -15,6 +15,10 @@ path = "src/client.rs"
 name = "https-upstream-server"
 path = "src/https_upstream.rs"
 
+[[bin]]
+name = "local-sandbox"
+path = "tests/support/local_sandbox.rs"
+
 [dependencies]
 pishoo = { path = "../.." }
 bytes = "1"

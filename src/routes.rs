@@ -167,4 +167,5 @@ async fn static_file(root: &std::path::Path, request: Request<AxumBody>) -> Resu
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/routes/tests.rs"]
 pub(crate) mod tests;
