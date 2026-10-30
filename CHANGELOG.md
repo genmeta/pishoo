@@ -9,6 +9,7 @@
 - Load WASM directly and read App files from disk on demand.
 - Allow permission groups to include their own App entry.
 - Upgrade Wasmtime and WASI to 49.0.4, retaining WASI P2.
+- Require Rust 1.96 or newer to build from source.
 - Move the host crate to the repository root and update build and release paths.
 
 Upgrade notes: legacy config.db is ignored; setting v1/v2 directories are archived

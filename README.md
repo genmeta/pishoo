@@ -30,7 +30,7 @@ and WASM components. See the [Pishoo documentation](https://docs.dhttp.net/en/do
 
 ### Local development build
 
-Dependencies are resolved from Cargo.lock, including the crates.io release of daccess 0.2.0; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
+Rust 1.96 or newer is required by Wasmtime 49. Dependencies are resolved from Cargo.lock, including the crates.io release of daccess 0.2.0; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
 
 ```sh
 git clone --branch release/0.9.0 https://github.com/genmeta/pishoo.git
