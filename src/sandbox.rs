@@ -28,6 +28,7 @@ pub(crate) struct Sandbox {
     pub(crate) apps: HashMap<String, (String, Arc<std::fs::File>)>,
     pub(crate) runtime: Arc<WasmRuntime>,
     pub(crate) tasks: TaskTracker,
+    pub(crate) dev_libs: HashMap<String, (std::fs::Metadata, Arc<Lib>)>,
 }
 
 pub struct WasmRuntime {
@@ -80,6 +81,7 @@ impl Sandbox {
             apps: HashMap::new(),
             runtime,
             tasks: TaskTracker::new(),
+            dev_libs: HashMap::new(),
         }
     }
 
@@ -89,6 +91,7 @@ impl Sandbox {
         self.tasks.close();
         self.libs.clear();
         self.apps.clear();
+        self.dev_libs.clear();
     }
 
     /// A timeout leaves unfinished executions owning their Store.
@@ -275,8 +278,6 @@ impl Sandbox {
                 }
                 let result =
                     tokio::task::spawn_blocking(move || -> Result<axum::response::Response> {
-                        use axum::response::IntoResponse;
-                        use http::{Method, StatusCode, header};
                         let tail = request
                             .uri()
                             .path()
@@ -292,90 +293,7 @@ impl Sandbox {
                             .find(|(id, _)| id.rsplit('/').next() == Some(name))
                             .map(|(_, app)| app)
                             .ok_or(Error::RouteNotFound)?;
-                        if !matches!(request.method(), &Method::GET | &Method::HEAD) {
-                            return Ok((
-                                StatusCode::METHOD_NOT_ALLOWED,
-                                [(header::ALLOW, "GET, HEAD")],
-                            )
-                                .into_response());
-                        }
-                        let suffix = tail.strip_prefix(name).unwrap();
-                        if suffix.is_empty() {
-                            let location = match request.uri().query() {
-                                Some(query) => format!("{}/?{query}", request.uri().path()),
-                                None => format!("{}/", request.uri().path()),
-                            };
-                            return Ok(
-                                axum::response::Redirect::temporary(&location).into_response()
-                            );
-                        }
-                        let suffix = percent_encoding::percent_decode_str(suffix)
-                            .decode_utf8()
-                            .map_err(|_| Error::RouteNotFound)?;
-                        if suffix.contains(['\\', '\0', '%'])
-                            || suffix.split('/').any(|part| matches!(part, "." | ".."))
-                            || suffix.chars().any(|c| c.is_control())
-                        {
-                            return Err(Error::RouteNotFound);
-                        }
-                        let mut file = if suffix == "/" {
-                            "index.html".to_owned()
-                        } else {
-                            suffix.trim_start_matches('/').to_owned()
-                        };
-                        let opened = match app_file(directory, &file) {
-                            Ok(file) => file,
-                            Err(_) => {
-                                let resource = suffix
-                                    .trim_end_matches('/')
-                                    .rsplit('/')
-                                    .next()
-                                    .unwrap_or("");
-                                let asset = suffix.starts_with("/assets/")
-                                    || suffix.starts_with("/static/")
-                                    || matches!(suffix.as_ref(), "/assets" | "/static")
-                                    || resource.contains('.')
-                                    || request
-                                        .headers()
-                                        .get("sec-fetch-dest")
-                                        .and_then(|value| value.to_str().ok())
-                                        .is_some_and(|value| {
-                                            !matches!(value, "document" | "iframe" | "empty")
-                                        });
-                                if asset {
-                                    return Err(Error::RouteNotFound);
-                                }
-                                file = "index.html".to_owned();
-                                app_file(directory, &file)?
-                            }
-                        };
-                        let length = opened.metadata()?.len();
-                        drop(sandbox);
-                        http::Response::builder()
-                            .status(StatusCode::OK)
-                            .header(
-                                header::CONTENT_TYPE,
-                                mime_guess::from_path(&file)
-                                    .first_or_octet_stream()
-                                    .to_string(),
-                            )
-                            .header(header::CONTENT_LENGTH, length)
-                            .header(header::CACHE_CONTROL, "no-store")
-                            .header("x-content-type-options", "nosniff")
-                            .header("referrer-policy", "no-referrer")
-                            .header("cross-origin-resource-policy", "same-origin")
-                            .header("x-frame-options", "DENY")
-                            .body(if request.method() == Method::HEAD {
-                                axum::body::Body::empty()
-                            } else {
-                                axum::body::Body::from_stream(
-                                    tokio_util::io::ReaderStream::with_capacity(
-                                        tokio::fs::File::from_std(opened),
-                                        16 * 1024,
-                                    ),
-                                )
-                            })
-                            .map_err(Error::Http)
+                        app_response(directory, tail.strip_prefix(name).unwrap(), &request)
                     })
                     .await;
                 result
@@ -392,6 +310,91 @@ impl Sandbox {
             .route("/std/{*path}", api)
             .fallback(frontend)
     }
+}
+
+pub(crate) fn app_response(
+    directory: &std::fs::File,
+    suffix: &str,
+    request: &http::Request<axum::body::Body>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    use http::{Method, StatusCode, header};
+    if !matches!(request.method(), &Method::GET | &Method::HEAD) {
+        return Ok((
+            StatusCode::METHOD_NOT_ALLOWED,
+            [(header::ALLOW, "GET, HEAD")],
+        )
+            .into_response());
+    }
+    if suffix.is_empty() {
+        let location = match request.uri().query() {
+            Some(query) => format!("{}/?{query}", request.uri().path()),
+            None => format!("{}/", request.uri().path()),
+        };
+        return Ok(axum::response::Redirect::temporary(&location).into_response());
+    }
+    let suffix = percent_encoding::percent_decode_str(suffix)
+        .decode_utf8()
+        .map_err(|_| Error::RouteNotFound)?;
+    if suffix.contains(['\\', '\0', '%'])
+        || suffix.split('/').any(|part| matches!(part, "." | ".."))
+        || suffix.chars().any(|c| c.is_control())
+    {
+        return Err(Error::RouteNotFound);
+    }
+    let mut file = if suffix == "/" {
+        "index.html".to_owned()
+    } else {
+        suffix.trim_start_matches('/').to_owned()
+    };
+    let opened = match app_file(directory, &file) {
+        Ok(file) => file,
+        Err(_) => {
+            let resource = suffix
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("");
+            let asset = suffix.starts_with("/assets/")
+                || suffix.starts_with("/static/")
+                || matches!(suffix.as_ref(), "/assets" | "/static")
+                || resource.contains('.')
+                || request
+                    .headers()
+                    .get("sec-fetch-dest")
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| !matches!(value, "document" | "iframe" | "empty"));
+            if asset {
+                return Err(Error::RouteNotFound);
+            }
+            file = "index.html".to_owned();
+            app_file(directory, &file)?
+        }
+    };
+    let length = opened.metadata()?.len();
+    http::Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            header::CONTENT_TYPE,
+            mime_guess::from_path(&file)
+                .first_or_octet_stream()
+                .to_string(),
+        )
+        .header(header::CONTENT_LENGTH, length)
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("x-content-type-options", "nosniff")
+        .header("referrer-policy", "no-referrer")
+        .header("cross-origin-resource-policy", "same-origin")
+        .header("x-frame-options", "DENY")
+        .body(if request.method() == Method::HEAD {
+            axum::body::Body::empty()
+        } else {
+            axum::body::Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+                tokio::fs::File::from_std(opened),
+                16 * 1024,
+            ))
+        })
+        .map_err(Error::Http)
 }
 
 fn reject_api(error: Error) -> axum::response::Response {

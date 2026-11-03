@@ -36,7 +36,7 @@ pub(crate) use store::install_store_package;
 #[cfg(test)]
 pub(crate) use store::{STORE_NAME, STORE_OWNER};
 
-fn require_owner(
+pub(crate) fn require_owner(
     endpoint: &dhttp::Endpoint,
     request: &http::Request<axum::body::Body>,
 ) -> Result<()> {

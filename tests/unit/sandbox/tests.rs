@@ -36,6 +36,7 @@ pub(crate) fn api_router(sandbox: &Sandbox, endpoint: dhttp::Endpoint) -> axum::
             apps: sandbox.apps.clone(),
             runtime: sandbox.runtime.clone(),
             tasks: sandbox.tasks.clone(),
+            dev_libs: HashMap::new(),
         })),
         endpoint.clone(),
         Arc::new(access_control::AccessService::new(

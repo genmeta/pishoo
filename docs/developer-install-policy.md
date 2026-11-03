@@ -100,3 +100,20 @@ unset, identity discovery and logging use the ordinary user home. Linux root
 services use the existing global-home selection. The official release workflow
 does not supply sandbox Registry overrides. Test-root builds remain separate
 from the normal release target directory.
+
+## Unified developer certificates (2026-11-02)
+
+The active developer leaf and issuer carry serverAuth, clientAuth and codeSigning. Validators accept this exact combination and the historical codeSigning-only profile; one-sided TLS usages and unrelated EKUs remain invalid. Ordinary TLS certificates cannot sign packages. Package signatures, trusted publication receipts and independently distributed CRLs continue to be verified offline.
+
+New uploads require the authenticated TLS peer leaf and issuer to declare all three developer usages. Browsing and downloading do not require a developer identity. TLS and package certificates bind to the same canonical name and owner_hash; they need not be byte-identical after renewal. Historic codeSigning-only certificates remain usable for historic package verification, but cannot be used as TLS credentials.
+
+
+## Local development identities
+
+`jade run` uses the separate ordinary development identity described in
+[jade-run.md](jade-run.md). It publishes local files and needs no developer
+certificate, subscription, publication receipt or signing CRL for those files.
+Dependencies without a local `path` still use the formal store-install path,
+including every signature and publication-evidence check. Development data stays
+on the development identity after local code is removed. There is no shared
+skip-verification flag or development control session.

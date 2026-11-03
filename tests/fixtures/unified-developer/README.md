@@ -1,0 +1,1 @@
+Disposable test-only P-384 Root, issuer and leaf certificates. The issuer and developer leaf carry serverAuth, clientAuth and codeSigning. The partial leaf deliberately lacks clientAuth. No private keys are included in this directory.

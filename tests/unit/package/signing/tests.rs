@@ -352,3 +352,17 @@ fn expired_developer_certificates_install_only_with_an_authentic_historical_rece
         .is_err()
     );
 }
+
+#[test]
+fn unified_chain_preserves_offline_verification_and_rejects_partial_usages() {
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unified-developer");
+    let read = |name: &str| pem(&std::fs::read(fixtures.join(name)).unwrap());
+    let root = read("root.cert.pem");
+    let chain = vec![read("developer.cert.pem"), read("issuer.cert.pem")];
+    let at = chrono::Utc::now().timestamp();
+    verify_chain_with_root(&chain, "developer.dhttp.net", at, root.as_ref()).unwrap();
+    let partial = vec![read("partial.cert.pem"), read("issuer.cert.pem")];
+    assert!(verify_chain_with_root(&partial, "developer.dhttp.net", at, root.as_ref()).is_err());
+    assert!(verify_chain_with_root(&chain, "other.dhttp.net", at, root.as_ref()).is_err());
+}

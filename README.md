@@ -318,3 +318,12 @@ variables when running an already built executable does not change its pins.
 Pishoo startup and logging honor DHTTP_HOME. Registry supports REGISTRY_SCOPE=internal
 with local mDNS discovery, or REGISTRY_SCOPE=loopback for explicit localhost peers;
 the default scope remains external.
+
+
+## Local development with Jade
+
+Run an unpublished project with `jade run --id HOST` using an already running
+local Pishoo identity. Local development requires no developer certificate or
+subscription. It provides isolated test data, file watching, atomic reloads and
+cleanup when the command exits. Formal publication and installation continue to
+require signed releases. See [the local development guide](docs/jade-run.md).

@@ -77,7 +77,8 @@ fn native_router(server: &Server) -> Router {
             let sandbox = sandbox.clone();
             async move {
                 let path = request.uri().path();
-                if !path.starts_with("/std/")
+                if !endpoint.name().starts_with("dev.")
+                    && !path.starts_with("/std/")
                     && !sandbox.read().unwrap().libs.keys().any(|id| {
                         !id.starts_with("std.dhttp.net/")
                             && path
@@ -130,12 +131,11 @@ fn current_router(server: &Server) -> Router {
         server.sandbox.clone(),
         server.endpoint.clone(),
         server.access.clone(),
-        outgoing,
+        outgoing.clone(),
     );
     let sandbox = server.sandbox.clone();
-    native
-        .merge(api.clone().reset_fallback())
-        .fallback(any(move |request: Request<AxumBody>| {
+    let routes = native.merge(api.clone().reset_fallback()).fallback(any(
+        move |request: Request<AxumBody>| {
             let api = api.clone();
             let proxies = proxies.clone();
             let name = request
@@ -169,11 +169,20 @@ fn current_router(server: &Server) -> Router {
                     proxy_pass(proxies, request).await
                 }
             }
-        }))
-        .layer(axum::middleware::from_fn_with_state(
-            server.access.clone(),
-            authorize,
-        ))
+        },
+    ));
+    crate::development::router(
+        server.profile.clone(),
+        server.sandbox.clone(),
+        server.endpoint.clone(),
+        server.access.clone(),
+        outgoing,
+        routes,
+    )
+    .layer(axum::middleware::from_fn_with_state(
+        server.access.clone(),
+        authorize,
+    ))
 }
 
 fn open_access_log(profile: &IdentityProfile) -> Result<std::fs::File> {

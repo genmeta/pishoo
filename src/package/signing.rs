@@ -100,8 +100,7 @@ fn verify_chain_with_root(
             || !ku.critical
             || !eku.value.code_signing
             || eku.value.any
-            || eku.value.server_auth
-            || eku.value.client_auth
+            || (eku.value.server_auth != eku.value.client_auth)
             || eku.value.email_protection
             || eku.value.time_stamping
             || eku.value.ocsp_signing

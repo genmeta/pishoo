@@ -32,7 +32,15 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<PackageFiles> {
 }
 pub(super) fn read_package_at(bytes: &[u8], at: i64) -> Result<PackageFiles> {
     let files = waz_read(bytes).map_err(|error| invalid(&error.to_string()))?;
-    let metadata = package_metadata(&files)?;
+    let metadata = validate_contents(&files)?;
+    let chain = super::signing::certificates(&files)?;
+    super::signing::verify_chain(&chain, metadata["publisher"].as_str().unwrap(), at)?;
+    verify_signature(&files, &metadata)?;
+    Ok(files)
+}
+
+fn validate_contents(files: &PackageFiles) -> Result<Value> {
+    let metadata = package_metadata(files)?;
     if metadata["name"] == "std" {
         return Err(invalid(
             "package name conflicts with the native std namespace",
@@ -63,7 +71,7 @@ pub(super) fn read_package_at(bytes: &[u8], at: i64) -> Result<PackageFiles> {
     }
 
     if files.contains_key("backend.wasm") {
-        let raw = package_openapi(&files)?;
+        let raw = package_openapi(files)?;
         let api = super::validate_openapi(raw)?;
         if metadata["publisher"] == "std.dhttp.net"
             && api.paths.as_ref().unwrap().keys().any(|path| {
@@ -120,10 +128,7 @@ pub(super) fn read_package_at(bytes: &[u8], at: i64) -> Result<PackageFiles> {
             ));
         }
     }
-    let chain = super::signing::certificates(&files)?;
-    super::signing::verify_chain(&chain, metadata["publisher"].as_str().unwrap(), at)?;
-    verify_signature(&files, &metadata)?;
-    Ok(files)
+    Ok(metadata)
 }
 
 pub(crate) fn package_openapi(files: &PackageFiles) -> Result<&[u8]> {
