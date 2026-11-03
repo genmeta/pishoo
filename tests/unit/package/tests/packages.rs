@@ -1534,12 +1534,16 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
         )
         .await
         .unwrap();
-    // Uninstall kept the path ACL; a fresh provider cannot inherit it silently.
-    assert!(
-        install_lib(&profile, id, &bytes, &runtime)
-            .unwrap_err()
-            .to_string()
-            .contains("existing ACL")
+    // Reinstallation preserves path-based policy without blocking installation.
+    install_lib(&profile, id, &bytes, &runtime).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT effect FROM acl.access_rules WHERE api='/std/message' AND method='POST'",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        "allow"
     );
     access
         .remove_policy(

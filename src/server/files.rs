@@ -269,6 +269,13 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
         let mut db =
             crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let tx = db.transaction()?;
+        // Recovery runs before schema initialization, so both the database and
+        // a journal left by the previous host can still use the v3 projection.
+        let has_signing_evidence: bool = tx.query_row(
+            include_str!("../package/sql/has_signing_evidence.sql"),
+            [],
+            |r| r.get(0),
+        )?;
         let mut committed = true;
         let mut names = std::collections::HashSet::new();
         // Validate every journal entry before restoring any package.
@@ -303,11 +310,24 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                 .as_str()
                 .ok_or_else(|| Error::InvalidConfig("missing recovery facts".into()))?;
             let current: String = tx.query_row(
-                include_str!("../package/sql/compat/v3/registration_facts.sql"),
+                if has_signing_evidence {
+                    include_str!("../package/sql/registration_facts.sql")
+                } else {
+                    include_str!("../package/sql/compat/v3/registration_facts.sql")
+                },
                 [short],
                 |r| r.get(0),
             )?;
-            committed &= facts == current;
+            // Match old journals after a schema upgrade without discarding any
+            // signing fields from journals written by the current installer.
+            committed &= facts == current
+                || has_signing_evidence
+                    && facts
+                        == tx.query_row(
+                            include_str!("../package/sql/compat/v3/registration_facts.sql"),
+                            [short],
+                            |r| r.get::<_, String>(0),
+                        )?;
         }
         for package in packages {
             if committed {
@@ -332,11 +352,15 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                 } else {
                     short.to_owned()
                 };
-                let root = profile.join(if kind == "lib" && id.starts_with("std.dhttp.net/") {
-                    "lib/std"
-                } else {
-                    kind
-                });
+                let root = profile.join(
+                    if kind == "lib"
+                        && crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
+                    {
+                        "lib/std"
+                    } else {
+                        kind
+                    },
+                );
                 if !root.symlink_metadata()?.file_type().is_dir() {
                     return Err(Error::InvalidConfig(
                         "recovery target must be a real directory".into(),

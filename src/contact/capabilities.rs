@@ -51,9 +51,9 @@ pub(super) fn catalog(profile: &IdentityProfile) -> Result<Value, Failure> {
         ("lib_id", "id")
     };
     let standard = if author {
-        "l.author='std.dhttp.net'"
+        "l.author IN ('std.dhttp.net','dev.genmeta.tech.dhttp.net')"
     } else {
-        "substr(l.id,1,14)='std.dhttp.net/'"
+        "(substr(l.id,1,14)='std.dhttp.net/' OR l.id GLOB 'dev.genmeta.tech.dhttp.net/*')"
     };
     let package = if author {
         "CASE WHEN coalesce(l.author,'')<>'' THEN l.author||'/'||l.name ELSE l.name END"

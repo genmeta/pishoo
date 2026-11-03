@@ -1,18 +1,22 @@
-use super::*;
+use std::io::Write;
+
 use axum::response::Response;
 use http::StatusCode;
 use http_body_util::BodyExt;
-use std::io::Write;
 use tower::ServiceExt;
 
+use super::*;
+
 fn environment() -> (tempfile::TempDir, IdentityProfile, Arc<RwLock<Sandbox>>) {
+    environment_named("dev.test.sky.lee.dhttp.net")
+}
+fn environment_named(name: &str) -> (tempfile::TempDir, IdentityProfile, Arc<RwLock<Sandbox>>) {
     let root = tempfile::tempdir().unwrap();
-    let profile =
-        IdentityProfile::try_from(root.path().join("dev.test.sky.lee.dhttp.net")).unwrap();
+    let profile = IdentityProfile::try_from(root.path().join(name)).unwrap();
     std::fs::create_dir_all(profile.join("dev/hello/app")).unwrap();
     std::fs::write(
         profile.join("dev/hello/manifest.json"),
-        r#"{"package":{"author":"dev.test.sky.lee.dhttp.net","name":"hello"}}"#,
+        serde_json::to_vec(&serde_json::json!({"package":{"author":name,"name":"hello"}})).unwrap(),
     )
     .unwrap();
     let sandbox = Arc::new(RwLock::new(Sandbox::new(Arc::new(
@@ -21,27 +25,30 @@ fn environment() -> (tempfile::TempDir, IdentityProfile, Arc<RwLock<Sandbox>>) {
     (root, profile, sandbox)
 }
 fn app(profile: &IdentityProfile, sandbox: &Arc<RwLock<Sandbox>>) -> Router {
-    let endpoint = crate::test_support::identity::endpoint("dev.test.sky.lee.dhttp.net");
+    let endpoint = crate::test_support::identity::endpoint(profile.name());
     router(
         profile.clone(),
         sandbox.clone(),
         endpoint,
         Arc::new(access_control::AccessService::new(
             sea_orm::DatabaseConnection::default(),
-            "dev.test.sky.lee.dhttp.net",
+            profile.name(),
         )),
         Router::new(),
         Router::new(),
     )
 }
 fn request(path: &str, owner: bool) -> Request<Body> {
-    let endpoint = crate::test_support::identity::endpoint("dev.test.sky.lee.dhttp.net");
+    request_named("dev.test.sky.lee.dhttp.net", path, owner)
+}
+fn request_named(name: &str, path: &str, owner: bool) -> Request<Body> {
+    let endpoint = crate::test_support::identity::endpoint(name);
     let local = endpoint.local_authority().unwrap();
     let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
         .unwrap();
     let subject = access_control::SubjectId::new(ski.owner_hash().as_str().as_bytes()).unwrap();
     let mut request = Request::builder()
-        .uri(format!("https://dev.test.sky.lee.dhttp.net{path}"))
+        .uri(format!("https://{name}{path}"))
         .body(Body::empty())
         .unwrap();
     if owner {
@@ -323,7 +330,7 @@ async fn jade_publishes_without_a_control_connection_and_cleans_up_on_stop() {
     std::fs::write(dependency.join("public/index.html"), "dependency v1").unwrap();
     let host_binary = std::env::var_os("PISHOO_TEST_BINARY").expect("set PISHOO_TEST_BINARY");
     let mut child = tokio::process::Command::new(binary)
-        .args(["run", "--id", "test.sky.lee", "--json"])
+        .args(["run", "--id", "dev.test.sky.lee", "--json"])
         .arg(&project)
         .env("DHTTP_HOME", root.path().join("home"))
         .env("PISHOO_BIN", host_binary)
@@ -432,30 +439,33 @@ async fn jade_publishes_without_a_control_connection_and_cleans_up_on_stop() {
 }
 
 #[tokio::test]
-async fn normal_identity_ignores_local_development_files() {
-    let (_temp, profile, sandbox) = environment();
-    std::fs::write(profile.join("dev/hello/app/index.html"), "private").unwrap();
-    let endpoint = crate::test_support::identity::endpoint("test.sky.lee.dhttp.net");
-    let routes = router(
-        profile,
-        sandbox.clone(),
-        endpoint,
-        Arc::new(access_control::AccessService::new(
-            sea_orm::DatabaseConnection::default(),
-            "test.sky.lee.dhttp.net",
-        )),
-        Router::new(),
-        Router::new(),
-    );
-    assert_eq!(
-        routes
-            .oneshot(request("/app/hello/", true))
+async fn local_files_require_the_real_owner_independently_of_identity_spelling() {
+    for name in [
+        "alex.chen.dhttp.net",
+        "dev.wang.dhttp.net",
+        "dev.dev.wang.dhttp.net",
+    ] {
+        let (_temp, profile, sandbox) = environment_named(name);
+        std::fs::write(profile.join("dev/hello/app/index.html"), "private").unwrap();
+        let routes = app(&profile, &sandbox);
+        let response = routes
+            .clone()
+            .oneshot(request_named(name, "/app/hello/", true))
             .await
-            .unwrap()
-            .status(),
-        StatusCode::NOT_FOUND
-    );
-    assert!(sandbox.read().unwrap().dev_libs.is_empty());
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{name}");
+        assert_eq!(text(response).await, b"private");
+        assert_eq!(
+            routes
+                .oneshot(request_named(name, "/app/hello/", false))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN,
+            "{name}"
+        );
+        assert!(sandbox.read().unwrap().dev_libs.is_empty());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -13,6 +13,9 @@ use crate::{Error, Result};
 #[path = "../../tests/unit/package/files/tests.rs"]
 mod tests;
 
+mod legacy;
+pub(crate) use legacy::migrate_legacy_packages;
+
 fn child_dir(parent: &std::fs::File, name: &std::ffi::OsStr) -> Result<std::fs::File> {
     use rustix::fs::{Mode, OFlags, openat};
     openat(
@@ -144,7 +147,7 @@ fn resource_parent(root: &std::fs::File, id: &str, create: bool) -> Result<std::
     // Placement follows the signed publisher identity. It grants no privileges.
     if id
         .split_once('/')
-        .is_some_and(|(publisher, _)| publisher == "std.dhttp.net")
+        .is_some_and(|(publisher, _)| crate::package::is_standard_author(publisher))
     {
         if create {
             match rustix::fs::mkdirat(root, "std", rustix::fs::Mode::from_raw_mode(0o700)) {
@@ -231,7 +234,7 @@ fn migrate_registration(conn: &mut rusqlite::Connection) -> Result<()> {
         tx.execute_batch("INSERT INTO acl.lib_capability_operation SELECT * FROM acl.pishoo_legacy_operation; DROP TABLE acl.pishoo_legacy_operation;")?;
     }
 
-    tx.execute("UPDATE lib_capability_operation SET path='/'||lib_name||substr(path,5) WHERE substr(path,1,5)='/std/' AND lib_name IN (SELECT name FROM package WHERE has_lib=1 AND (author IS NULL OR author<>'std.dhttp.net'))",[])?;
+    tx.execute("UPDATE lib_capability_operation SET path='/'||lib_name||substr(path,5) WHERE substr(path,1,5)='/std/' AND lib_name IN (SELECT name FROM package WHERE has_lib=1 AND (author IS NULL OR author NOT IN ('std.dhttp.net','dev.genmeta.tech.dhttp.net')))",[])?;
     for schema in ["pkg_registry", "acl"] {
         if tx
             .prepare(&format!("PRAGMA {schema}.foreign_key_check"))?
@@ -377,7 +380,7 @@ fn package_routes(
     if kind == "lib" {
         let prefix = if id
             .split_once('/')
-            .is_some_and(|(publisher, _)| publisher == "std.dhttp.net")
+            .is_some_and(|(publisher, _)| crate::package::is_standard_author(publisher))
         {
             "/std".to_owned()
         } else {
@@ -424,7 +427,7 @@ fn check_routes(
     kind: &str,
     package: &super::PackageFiles,
 ) -> Result<()> {
-    if kind == "app" || !id.starts_with("std.dhttp.net/") {
+    if kind == "app" || !crate::package::is_standard_author(id.split('/').next().unwrap_or("")) {
         let mount = if kind == "app" {
             format!("/app/{}", id.rsplit('/').next().unwrap())
         } else {
@@ -534,77 +537,6 @@ fn installed_routes(
     package_routes(&files, id, kind)
 }
 
-// An existing package keeps its path-based ACLs as APIs evolve. Only a fresh
-// provider must review rules left behind before taking over those operations.
-fn check_existing_rules(
-    profile: &IdentityProfile,
-    conn: &rusqlite::Connection,
-    id: &str,
-    kind: &str,
-    package: &super::PackageFiles,
-    same_version: bool,
-) -> Result<()> {
-    if same_version {
-        return Ok(());
-    }
-
-    // Use the unified package identity, including upgrades that add an App or
-    // Lib to the same author's already installed package.
-    match registered_packages(conn, "pkg", Some(id)) {
-        Ok(_) => return Ok(()),
-        Err(Error::RouteNotFound) => {}
-        Err(e) => return Err(e),
-    }
-    let path = profile.join(".volume/sys/access/database");
-    if !path.try_exists()? {
-        return Ok(());
-    }
-    if !path.symlink_metadata()?.is_file() {
-        return Err(Error::InvalidConfig(
-            "access.db must be a regular file".into(),
-        ));
-    }
-    let access =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let rules: bool = access.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='access_rules')",
-        [],
-        |r| r.get(0),
-    )?;
-    if !rules {
-        return Ok(());
-    }
-    for (path, methods) in package_routes(package, id, kind)? {
-        for method in methods {
-            // App reads use root GET authorization, including HEAD and assets.
-            let method = if kind == "app" && matches!(method.as_str(), "GET" | "HEAD") {
-                "GET"
-            } else {
-                method.as_str()
-            };
-            let path = if kind == "app" && method == "GET" {
-                format!("/app/{}", id.rsplit('/').next().unwrap())
-            } else {
-                path.trim_end_matches('/').to_owned()
-            };
-            let exists: bool = access.query_row(
-                "SELECT EXISTS(SELECT 1 FROM access_rules WHERE (api='/' OR api=?1 OR substr(?1,1,length(api)+1)=api||'/') AND method IN (?2,'*'))",
-                rusqlite::params![path, method],
-                |row| row.get(0),
-            )?;
-            if exists {
-                return Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "existing ACL rules for {method} {path}; explicitly remove/review these rules before installing a new provider"
-                    ),
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
 fn save_registration(
     conn: &rusqlite::Transaction<'_>,
     id: &str,
@@ -676,7 +608,7 @@ fn save_registration(
         Vec::new()
     };
     if !groups.is_empty() {
-        let prefix = if author == Some("std.dhttp.net") {
+        let prefix = if author.is_some_and(crate::package::is_standard_author) {
             "/std".to_owned()
         } else {
             format!("/{name}")
@@ -1076,12 +1008,12 @@ pub(super) fn install_packages(
         if reused {
             continue;
         }
-        // All route/ACL checks see the old, consistent installation. No files
+        // All route checks see the old, consistent installation. No files
         // or registrations have been switched while examining another package.
+        // Path-based ACLs are independent of the installed provider.
         for kind in ["lib", "app"] {
             if metadata[format!("has_{kind}")] == true {
                 check_routes(profile, &tx, id, kind, &package)?;
-                check_existing_rules(profile, &tx, id, kind, &package, same_version)?;
             }
         }
         changed.push((id, bytes, package, metadata));
@@ -1135,13 +1067,13 @@ pub(super) fn install_packages(
             };
             if kind == "lib" {
                 let wasm = read_runtime_wasm(payload)?;
-                let data = profile
-                    .join(".volume")
-                    .join(if id.starts_with("std.dhttp.net/") {
+                let data = profile.join(".volume").join(
+                    if crate::package::is_standard_author(id.split('/').next().unwrap_or("")) {
                         format!("std/{short}")
                     } else {
                         short.to_owned()
-                    });
+                    },
+                );
                 libs.insert(
                     (*id).clone(),
                     Arc::new(crate::sandbox::Lib::load(

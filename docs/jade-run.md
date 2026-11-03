@@ -1,16 +1,19 @@
 # Local development with Jade
 
-`jade run` selects a separate development identity and reuses the running Pishoo
-process. The configured default identity (or `--id`) is the base name; without a
-configured default it uses `zero.ai`. Thus `zero.ai` selects `dev.zero.ai.dhttp.net`.
-An explicit `dev.zero.ai` is used directly. Install ordinary identity credentials
-for that development name beforehand; no developer certificate or subscription is
-required. Jade enables its normal listener through `pishoo configure`, never starts
+`jade run` uses the explicitly selected development identity and reuses the running
+Pishoo process. Pass the actual child name, for example `--id dev.alex.chen`;
+Jade never adds or removes `dev.` from explicit input. A main name `dev.wang` requires
+`--id dev.dev.wang`. Without `--id`, Jade selects the `dev` child of the configured default
+identity: a default of `dev.wang` selects `dev.dev.wang`, while an existing
+child such as `dev.dev.wang` or `dev.alex.chen` stays unchanged. Without a configured
+default Jade uses `dev.zero.ai`. Install
+ordinary identity credentials for that name beforehand; no developer certificate
+or subscription is required. Jade enables its normal listener through `pishoo configure`, never starts
 another daemon, and leaves the user's default identity unchanged.
 
 ```sh
 jade run
-jade run --id zero.ai
+jade run --id dev.zero.ai
 # App: https://dev.zero.ai.dhttp.net/app/<name>/
 # Standard API: https://dev.zero.ai.dhttp.net/std/<name>/...
 # Ordinary API: https://dev.zero.ai.dhttp.net/<name>/...
@@ -38,8 +41,10 @@ and different local projects with the same short name are rejected. Dependencies
 without `path` are installed at exactly the declared version through the normal
 Pishoo store API, retaining its signature, receipt, revocation and recursive
 version checks. Unchanged dependency coordinates are reused during watching.
-`path` is development-only and omitted from release metadata; `jade build` and
-`jade publish` keep their normal signing requirements.
+`path` is development-only and omitted from release metadata. `jade build`
+creates an unsigned WAZ without developer credentials. Only
+`jade publish` requires developer credentials, signs the prebuilt snapshot and
+uploads it. Formal store installation continues to require a signed release.
 
 ## Files and data
 
@@ -51,12 +56,12 @@ version checks. Unchanged dependency coordinates are reused during watching.
 <dev-identity>/.volume/std/<name>/          # standard guest /db
 ```
 
-Only a `dev.` identity executes local development files. Normal application URLs
-select these files on that identity; there is no `/dev` URL alias. Standard guests
+Pishoo selects local development files independently of the identity name.
+Normal application URLs select these files on the chosen identity; there is no `/dev` URL alias. Standard guests
 receive `/<name>/...` after `/std` is removed; ordinary guests receive the suffix
 after their name. Native services retain precedence. Installed dependencies keep
 their normal URLs and authorization. Local files require the authenticated real
-owner, even when ACL rules allow visitors. The development identity has its own
+owner, even when ACL rules allow visitors. Jade selects a development child with its own
 native databases and business data, separate from the base identity.
 
 Jade builds all local projects before publishing. Each successful project is
@@ -90,3 +95,8 @@ JADE_TEST_BINARY=/path/to/jade PISHOO_TEST_BINARY=/path/to/pishoo \
 The cross-repository fixture checks publication and signal cleanup with isolated
 profiles; unit tests cover normal URLs, owner access, dependency fallback, identity
 isolation, cache invalidation, real WASM execution and persistent data.
+
+Formal installation verifies the trusted certificate chain, codeSigning usage,
+package signature and exact author identity. Pishoo does not require a `dev.`
+prefix in the signing name; developer naming and subscription binding belong to
+Jade and CertServer.

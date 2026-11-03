@@ -6,7 +6,11 @@ use crate::{WasmRuntime, package::read_package};
 
 #[tokio::test]
 async fn access_groups_register_mounted_operations_and_populate_catalog() {
-    for publisher in ["std.dhttp.net", "alice.dhttp.net"] {
+    for publisher in [
+        "std.dhttp.net",
+        "dev.genmeta.tech.dhttp.net",
+        "alice.dhttp.net",
+    ] {
         for legacy in [false, true] {
             for app in [false, true] {
                 let title = if legacy {
@@ -63,7 +67,7 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
                 save_registration(&tx, &format!("{publisher}/message"), &metadata, &package)
                     .unwrap();
                 tx.commit().unwrap();
-                let path = if publisher == "std.dhttp.net" {
+                let path = if crate::package::is_standard_author(publisher) {
                     "/std/message"
                 } else {
                     "/message/message"

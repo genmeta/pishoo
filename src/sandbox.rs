@@ -106,6 +106,7 @@ impl Sandbox {
     }
 
     pub(crate) fn load_libs(&mut self, profile: &IdentityProfile) -> Result<()> {
+        crate::package::migrate_legacy_packages(profile)?;
         let parent = std::fs::File::from(
             rustix::fs::open(
                 profile.path(),
@@ -162,13 +163,15 @@ impl Sandbox {
                         self.runtime.clone(),
                         id.clone(),
                         &bytes,
-                        &profile
-                            .join(".volume")
-                            .join(if id.starts_with("std.dhttp.net/") {
+                        &profile.join(".volume").join(
+                            if crate::package::is_standard_author(
+                                id.split('/').next().unwrap_or(""),
+                            ) {
                                 format!("std/{}", id.rsplit('/').next().unwrap())
                             } else {
                                 id.rsplit('/').next().unwrap().to_owned()
-                            }),
+                            },
+                        ),
                     )?;
                     candidates.insert(id.clone(), Arc::new(lib));
                 }
@@ -214,7 +217,9 @@ impl Sandbox {
                             .libs
                             .iter()
                             .find(|(id, _)| {
-                                id.starts_with("std.dhttp.net/") == standard
+                                crate::package::is_standard_author(
+                                    id.split('/').next().unwrap_or(""),
+                                ) == standard
                                     && id.rsplit('/').next() == Some(name)
                             })
                             .map(|(_, lib)| lib.clone())

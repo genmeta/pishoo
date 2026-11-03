@@ -1,10 +1,15 @@
+2026-11-04 用户明确：ACL 是身份的路径配置，与包作者归属独立。卸载保留 ACL 和业务数据，不备份、不清理；首次安装、重装及卸载后换作者安装不因已有 ACL 被阻止，原规则继续按路径和方法生效。同名跨作者覆盖、owner 连续性、签名、依赖及路由校验保持；不增加 HTTP 字段、schema 或跨模块接口。此决定覆盖此前首次安装／卸载后重装的旧规则拦截约定。
+
+2026-11-03 用户要求实施开发者作者迁移：标准作者为 dev.genmeta.tech.dhttp.net，旧 std.dhttp.net 保持运行兼容。新安装沿用完整开发者验签和回执规则。宿主固定审计授权仅迁移精确历史 TLS 安装的维护归属，不伪造签名事实、改写业务 volume 或 ACL。冻结增量：`package::is_standard_author(author: &str) -> bool`（pub(crate)，供运行/路由/安装调用）；`package::files::migrate_legacy_packages(profile: &IdentityProfile) -> Result<()>`（pub(crate)，package 重导出，Sandbox::load_libs 取得运行读锁前调用）。按组事务，失败保留旧组并记录，不增加状态或 schema。仅模块内无状态 helper。正式授权缺少目标 owner 时不启用该组。方案见 ../../workspace/docs/developer-signing-upgrade-plan.md。
+
 # Offline developer signature policy (2026-10-29)
 
 There is one developer signature verification rule set, without a policy version
 or a dedicated capability header. The related signing schemas have not shipped;
 revise their original definitions directly without draft-to-draft migrations.
 
-Minimum host: Pishoo 0.9.0, reported through `Pishoo-Version`.
+First release with this policy: Pishoo 0.9.1-preview.1, reported through
+`Pishoo-Version`.
 CertServer participates in purchase, certificate issuance and renewal only.
 Jade, Registry and Pishoo do not query `/v2/cert` during package publication or
 installation. Entitlement is represented by the signed codeSigning certificate's

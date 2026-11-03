@@ -43,3 +43,11 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["h
 tokio-util = { version = "0.7", features = ["io"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 x509-parser = "0.18"
+
+[[bin]]
+name = "upgrade-host"
+path = "tests/support/upgrade_host.rs"
+
+[[bin]]
+name = "upgrade-dns-publish"
+path = "tests/support/upgrade_dns_publish.rs"

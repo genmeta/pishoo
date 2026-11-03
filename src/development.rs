@@ -47,19 +47,18 @@ pub(crate) fn router(
                 let (name, suffix) = tail
                     .split_once('/')
                     .map_or((tail, ""), |(name, _)| (name, &tail[name.len()..]));
-                // Unsigned local files are only executable on a separate dev identity.
+                // Local files require the real owner, independently of identity spelling.
                 // Native services retain precedence over local projects.
                 let local_exists = package::valid_id(name).is_ok()
                     && profile.join("dev").join(name).try_exists()?;
-                if !local_exists && endpoint.name().starts_with("dev.") {
+                if !local_exists {
                     sandbox
                         .write()
                         .unwrap()
                         .dev_libs
                         .retain(|id, _| id.rsplit('/').next() != Some(name));
                 }
-                if !endpoint.name().starts_with("dev.")
-                    || package::valid_id(name).is_err()
+                if package::valid_id(name).is_err()
                     || (!frontend
                         && (name == "app"
                             || standard
@@ -78,7 +77,7 @@ pub(crate) fn router(
                     suffix.to_owned()
                 };
                 let author = author(&profile, &name)?;
-                if !frontend && (author == "std.dhttp.net") != standard {
+                if !frontend && (crate::package::is_standard_author(&author)) != standard {
                     return Ok(fallback
                         .oneshot(request)
                         .await
@@ -322,7 +321,7 @@ fn load(
         state.runtime.clone(),
         id.clone(),
         &bytes,
-        &data_root.join(if author == "std.dhttp.net" {
+        &data_root.join(if crate::package::is_standard_author(&author) {
             format!("std/{name}")
         } else {
             name.to_owned()

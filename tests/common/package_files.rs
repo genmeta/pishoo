@@ -56,11 +56,6 @@ pub(crate) fn install_package(
     }
     let mut database = installation_database(profile, true)?;
     check_name(&database, id, "pkg")?;
-    let same_version = registered_packages(&database, "pkg", Some(id))
-        .ok()
-        .and_then(|r| r.first().map(|r| r.1.clone()))
-        .as_deref()
-        == metadata["version"].as_str();
     let name = temporary_name()?;
     mkdirat(&parent, &name, Mode::from_raw_mode(0o700)).map_err(layout_error)?;
     let cleanup_dir = cap_std::fs::Dir::from_std_file(parent.try_clone()?);
@@ -82,7 +77,6 @@ pub(crate) fn install_package(
     for kind in ["lib", "app"] {
         if metadata[format!("has_{kind}")] == true {
             check_routes(profile, &tx, id, kind, &package)?;
-            check_existing_rules(profile, &tx, id, kind, &package, same_version)?;
         }
     }
     save_registration(&tx, id, &metadata, &package)?;

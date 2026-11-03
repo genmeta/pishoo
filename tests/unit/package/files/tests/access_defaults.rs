@@ -221,126 +221,142 @@ async fn package_upgrades_replace_apis_and_capabilities_without_changing_or_bloc
 }
 
 #[tokio::test]
-async fn business_read_rules_have_no_implicit_provider_exemptions() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
-    std::fs::create_dir_all(profile.join(".volume/sys/access")).unwrap();
-    let access = access_control::AccessService::load_from_db(
-        &format!(
-            "sqlite://{}?mode=rwc",
-            profile.join(".volume/sys/access/database").display()
-        ),
-        profile.name(),
-        &access_control::SubjectId::new(b"owner").unwrap(),
-    )
-    .await
-    .unwrap();
-    crate::setup::load_server_config(&profile).unwrap();
-    let conn =
-        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    let authority = publisher("std.dhttp.net", 'a');
-    for name in ["introduction", "workspace"] {
-        let mut doc = frontend_document("1.0.0");
-        doc["x-pishoo"]["publisher"] = "std.dhttp.net".into();
-        doc["x-pishoo"]["name"] = name.into();
-        let bytes = package_fixture(&doc, &[], frontend_files("page"), &authority);
-        let package = read_package(&bytes).unwrap();
-        check_existing_rules(
-            &profile,
-            &conn,
-            &format!("std.dhttp.net/{name}"),
-            "app",
-            &package,
-            false,
+async fn fresh_install_and_cross_author_reinstall_preserve_path_rules_and_data() {
+    for (old_author, new_author) in [
+        ("std.dhttp.net", "dev.genmeta.tech.dhttp.net"),
+        ("alice.dhttp.net", "bob.dhttp.net"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
+        std::fs::create_dir_all(profile.join(".volume/sys/access")).unwrap();
+        let access = access_control::AccessService::load_from_db(
+            &format!(
+                "sqlite://{}?mode=rwc",
+                profile.join(".volume/sys/access/database").display()
+            ),
+            profile.name(),
+            &access_control::SubjectId::new(b"owner").unwrap(),
         )
+        .await
         .unwrap();
-        for effect in [access_control::Effect::Allow, access_control::Effect::Deny] {
+        crate::setup::load_server_config(&profile).unwrap();
+        let standard = crate::package::is_standard_author(old_author);
+        let mount = if standard { "/std/profile" } else { "/profile" };
+        for (method, path, effect) in [
+            (
+                access_control::Method::Unspecified,
+                "/",
+                access_control::Effect::Allow,
+            ),
+            (
+                access_control::Method::Specified(Method::GET),
+                "/std",
+                access_control::Effect::Deny,
+            ),
+            (
+                access_control::Method::Unspecified,
+                "/app",
+                access_control::Effect::Deny,
+            ),
+            (
+                access_control::Method::Unspecified,
+                mount,
+                access_control::Effect::Allow,
+            ),
+            (
+                access_control::Method::Specified(Method::PUT),
+                &format!("{mount}/nickname"),
+                access_control::Effect::Deny,
+            ),
+            (
+                access_control::Method::Specified(Method::GET),
+                "/app/profile",
+                access_control::Effect::Allow,
+            ),
+            (
+                access_control::Method::Specified(Method::GET),
+                "/unrelated",
+                access_control::Effect::Deny,
+            ),
+        ] {
             access
-                .set_policy(
-                    access_control::Method::Specified(Method::GET),
-                    &format!("/app/{name}"),
-                    effect,
-                    access_control::Grantee::All,
-                )
+                .set_policy(method, path, effect, access_control::Grantee::All)
                 .await
                 .unwrap();
-            for author in ["std.dhttp.net", "other.example"] {
-                assert!(
-                    check_existing_rules(
-                        &profile,
-                        &conn,
-                        &format!("{author}/{name}"),
-                        "app",
-                        &package,
-                        false,
-                    )
-                    .is_err(),
-                    "{author}/{name} must not inherit an existing {effect:?} rule"
-                );
-            }
         }
-        access
-            .remove_policy(
-                access_control::Method::Specified(Method::GET),
-                &format!("/app/{name}"),
-                access_control::Grantee::All,
-            )
-            .await
+        let db = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
-    }
-    let doc = json!({"openapi":"3.1.0","info":{"title":"Profile","version":"1.0.0","description":"Test","license":{"name":"MIT"}},
-        "x-pishoo":{"publisher":"std.dhttp.net","name":"profile"},
-        "paths":{"/profile/nickname":{"get":{"operationId":"nickname","summary":"Nickname"}},"/profile/avatar":{"get":{"operationId":"avatar","summary":"Avatar"}},
-            "/profile/introduction":{"get":{"operationId":"introduction","summary":"Introduction"}},"/profile/permission/list":{"get":{"operationId":"presets","summary":"Presets"}}}});
-    let bytes = package_fixture(
-        &doc,
-        include_bytes!("../../../../fixtures/wasi-http-read-request-then-respond.wasm"),
-        std::collections::BTreeMap::new(),
-        &authority,
-    );
-    let package = read_package(&bytes).unwrap();
-    check_existing_rules(
-        &profile,
-        &conn,
-        "std.dhttp.net/profile",
-        "lib",
-        &package,
-        false,
-    )
-    .unwrap();
-    for path in [
-        "/std/profile/nickname",
-        "/std/profile/avatar",
-        "/std/profile",
-    ] {
-        access
-            .set_policy(
-                access_control::Method::Specified(Method::GET),
-                path,
-                access_control::Effect::Allow,
-                access_control::Grantee::All,
+        let rules = || {
+            db.query_row(
+                concat!(
+                    "SELECT json_group_array(json_array(",
+                    "id,method,api,effect,grantee_type,grantee,updated_at,created_at)) ",
+                    "FROM (SELECT * FROM acl.access_rules ORDER BY id)"
+                ),
+                [],
+                |r| r.get::<_, String>(0),
             )
-            .await
-            .unwrap();
-        assert!(
-            check_existing_rules(
-                &profile,
-                &conn,
-                "std.dhttp.net/profile",
-                "lib",
-                &package,
-                false,
+            .unwrap()
+        };
+        let before = rules();
+        let build = |author: &str, owner| {
+            let path = if standard {
+                "/profile/nickname"
+            } else {
+                "/nickname"
+            };
+            let doc = json!({"openapi":"3.1.0","info":{"title":"Profile","version":"1.0.0","description":"Test","license":{"name":"MIT"}},
+                "x-pishoo":{"kind":"lib","publisher":author,"name":"profile","dependencies":[]},
+                "paths":{path:{"get":{"operationId":"read","summary":"Read"},"put":{"operationId":"write","summary":"Write"}}}});
+            package_fixture(
+                &doc,
+                include_bytes!("../../../../fixtures/wasi-http-read-request-then-respond.wasm"),
+                frontend_files("Profile"),
+                &publisher(author, owner),
             )
-            .is_err(),
-            "Profile must not inherit an existing rule for {path}"
+        };
+        let mut sandbox =
+            crate::sandbox::Sandbox::new(std::sync::Arc::new(WasmRuntime::new().unwrap()));
+        let old_id = format!("{old_author}/profile");
+        let new_id = format!("{new_author}/profile");
+        let old = (old_id.clone(), build(old_author, 'a'));
+        let new = (new_id.clone(), build(new_author, 'b'));
+
+        // Fresh installation must accept existing root, parent, App, Lib,
+        // wildcard, allow and deny policies without modifying any rule fields.
+        install_packages(&profile, &[old], &mut sandbox).unwrap();
+        assert_eq!(rules(), before);
+        let data = profile.join(if standard {
+            ".volume/std/profile/database"
+        } else {
+            ".volume/profile/database"
+        });
+        std::fs::write(&data, b"retained business data").unwrap();
+
+        // Existing ACLs do not authorize replacing an installed author.
+        let error =
+            install_packages(&profile, std::slice::from_ref(&new), &mut sandbox).unwrap_err();
+        assert!(error.to_string().contains("already installed"), "{error}");
+        assert_eq!(rules(), before);
+        assert_eq!(std::fs::read(&data).unwrap(), b"retained business data");
+
+        remove_package(&profile, &old_id).unwrap();
+        sandbox.libs.remove(&old_id);
+        sandbox.apps.remove(&old_id);
+        assert_eq!(rules(), before);
+        assert!(!profile.join("app/profile").exists());
+        assert_eq!(std::fs::read(&data).unwrap(), b"retained business data");
+
+        // After explicit removal, another signed author can use the name;
+        // the identity's path rules and private data continue unchanged.
+        install_packages(&profile, &[new], &mut sandbox).unwrap();
+        assert_eq!(rules(), before);
+        assert_eq!(std::fs::read(&data).unwrap(), b"retained business data");
+        assert_eq!(
+            installed_packages(&profile, Some(&new_id)).unwrap()["author"],
+            new_author
         );
-        access
-            .remove_policy(
-                access_control::Method::Specified(Method::GET),
-                path,
-                access_control::Grantee::All,
-            )
-            .await
-            .unwrap();
+        assert!(sandbox.libs.contains_key(&new_id));
+        assert!(sandbox.apps.contains_key(&new_id));
     }
 }

@@ -16,7 +16,8 @@ mod signing;
 mod store;
 
 pub(crate) use files::{
-    app_file, disk_bytes, installed_apps, installed_packages, lib_root, remove_package, valid_id,
+    app_file, disk_bytes, installed_apps, installed_packages, lib_root, migrate_legacy_packages,
+    remove_package, valid_id,
 };
 #[cfg(test)]
 pub(crate) use files::{
@@ -56,6 +57,10 @@ pub(crate) fn require_owner(
     Ok(())
 }
 
+pub(crate) fn is_standard_author(author: &str) -> bool {
+    matches!(author, "std.dhttp.net" | "dev.genmeta.tech.dhttp.net")
+}
+
 fn lib_metadata(package: &PackageFiles, id: Option<&str>) -> serde_json::Value {
     // Installed packages are trusted after installation. Catalog reads parse
     // display metadata without repeating package or OpenAPI policy validation.
@@ -66,7 +71,8 @@ fn lib_metadata(package: &PackageFiles, id: Option<&str>) -> serde_json::Value {
     let mut endpoints = Vec::new();
     if package.get("backend.wasm").is_some() {
         let identity = id.unwrap_or_else(|| value["id"].as_str().unwrap());
-        let prefix = if identity.starts_with("std.dhttp.net/") {
+        let prefix = if crate::package::is_standard_author(identity.split('/').next().unwrap_or(""))
+        {
             "/std".to_owned()
         } else {
             format!("/{}", identity.rsplit('/').next().unwrap())
@@ -368,11 +374,12 @@ async fn pkg_management_request(
                 && value["version"].as_str() == Some(lib.openapi.info.version.as_str())
             {
                 let id = value["id"].as_str().unwrap();
-                let prefix = if id.starts_with("std.dhttp.net/") {
-                    "/std".to_owned()
-                } else {
-                    format!("/{}", id.rsplit('/').next().unwrap())
-                };
+                let prefix =
+                    if crate::package::is_standard_author(id.split('/').next().unwrap_or("")) {
+                        "/std".to_owned()
+                    } else {
+                        format!("/{}", id.rsplit('/').next().unwrap())
+                    };
                 let mut endpoints = Vec::new();
                 if let Some(paths) = &lib.openapi.paths {
                     for (path, item) in paths {

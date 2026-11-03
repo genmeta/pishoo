@@ -1,6 +1,26 @@
 use super::*;
 use crate::package::tests::packages::{frontend_document, package_fixture, publisher, with_proof};
 
+#[test]
+fn signer_names_are_unrestricted_but_must_match_the_signed_author() {
+    for name in [
+        "alex.chen.dhttp.net",
+        "dev.wang.dhttp.net",
+        "dev.dev.wang.dhttp.net",
+        "std.dhttp.net",
+    ] {
+        let signer = publisher(name, 'a');
+        let mut document = frontend_document("1.0.0");
+        document["x-pishoo"]["publisher"] = name.into();
+        let files = || std::collections::BTreeMap::from([("index.html".into(), b"page".to_vec())]);
+        let bytes = package_fixture(&document, &[], files(), &signer);
+        crate::package::read_package(&bytes).unwrap();
+        document["x-pishoo"]["publisher"] = "other.wang.dhttp.net".into();
+        let mismatched = package_fixture(&document, &[], files(), &signer);
+        assert!(crate::package::read_package(&mismatched).is_err(), "{name}");
+    }
+}
+
 fn fixture(
     name: &str,
     version: &str,

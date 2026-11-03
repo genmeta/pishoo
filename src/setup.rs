@@ -204,7 +204,11 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
                 return Err(Error::InvalidConfig("incomplete package registry schema".into()));
             }
         }
-        let has_signing_evidence: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('package','pkg_registry') WHERE name='signer_leaf_fingerprint_sha256')", [], |r|r.get(0))?;
+        let has_signing_evidence: bool = conn.query_row(
+            include_str!("package/sql/has_signing_evidence.sql"),
+            [],
+            |r| r.get(0),
+        )?;
         if !has_signing_evidence {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(include_str!(
@@ -416,9 +420,9 @@ fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()
             |row| row.get(0),
         )?;
         let mut names = conn.prepare(if has_author {
-            "SELECT name FROM lib WHERE author IS NULL OR author<>'std.dhttp.net' ORDER BY name"
+            "SELECT name FROM lib WHERE author IS NULL OR author NOT IN ('std.dhttp.net','dev.genmeta.tech.dhttp.net') ORDER BY name"
         } else {
-            "SELECT name FROM lib WHERE substr(id,1,14)<>'std.dhttp.net/' ORDER BY name"
+            "SELECT name FROM lib WHERE substr(id,1,14)<>'std.dhttp.net/' AND id NOT GLOB 'dev.genmeta.tech.dhttp.net/*' ORDER BY name"
         })?;
         for name in names.query_map([], |row| row.get::<_, String>(0))? {
             let mount = format!("/{}", name?);

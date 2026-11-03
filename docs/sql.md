@@ -21,8 +21,9 @@
 | `src/package/sql/schema.sql` | 当前包登记 v4 与 ACL 能力表；要求附加 pkg_registry、acl 数据库 |
 | `src/package/sql/compat/v3/schema.sql` | 仍被生产复用的 v3 基础定义与能力表修复；不添加 v4 签名列 |
 | `src/package/sql/migrations/v4_add_signing_evidence.sql` | 已有包登记补充 v4 签名证据列 |
-| `src/package/sql/registration_facts.sql` | v4 安装登记快照查询 |
-| `src/package/sql/compat/v3/registration_facts.sql` | 仍由恢复路径使用的 v3 登记投影 |
+| `src/package/sql/has_signing_evidence.sql` | 初始化与恢复共用的签名证据列检查 |
+| `src/package/sql/registration_facts.sql` | v4 安装与恢复快照，包含完整签名证据 |
+| `src/package/sql/compat/v3/registration_facts.sql` | 恢复旧 v3 数据库或旧日志时使用的登记投影 |
 | `src/package/sql/runtime_views.sql` | 每个配置连接的临时 Lib/App 视图 |
 
 旧联系人 v1 与包登记 v2 的测试定义分别位于 `tests/fixtures/contact/v1/schema.sql`、`tests/fixtures/package/v2/schema.sql`。版本判断、事务边界、执行顺序和数据库内容不因文件位置或命名调整而变化。

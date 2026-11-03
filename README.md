@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.9.0-1f6feb?style=flat-square" alt="Version 0.9.0">
+  <img src="https://img.shields.io/badge/version-0.9.1--preview.1-1f6feb?style=flat-square" alt="Version 0.9.1-preview.1">
   <img src="https://img.shields.io/badge/Rust-2024-dea584?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-4c956c?style=flat-square" alt="Apache-2.0 license"></a>
 </p>
@@ -28,12 +28,17 @@ Pishoo takes its name from Pixiu (貔貅), an auspicious creature in ancient Chi
 Pishoo 0.9 uses per-identity SQLite configuration, name-based access control,
 and WASM components. See the [Pishoo documentation](https://docs.dhttp.net/en/docs/core-components/pishoo) for configuration and usage.
 
+The current preview candidate is **0.9.1-preview.1**, based on 0.9.0. It adds
+offline developer-signature verification, local Jade development and the official
+author transition, and preserves identity ACL rules across reinstallation. See
+the [release notes](CHANGELOG.md#091-preview1---2026-11-04) for upgrade limits.
+
 ### Local development build
 
 Dependencies are resolved from Cargo.lock, including the crates.io release of daccess 0.2.0; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
 
 ```sh
-git clone --branch release/0.9.0 https://github.com/genmeta/pishoo.git
+git clone --branch v0.9.1-preview.1 https://github.com/genmeta/pishoo.git
 cd pishoo
 cargo build --locked -p pishoo --bin pishoo
 cargo test --locked --workspace -- --test-threads=1
@@ -154,7 +159,7 @@ ACL management selects resources through query parameters: `/std/acl/access?api=
 
 Startup creates `.volume/sys/{setting,pkg,access,contact}/`, `lib/std/`, `app/`, `log/`, and `repo/`. New configuration stays stopped until listening is explicitly configured. New ACLs contain only native contact and permission-discovery rules. Business pages and APIs, including Workspace, Introduction and Profile, have no preconfigured grants or denials. Install Workspace and configure access as the verified owner; publishing an App does not publish its backend APIs. Existing authorization decisions are preserved. No business package or templates directory is created automatically. Package registration and the capability catalog are initialized before runtime loading; Libs load before Apps. Legacy archive layouts require explicit reinstallation.
 
-Native ACL defaults are written once when initializing a new authorization database: authenticated identities may POST/GET `/std/contact` and GET `/std/acl/status`, GET `/std/contact/list` is denied to visitors, and GET `/std/acl/permissions` is public. There is no defaults configuration file or provider exemption during installation. Access is managed in Workspace or with `genmeta access`; restarts and package installation never reapply defaults. New providers must not inherit existing ACL rules for their routes.
+Native ACL defaults are written once when initializing a new authorization database: authenticated identities may POST/GET `/std/contact` and GET `/std/acl/status`, GET `/std/contact/list` is denied to visitors, and GET `/std/acl/permissions` is public. There is no defaults configuration file or provider exemption during installation. Access is managed in Workspace or with `genmeta access`; restarts and package installation never reapply defaults. ACL rules belong to the identity and are evaluated by path and method independently of package authors. Installation never rejects a package merely because matching rules exist. Uninstallation retains both ACL rules and business data without a backup; after explicit removal, a different signed author can be installed under the same name and the existing path rules continue to apply. Same-name cross-author replacement remains blocked while the old package is installed.
 
 Existing daccess schema v0 databases are backed up through SQLite before the library upgrades them through schema v3. The older 0.8.2 `location_rule_sets/location_rules` format is unsupported and stops startup with the original database preserved; it is never silently replaced with new defaults. Missing, corrupt, incomplete, and unsupported databases are distinguished. Pishoo does not create identity credentials, `server.conf`, or an instance configuration file. Linux packages use `User=root` without setting `DHTTP_HOME`. Existing manual overrides remain authoritative; custom deployments can set them in `/etc/systemd/system/pishoo.service.d/`.
 
@@ -269,7 +274,7 @@ Pishoo uses daccess 0.2.0 from crates.io in `Cargo.toml`, with the exact resolve
 
 App and Lib developers must distinguish `202 pending_review` from accepted business jobs. See the [approval integration guide](docs/approval-handling.md) for response handling, live waits, timeouts, identity-bound status queries, idempotency and pending-state UI guidance.
 
-### Local configuration with gmutils (release/0.9.0)
+### Local configuration with gmutils
 
 Use matching gmutils and Pishoo releases. `genmeta listen` and identity service
 activation delegate to Pishoo locally, even when HTTP listening is off:
@@ -301,14 +306,16 @@ empty host configuration get fresh defaults; credentials alone do not enable hos
 Unsupported future schemas, corrupt databases and filesystem errors are reported
 without overwriting those files or terminating the whole host.
 
-Developer-signed package installation requires Pishoo 0.9.0 or later.
+Developer-signed package installation is introduced in Pishoo 0.9.1-preview.1.
 The host independently checks the whole exact dependency closure, signed
 Registry publication receipts and independently distributed issuer CRLs.
 See [developer installation policy](docs/developer-install-policy.md) for the
 schema migration, structured errors and offline trust configuration. Historical
 compliant versions do not require the author to keep paying a current annual
-subscription. This source update does not publish replacement official packages
-or switch the Workspace bootstrap default.
+subscription. The exact official author is `dev.genmeta.tech.dhttp.net`; only historical
+`std.dhttp.net` keeps standard runtime placement. The production author-transfer
+authorization list is empty, so this candidate does not automatically transfer
+old installations or publish replacement application releases.
 
 Debug sandbox builds may set PISHOO_REGISTRY_NAME and PISHOO_REGISTRY_OWNER_HASH
 at compile time together with an isolated DHTTP_ROOT_CA_PEM and target directory.
@@ -322,8 +329,8 @@ the default scope remains external.
 
 ## Local development with Jade
 
-Run an unpublished project with `jade run --id HOST` using an already running
-local Pishoo identity. Local development requires no developer certificate or
-subscription. It provides isolated test data, file watching, atomic reloads and
+Run an unpublished project with `jade run --id dev.zero.ai` using an already
+running local Pishoo process and the selected development identity. Local
+development requires no developer certificate or subscription. It provides isolated test data, file watching, atomic reloads and
 cleanup when the command exits. Formal publication and installation continue to
 require signed releases. See [the local development guide](docs/jade-run.md).

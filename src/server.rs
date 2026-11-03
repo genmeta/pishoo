@@ -54,6 +54,7 @@ fn native_router(server: &Server) -> Router {
     let sandbox = server.sandbox.clone();
     let endpoint = server.endpoint.clone();
     let local_router = Arc::downgrade(&server.router);
+    let profile = server.profile.clone();
     capabilities_router(server.profile.clone())
         .merge(crate::contact::contact_router(
             server.profile.clone(),
@@ -75,12 +76,21 @@ fn native_router(server: &Server) -> Router {
             let endpoint = endpoint.clone();
             let local_router = local_router.clone();
             let sandbox = sandbox.clone();
+            let profile = profile.clone();
             async move {
                 let path = request.uri().path();
-                if !endpoint.name().starts_with("dev.")
+                let name = path
+                    .strip_prefix("/app/")
+                    .unwrap_or(path.trim_start_matches('/'))
+                    .split('/')
+                    .next()
+                    .unwrap_or("");
+                let local = crate::package::valid_id(name).is_ok()
+                    && profile.join("dev").join(name).exists();
+                if !local
                     && !path.starts_with("/std/")
                     && !sandbox.read().unwrap().libs.keys().any(|id| {
-                        !id.starts_with("std.dhttp.net/")
+                        !crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
                             && path
                                 .strip_prefix(&format!("/{}", id.rsplit('/').next().unwrap()))
                                 .is_some_and(|tail| tail.is_empty() || tail.starts_with('/'))
@@ -159,7 +169,8 @@ fn current_router(server: &Server) -> Router {
                             .any(|id| id.rsplit('/').next() == Some(app_name))
                     })
                     || sandbox.libs.keys().any(|id| {
-                        !id.starts_with("std.dhttp.net/") && id.rsplit('/').next() == Some(name)
+                        !crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
+                            && id.rsplit('/').next() == Some(name)
                     })
             };
             async move {

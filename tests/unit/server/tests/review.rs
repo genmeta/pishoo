@@ -126,9 +126,30 @@ async fn split_v2_registries_are_preserved_but_not_imported_into_fresh_configura
 
 #[tokio::test]
 async fn package_recovery_rolls_back_partial_updates_and_cleans_committed_updates() {
-    for (committed, partial) in [(false, false), (false, true), (true, false)] {
+    for (committed, partial, signing_evidence) in [
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
+        (false, false, true),
+        (false, true, true),
+        (true, false, true),
+    ] {
         let root = tempfile::tempdir().unwrap();
         let profile = identity(root.path()).await;
+        let db = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .unwrap();
+        if !signing_evidence {
+            db.execute_batch("DROP TABLE package_dependency; DROP TABLE package;")
+                .unwrap();
+            db.execute_batch(include_str!(
+                "../../../../src/package/sql/compat/v3/schema.sql"
+            ))
+            .unwrap();
+            db.execute_batch("PRAGMA pkg_registry.user_version=3;")
+                .unwrap();
+        }
+        db.execute("INSERT INTO package(name,author,version,has_lib,has_app) VALUES('hello','alice.dhttp.net','2.0.0',1,1)", []).unwrap();
+        drop(db);
         std::fs::write(profile.join("lib/hello.wasm"), b"old-lib").unwrap();
         std::fs::create_dir(profile.join("app/hello")).unwrap();
         std::fs::write(profile.join("app/hello/index.html"), b"old-app").unwrap();
@@ -165,6 +186,96 @@ async fn package_recovery_rolls_back_partial_updates_and_cleans_committed_update
             if committed { b"new-app" } else { b"old-app" }
         );
         assert!(!stage.exists());
+    }
+}
+
+#[tokio::test]
+async fn package_recovery_matches_v4_signing_facts_for_installs_and_updates() {
+    for previous in [false, true] {
+        for committed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let profile = identity(root.path()).await;
+            let mut db =
+                crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+                    .unwrap();
+            if previous {
+                // Keep all v3 facts identical: a signing-evidence mismatch alone
+                // must still cause rollback of a same-version update.
+                db.execute("INSERT INTO package(name,author,version,has_lib,has_app,author_owner_hash,package_sha256,signer_leaf_fingerprint_sha256) VALUES('hello','alice.dhttp.net','2.0.0',1,1,'owner','old-digest','old-signer')", []).unwrap();
+            }
+            let tx = db.transaction().unwrap();
+            tx.execute("INSERT INTO package(name,author,version,has_lib,has_app,author_owner_hash,package_sha256,signer_leaf_fingerprint_sha256) VALUES('hello','alice.dhttp.net','2.0.0',1,1,'owner','new-digest','new-signer') ON CONFLICT(name) DO UPDATE SET package_sha256=excluded.package_sha256,signer_leaf_fingerprint_sha256=excluded.signer_leaf_fingerprint_sha256", []).unwrap();
+            let facts: String = tx
+                .query_row(
+                    include_str!("../../../../src/package/sql/registration_facts.sql"),
+                    ["hello"],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if committed {
+                tx.commit().unwrap();
+            } else {
+                tx.rollback().unwrap();
+            }
+            drop(db);
+
+            // Files have been switched, but the durable journal and any old
+            // backups still exist when the process stops.
+            let stage = profile.join(".pishoo-test");
+            let member = stage.join("hello");
+            std::fs::create_dir_all(member.join("new-lib")).unwrap();
+            if previous {
+                std::fs::write(member.join("old-lib"), b"old-lib").unwrap();
+                std::fs::create_dir(member.join("old-app")).unwrap();
+                std::fs::write(member.join("old-app/index.html"), b"old-app").unwrap();
+            }
+            std::fs::write(profile.join("lib/hello.wasm"), b"new-lib").unwrap();
+            std::fs::create_dir(profile.join("app/hello")).unwrap();
+            std::fs::write(profile.join("app/hello/index.html"), b"new-app").unwrap();
+            std::fs::write(
+                stage.join(".transaction.json"),
+                json!({"packages":[{"id":"alice.dhttp.net/hello","directory":"hello","facts":facts,"resources":[{"kind":"lib","old":previous,"new":true},{"kind":"app","old":previous,"new":true}]}]}).to_string(),
+            )
+            .unwrap();
+
+            initialize_directories(&profile).unwrap();
+            let installed = installed_packages(&profile, None).unwrap();
+            if committed || previous {
+                assert_eq!(installed[0]["version"], "2.0.0");
+                assert_eq!(installed[0]["author_owner_hash"], "owner");
+                assert_eq!(
+                    installed[0]["package_sha256"],
+                    if committed {
+                        "new-digest"
+                    } else {
+                        "old-digest"
+                    }
+                );
+                assert_eq!(
+                    installed[0]["signer_leaf_fingerprint_sha256"],
+                    if committed {
+                        "new-signer"
+                    } else {
+                        "old-signer"
+                    }
+                );
+                assert_eq!(
+                    std::fs::read(profile.join("lib/hello.wasm")).unwrap(),
+                    if committed { b"new-lib" } else { b"old-lib" }
+                );
+                assert_eq!(
+                    std::fs::read(profile.join("app/hello/index.html")).unwrap(),
+                    if committed { b"new-app" } else { b"old-app" }
+                );
+            } else {
+                assert!(installed.as_array().unwrap().is_empty());
+                assert!(!profile.join("lib/hello.wasm").exists());
+                assert!(!profile.join("app/hello").exists());
+            }
+            assert!(!stage.exists());
+            initialize_directories(&profile).unwrap();
+            assert_eq!(installed_packages(&profile, None).unwrap(), installed);
+        }
     }
 }
 

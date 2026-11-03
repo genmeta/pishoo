@@ -1,40 +1,92 @@
 # Changelog
 
-## Unreleased
+## [0.9.1-preview.1] - 2026-11-04
+
+### Added
+
+- Verify developer-signed WAZ packages and immutable Registry publication
+  receipts offline. Bind the complete archive, canonical author, owner and
+  certificate chain to the Registry's authenticated publication time; ordinary
+  certificate expiry does not invalidate an accepted historical release.
+- Verify independently distributed issuer CRLs and retain authenticated newer
+  evidence without allowing rollback to older lists. Known revocations block
+  installation even after a cached list expires; stale supplied lists are
+  rejected. Missing CRLs mean revocation status is unknown, not guaranteed clear.
+- Serve local Jade projects from identity-owned `dev/<name>/` files through the
+  normal App and Lib URLs, reusing the running host. Require the authenticated
+  real owner and safe filesystem permissions; load changed WASM on demand and
+  fall back to installed dependencies when no local project exists. Local code
+  needs no developer certificate or subscription; formal store installs retain
+  all signature and publication checks. See [local development](docs/jade-run.md).
+- Support audited, compile-time author-transfer authorizations for exact
+  historical installations. Transfers preserve runtime files, private data, ACLs
+  and original signing facts, and commit each authorized group atomically.
 
 ### Changed
 
-- Prepare the formal `0.9.0` host and matching `pishoo-common` version metadata.
-- Move the host crate to the repository root with the standard `src/lib.rs` entry.
-  Keep all private unit tests in `tests/unit/`, shared test-only helpers in
-  `tests/common/`, and only cfg-gated module/reexport/injection hooks in `src/`.
-  Keep integration tests and fixtures in `tests/`, diagnostic binaries in `tests/tools/`, and SDK
-  distribution tooling in `tools/`. Update build, CI and release paths and retire
-  obsolete TCP-mock and legacy packaging helpers.
-- Upgrade Wasmtime, WASI and WASI HTTP from 47.0.4 to 49.0.4, retaining WASI P2
-  and existing guest interfaces. Adapt outgoing HTTP and private-directory hooks
-  to the updated runtime APIs.
-- Verify and install signed WAZ ZIP entries directly. Remove the WEBC dependency,
-  intermediate containers, legacy archive/proof readers and App directory
-  flattening. Keep installation signatures, dependency checks and atomic updates.
-  Previous installed archive layouts require explicit reinstallation; private
-  business data is preserved.
-- Read installed Lib WASM directly without reconstructing or retaining an archive.
-- Serve registered App files from disk on demand through retained directory
-  handles and asynchronous file bodies, rather than keeping frontend contents in
-  memory. Preserve root authorization, deep links and in-flight file responses.
-- Allow one permission group to include its own package's App entry with
-  `app: true`. Derive the exact root GET operation from the verified package;
-  registering a declaration does not grant access.
+- Use `dev.genmeta.tech.dhttp.net` as the exact official package author, retaining
+  `std.dhttp.net` only for historical runtime compatibility. Preserve standard
+  `/std/<name>` routes and `.volume/std/<name>` data placement; other developer
+  names do not gain the standard namespace.
+- Accept both historical codeSigning-only certificates and the unified developer
+  certificate profile with serverAuth, clientAuth and codeSigning. Ordinary TLS
+  certificates cannot sign installable packages.
+- Keep ACLs as identity-owned path and method rules independently of package
+  authors. Existing rules no longer block first installation or reinstallation.
+  Uninstallation retains ACLs and business data without backing up or clearing
+  them; after explicit removal, another signed author may install the same name
+  and the existing rules continue to apply. Cross-author replacement of an
+  installed package, owner continuity and exact dependencies remain checked.
+- Move remaining test implementations and helpers out of `src/` into `tests/`.
+  Organize production SQL under its owning module with explicit migration order.
 
 ### Fixed
 
-- Let Pishoo own local configuration initialization through `pishoo configure`,
-  used by matching gmutils releases. Initialize schema v3 directly, preserve valid
-  v3 settings, and leave new configuration stopped until explicitly enabled.
-- Ignore legacy `db/config.db`; archive setting schema v1/v2 directories with
-  their SQLite sidecars before creating fresh defaults. Isolate identity loading
-  and listening failures so other identities can start and later scans can retry.
+- Preserve committed package files when recovery-journal cleanup fails after
+  the database commit; later recovery completes cleanup without rolling back
+  committed resources.
+- Reject sandbox Registry overrides in production builds, including empty
+  overrides, and keep official Registry pins independent of runtime variables.
+- Honor `DHTTP_HOME` for user-mode startup and logging. Retain the Rust 1.96
+  minimum required by Wasmtime 49.
+
+### Upgrade notes
+
+- Pishoo and pishoo-common advance together to `0.9.1-preview.1`; the release tag
+  is `v0.9.1-preview.1`. The SDK remains `0.1.0-preview.2`.
+- Package schema v3 upgrades transactionally to v4 signing-evidence columns.
+  Existing registrations and data remain; missing historical evidence is not
+  fabricated. New installations require compatible developer-signed packages,
+  Registry receipts and exact dependency releases. See the
+  [installation policy](docs/developer-install-policy.md).
+- The production historical-author authorization list is currently empty.
+  This candidate does not automatically transfer existing official packages or
+  rewrite historical signed archives. Application publication and Registry
+  deployment are separate release steps.
+- Use matching gmutils/Jade for local development and publication. Local projects
+  use normal `/app/<name>`, `/<name>` or `/std/<name>` URLs without a `/dev` alias;
+  data belongs to the selected identity and survives removal of local code.
+- This is a preview candidate. Release preparation does not establish that
+  platform packaging, production migration or end-to-end rollout has passed.
+
+## [0.9.0] - 2026-10-29
+
+- Release Pishoo 0.9 as stable, with business Apps and Libs installed separately
+  as signed WAZ ZIP packages.
+- Let Pishoo initialize identity settings for gmutils. Preserve valid settings
+  and keep other identities running when one identity fails to start.
+- Load WASM directly and read App files from disk on demand.
+- Allow permission groups to include their own App entry.
+- Upgrade Wasmtime and WASI to 49.0.4, retaining WASI P2.
+- Require Rust 1.96 or newer to build from source.
+- Move the host crate to the repository root and update build and release paths.
+
+Upgrade notes: legacy config.db is ignored; setting v1/v2 directories are archived
+before creating fresh settings. Reconfigure listening and proxies for those
+identities. Legacy WEBC installation layouts require explicit reinstallation;
+private application data is preserved.
+
+Pishoo and pishoo-common both use 0.9.0. The SDK remains 0.1.0-preview.2.
 
 ## [0.9.0-preview.5] - 2026-10-23
 

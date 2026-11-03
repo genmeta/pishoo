@@ -48,7 +48,7 @@ fn validate_contents(files: &PackageFiles) -> Result<Value> {
     }
     if metadata["name"] == "app"
         && metadata["has_lib"] == true
-        && metadata["publisher"] != "std.dhttp.net"
+        && !crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or(""))
     {
         return Err(invalid(
             "ordinary Lib name conflicts with the frontend app namespace",
@@ -73,7 +73,7 @@ fn validate_contents(files: &PackageFiles) -> Result<Value> {
     if files.contains_key("backend.wasm") {
         let raw = package_openapi(files)?;
         let api = super::validate_openapi(raw)?;
-        if metadata["publisher"] == "std.dhttp.net"
+        if crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or(""))
             && api.paths.as_ref().unwrap().keys().any(|path| {
                 crate::routes::reserved(path)
                     || [
@@ -96,7 +96,7 @@ fn validate_contents(files: &PackageFiles) -> Result<Value> {
         {
             return Err(invalid("standard Lib conflicts with a reserved API path"));
         }
-        if metadata["publisher"] == "std.dhttp.net" {
+        if crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or("")) {
             let prefix = format!("/{}", metadata["name"].as_str().unwrap());
             if api.paths.as_ref().unwrap().keys().any(|path| {
                 path != &prefix
