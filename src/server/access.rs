@@ -219,7 +219,7 @@ pub(super) async fn load_access(
                     .ok_or_else(|| Error::InvalidConfig("invalid ACL path".into()))?],
             )?;
             let tx = db.transaction()?;
-            let schema = include_str!("../package/sql/schema-v3.sql")
+            let schema = include_str!("../package/sql/compat/v3/schema.sql")
                 .split("CREATE TABLE IF NOT EXISTS acl.lib_capability (")
                 .nth(1)
                 .unwrap();

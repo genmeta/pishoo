@@ -39,6 +39,7 @@ impl Clone for ProxyLocation {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/setup/tests.rs"]
 mod tests;
 
 pub(crate) fn load_server_config(profile: &IdentityProfile) -> Result<ServerConfig> {
@@ -203,6 +204,18 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
                 return Err(Error::InvalidConfig("incomplete package registry schema".into()));
             }
         }
+        let has_signing_evidence: bool = conn.query_row(
+            include_str!("package/sql/has_signing_evidence.sql"),
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_signing_evidence {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(include_str!(
+                "package/sql/migrations/v4_add_signing_evidence.sql"
+            ))?;
+            tx.commit()?;
+        }
         return Ok(());
     }
     if version != 0 {
@@ -216,9 +229,13 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
         ))?;
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    tx.execute_batch("CREATE TABLE IF NOT EXISTS setting(key TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS proxy_location(location TEXT PRIMARY KEY NOT NULL,proxy_pass TEXT NOT NULL);")?;
-    tx.execute_batch(include_str!("package/sql/schema-v3.sql"))?;
+    tx.execute_batch(include_str!("setup/sql/schema.sql"))?;
+    tx.execute_batch(include_str!("package/sql/schema.sql"))?;
+    let package_version: i64 =
+        tx.query_row("PRAGMA pkg_registry.user_version", [], |r| r.get(0))?;
+    if package_version != 4 {
+        tx.execute_batch("PRAGMA pkg_registry.user_version=4")?;
+    }
     tx.pragma_update(None, "user_version", 3)?;
     tx.commit()?;
     inherit_config_files(profile)?;
@@ -264,8 +281,7 @@ pub(crate) fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result
         conn.execute(&format!("ATTACH DATABASE ?1 AS {schema}"), [uri])?;
     }
     if conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE schema='pkg_registry' AND name='package')", [], |r|r.get::<_,bool>(0))? {
-        conn.execute_batch("CREATE TEMP VIEW lib AS SELECT * FROM pkg_registry.package WHERE has_lib=1;
-            CREATE TEMP VIEW app AS SELECT * FROM pkg_registry.package WHERE has_app=1;")?;
+        conn.execute_batch(include_str!("package/sql/runtime_views.sql"))?;
     }
     Ok(conn)
 }
@@ -404,9 +420,9 @@ fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()
             |row| row.get(0),
         )?;
         let mut names = conn.prepare(if has_author {
-            "SELECT name FROM lib WHERE author IS NULL OR author<>'std.dhttp.net' ORDER BY name"
+            "SELECT name FROM lib WHERE author IS NULL OR author NOT IN ('std.dhttp.net','dev.genmeta.tech.dhttp.net') ORDER BY name"
         } else {
-            "SELECT name FROM lib WHERE substr(id,1,14)<>'std.dhttp.net/' ORDER BY name"
+            "SELECT name FROM lib WHERE substr(id,1,14)<>'std.dhttp.net/' AND id NOT GLOB 'dev.genmeta.tech.dhttp.net/*' ORDER BY name"
         })?;
         for name in names.query_map([], |row| row.get::<_, String>(0))? {
             let mount = format!("/{}", name?);

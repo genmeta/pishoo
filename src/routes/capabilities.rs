@@ -64,7 +64,7 @@ pub(crate) fn capabilities_router(profile: IdentityProfile) -> Router {
                         [], |row| row.get(0),
                     )?;
                     let (key, lib_key) = if author { ("lib_name", "name") } else { ("lib_id", "id") };
-                    let standard = if author { "l.author='std.dhttp.net'" } else { "substr(l.id,1,14)='std.dhttp.net/'" };
+                    let standard = if author { "l.author IN ('std.dhttp.net','dev.genmeta.tech.dhttp.net')" } else { "(substr(l.id,1,14)='std.dhttp.net/' OR l.id GLOB 'dev.genmeta.tech.dhttp.net/*')" };
                     let package = if author {
                         "CASE WHEN coalesce(l.author,'')<>'' THEN l.author||'/'||l.name ELSE l.name END"
                     } else { "l.id" };
@@ -216,8 +216,10 @@ fn write_declarations(
     let mut endpoints = BTreeSet::new();
     let mut available = BTreeSet::new();
     if *method == Method::PUT && !groups.is_empty() {
-        let standard =
-            installed.as_ref().and_then(|(author, _)| author.as_deref()) == Some("std.dhttp.net");
+        let standard = installed
+            .as_ref()
+            .and_then(|(author, _)| author.as_deref())
+            .is_some_and(crate::package::is_standard_author);
         let prefix = if standard {
             "/std".to_owned()
         } else {

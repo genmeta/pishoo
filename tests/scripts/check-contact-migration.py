@@ -14,18 +14,31 @@ ROOT = Path(__file__).resolve().parents[2]
 def daccess_migrations():
     override = os.environ.get('DACCESS_PATH')
     if override:
-        return Path(override).expanduser().resolve() / 'src/migrations'
-    host = next(line.split(': ', 1)[1] for line in subprocess.check_output(
-        ['rustc', '-vV'], text=True).splitlines() if line.startswith('host: '))
-    metadata = json.loads(subprocess.check_output(
-        ['cargo', 'metadata', '--locked', '--offline', '--format-version', '1',
-         '--filter-platform', host,
-         '--manifest-path', str(ROOT / 'Cargo.toml')],
-        cwd=tempfile.gettempdir(), text=True,
-    ))
-    dependency = next(package for package in metadata['packages']
-                      if package['name'] == 'daccess')
-    return Path(dependency['manifest_path']).parent / 'src/migrations'
+        dependency_root = Path(override).expanduser().resolve()
+    else:
+        host = next(line.split(': ', 1)[1] for line in subprocess.check_output(
+            ['rustc', '-vV'], text=True).splitlines() if line.startswith('host: '))
+        metadata = json.loads(subprocess.check_output(
+            ['cargo', 'metadata', '--locked', '--offline', '--format-version', '1',
+             '--filter-platform', host,
+             '--manifest-path', str(ROOT / 'Cargo.toml')],
+            cwd=tempfile.gettempdir(), text=True,
+        ))
+        dependency = next(package for package in metadata['packages']
+                          if package['name'] == 'daccess')
+        dependency_root = Path(dependency['manifest_path']).parent
+    if (dependency_root / 'src/service/sql/schema.sql').is_file():
+        return [
+            dependency_root / 'src/service/sql' / path
+            for path in (
+                'schema.sql',
+                'migrations/v1_add_application_receipts.sql',
+                'migrations/v2_update_contact_lifecycle.sql',
+                'migrations/v3_add_review_decisions.sql',
+            )
+        ]
+    # The pinned Git dependency still uses its original source layout.
+    return [dependency_root / f'src/migrations/{step}.sql' for step in range(4)]
 
 
 MIGRATIONS = daccess_migrations()
@@ -36,7 +49,7 @@ class ContactMigration(unittest.TestCase):
         db = sqlite3.connect(':memory:')
         self.addCleanup(db.close)
         for step in range(version + 1):
-            db.executescript((MIGRATIONS / f'{step}.sql').read_text())
+            db.executescript(MIGRATIONS[step].read_text())
         db.execute('UPDATE module SET version=?', (version,))
         return db
 
@@ -50,7 +63,7 @@ class ContactMigration(unittest.TestCase):
         version = db.execute('SELECT version FROM module').fetchone()[0]
         db.commit()
         for step in range(version + 1, 3):
-            db.executescript('BEGIN;\n' + (MIGRATIONS / f'{step}.sql').read_text()
+            db.executescript('BEGIN;\n' + MIGRATIONS[step].read_text()
                              + f'\nUPDATE module SET version={step};\nCOMMIT;')
 
     def test_fresh_database_has_no_default_acl_rules(self):
@@ -127,7 +140,7 @@ class ContactMigration(unittest.TestCase):
     def test_new_delivery_schema_has_no_saved_collection(self):
         db = sqlite3.connect(':memory:')
         self.addCleanup(db.close)
-        db.executescript((ROOT / 'src/contact/sql/schema-v5.sql').read_text())
+        db.executescript((ROOT / 'src/contact/sql/schema.sql').read_text())
         self.assertFalse(db.execute("SELECT 1 FROM sqlite_master WHERE name='saved_contacts'").fetchall())
         columns = {row[1] for row in db.execute('PRAGMA table_info(outbound_contact_request)')}
         self.assertTrue({'contact_id', 'contact_subject'} <= columns)

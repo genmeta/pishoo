@@ -20,9 +20,27 @@ fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| invalid(&format!("missing or empty {key}")))
 }
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Frozen current-time inspection entry; online installation uses trusted historical time."
+    )
+)]
 pub(crate) fn read_package(bytes: &[u8]) -> Result<PackageFiles> {
+    read_package_at(bytes, chrono::Utc::now().timestamp())
+}
+pub(super) fn read_package_at(bytes: &[u8], at: i64) -> Result<PackageFiles> {
     let files = waz_read(bytes).map_err(|error| invalid(&error.to_string()))?;
-    let metadata = package_metadata(&files)?;
+    let metadata = validate_contents(&files)?;
+    let chain = super::signing::certificates(&files)?;
+    super::signing::verify_chain(&chain, metadata["publisher"].as_str().unwrap(), at)?;
+    verify_signature(&files, &metadata)?;
+    Ok(files)
+}
+
+fn validate_contents(files: &PackageFiles) -> Result<Value> {
+    let metadata = package_metadata(files)?;
     if metadata["name"] == "std" {
         return Err(invalid(
             "package name conflicts with the native std namespace",
@@ -30,7 +48,7 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<PackageFiles> {
     }
     if metadata["name"] == "app"
         && metadata["has_lib"] == true
-        && metadata["publisher"] != "std.dhttp.net"
+        && !crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or(""))
     {
         return Err(invalid(
             "ordinary Lib name conflicts with the frontend app namespace",
@@ -40,7 +58,7 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<PackageFiles> {
         if backend.get(..8) != Some(b"\0asm\x0d\0\x01\0") {
             return Err(invalid("backend must be a WASM component"));
         }
-        for item in wasmparser::Parser::new(0).parse_all(&backend) {
+        for item in wasmparser::Parser::new(0).parse_all(backend) {
             if let wasmparser::Payload::CustomSection(section) =
                 item.map_err(|_| invalid("malformed backend"))?
                 && section.name() == "pishoo:signature"
@@ -52,10 +70,10 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<PackageFiles> {
         }
     }
 
-    if files.get("backend.wasm").is_some() {
-        let raw = package_openapi(&files)?;
+    if files.contains_key("backend.wasm") {
+        let raw = package_openapi(files)?;
         let api = super::validate_openapi(raw)?;
-        if metadata["publisher"] == "std.dhttp.net"
+        if crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or(""))
             && api.paths.as_ref().unwrap().keys().any(|path| {
                 crate::routes::reserved(path)
                     || [
@@ -78,7 +96,7 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<PackageFiles> {
         {
             return Err(invalid("standard Lib conflicts with a reserved API path"));
         }
-        if metadata["publisher"] == "std.dhttp.net" {
+        if crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or("")) {
             let prefix = format!("/{}", metadata["name"].as_str().unwrap());
             if api.paths.as_ref().unwrap().keys().any(|path| {
                 path != &prefix
@@ -110,8 +128,7 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<PackageFiles> {
             ));
         }
     }
-    verify_signature(&files, &metadata)?;
-    Ok(files)
+    Ok(metadata)
 }
 
 pub(crate) fn package_openapi(files: &PackageFiles) -> Result<&[u8]> {
@@ -204,7 +221,10 @@ fn verify_signature(files: &PackageFiles, document: &Value) -> Result<()> {
     if !dhttp_home::certificate::verify_signature(certificate.public_key().raw, &input, &signature)
         .map_err(|_| invalid("unsupported publisher signing key"))?
     {
-        return Err(invalid("publisher signature verification failed"));
+        return Err(super::signing::policy(
+            "package_signature_invalid",
+            http::StatusCode::UNPROCESSABLE_ENTITY,
+        ));
     }
     Ok(())
 }
@@ -701,28 +721,11 @@ fn waz_payload(files: &std::collections::BTreeMap<String, Vec<u8>>) -> String {
 }
 
 #[cfg(test)]
-pub(super) fn waz_write(files: &std::collections::BTreeMap<String, Vec<u8>>) -> WazResult<Vec<u8>> {
-    use std::io::Write;
-    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .compression_level(Some(6))
-        .last_modified_time(zip::DateTime::default())
-        .unix_permissions(0o644);
-    for (name, bytes) in files {
-        writer.start_file(name, options)?;
-        writer.write_all(bytes)?;
-    }
-    let bytes = writer.finish()?.into_inner();
-    waz_read(&bytes)?;
-    Ok(bytes)
-}
-
-// Runtime fixtures extract the same raw component as installed packages.
-#[cfg(test)]
-pub(crate) fn runtime_fixture(bytes: &[u8]) -> Vec<u8> {
-    waz_read(bytes).unwrap().remove("backend.wasm").unwrap()
-}
-
-#[cfg(test)]
+#[path = "../../tests/unit/package/format/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/common/package_format.rs"]
+mod test_support;
+#[cfg(test)]
+pub(crate) use test_support::{runtime_fixture, waz_write};

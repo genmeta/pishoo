@@ -7,29 +7,37 @@ use std::{
 
 use dhttp_home::identity::IdentityProfile;
 
-#[cfg(test)]
-use crate::sandbox::WasmRuntime;
 use crate::{Error, Result, sandbox::Sandbox};
 
 mod files;
 mod format;
 mod manifest;
+mod signing;
 mod store;
 
 pub(crate) use files::{
-    app_file, disk_bytes, installed_apps, installed_packages, lib_root, remove_package, valid_id,
+    app_file, disk_bytes, installed_apps, installed_packages, lib_root, migrate_legacy_packages,
+    remove_package, valid_id,
 };
 #[cfg(test)]
 pub(crate) use files::{
     install_app, install_lib, install_package, installed_libs, remove_app, remove_lib,
 };
-pub(crate) use format::{PackageFiles, package_metadata, package_openapi, read_package};
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "Preserve the frozen current-time package inspection seam."
+    )
+)]
+pub(crate) use format::read_package;
+pub(crate) use format::{PackageFiles, package_metadata, package_openapi};
 pub use manifest::{validate_lib, validate_openapi};
 pub(crate) use store::install_store_package;
 #[cfg(test)]
 pub(crate) use store::{STORE_NAME, STORE_OWNER};
 
-fn require_owner(
+pub(crate) fn require_owner(
     endpoint: &dhttp::Endpoint,
     request: &http::Request<axum::body::Body>,
 ) -> Result<()> {
@@ -49,6 +57,10 @@ fn require_owner(
     Ok(())
 }
 
+pub(crate) fn is_standard_author(author: &str) -> bool {
+    matches!(author, "std.dhttp.net" | "dev.genmeta.tech.dhttp.net")
+}
+
 fn lib_metadata(package: &PackageFiles, id: Option<&str>) -> serde_json::Value {
     // Installed packages are trusted after installation. Catalog reads parse
     // display metadata without repeating package or OpenAPI policy validation.
@@ -59,13 +71,14 @@ fn lib_metadata(package: &PackageFiles, id: Option<&str>) -> serde_json::Value {
     let mut endpoints = Vec::new();
     if package.get("backend.wasm").is_some() {
         let identity = id.unwrap_or_else(|| value["id"].as_str().unwrap());
-        let prefix = if identity.starts_with("std.dhttp.net/") {
+        let prefix = if crate::package::is_standard_author(identity.split('/').next().unwrap_or(""))
+        {
             "/std".to_owned()
         } else {
             format!("/{}", identity.rsplit('/').next().unwrap())
         };
         let openapi: oas3::OpenApiV3Spec = match package_openapi(package).and_then(|bytes| {
-            serde_json::from_slice(&bytes)
+            serde_json::from_slice(bytes)
                 .map_err(|error| Error::InvalidComponent(error.to_string()))
         }) {
             Ok(openapi) => openapi,
@@ -93,16 +106,6 @@ fn lib_metadata(package: &PackageFiles, id: Option<&str>) -> serde_json::Value {
         value["id"] = id.into();
     }
     value
-}
-
-#[cfg(test)]
-pub(crate) fn check_lib(bytes: &[u8], runtime: &WasmRuntime) -> Result<oas3::OpenApiV3Spec> {
-    let package = read_package(bytes)?;
-    let openapi = validate_openapi(package_openapi(&package)?)?;
-    if let Some(backend) = package.get("backend.wasm") {
-        runtime.compile(backend)?;
-    }
-    Ok(openapi)
 }
 
 // Installation metadata belongs to config.db. Neither payload availability nor
@@ -147,6 +150,12 @@ pub(crate) fn pkg_management_router(
             let mut response = pkg_management_request(profile, endpoint, sandbox, request)
                 .await
                 .unwrap_or_else(|error| {
+                    if let Error::PackagePolicy { code, status } = &error {
+                        return (*status, axum::Json(serde_json::json!({"error":{"code":code,"retryable":false}}))).into_response();
+                    }
+                    if matches!(error, Error::SigningStatusUnavailable) {
+                        return (http::StatusCode::SERVICE_UNAVAILABLE, [(http::header::RETRY_AFTER,"30")], axum::Json(serde_json::json!({"error":{"code":"signing_status_unavailable","retryable":true}}))).into_response();
+                    }
                     let status = match &error {
                         Error::InvalidComponent(_) => http::StatusCode::BAD_REQUEST,
                         Error::Io(io) if io.kind() == std::io::ErrorKind::InvalidInput => {
@@ -167,6 +176,9 @@ pub(crate) fn pkg_management_router(
             response
                 .headers_mut()
                 .insert("supported-versions", "v1".parse().unwrap());
+            response
+                .headers_mut()
+                .insert("pishoo-version", env!("CARGO_PKG_VERSION").parse().unwrap());
             response
         }
     };
@@ -362,11 +374,12 @@ async fn pkg_management_request(
                 && value["version"].as_str() == Some(lib.openapi.info.version.as_str())
             {
                 let id = value["id"].as_str().unwrap();
-                let prefix = if id.starts_with("std.dhttp.net/") {
-                    "/std".to_owned()
-                } else {
-                    format!("/{}", id.rsplit('/').next().unwrap())
-                };
+                let prefix =
+                    if crate::package::is_standard_author(id.split('/').next().unwrap_or("")) {
+                        "/std".to_owned()
+                    } else {
+                        format!("/{}", id.rsplit('/').next().unwrap())
+                    };
                 let mut endpoints = Vec::new();
                 if let Some(paths) = &lib.openapi.paths {
                     for (path, item) in paths {
@@ -444,4 +457,11 @@ async fn pkg_management_request(
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/package/tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "../tests/common/package.rs"]
+mod test_support;
+#[cfg(test)]
+pub(crate) use test_support::check_lib;

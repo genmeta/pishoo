@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.9.0-1f6feb?style=flat-square" alt="Version 0.9.0">
+  <img src="https://img.shields.io/badge/version-0.9.1--preview.1-1f6feb?style=flat-square" alt="Version 0.9.1-preview.1">
   <img src="https://img.shields.io/badge/Rust-2024-dea584?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-4c956c?style=flat-square" alt="Apache-2.0 license"></a>
 </p>
@@ -28,12 +28,17 @@ Pishoo takes its name from Pixiu (貔貅), an auspicious creature in ancient Chi
 Pishoo 0.9 uses per-identity SQLite configuration, name-based access control,
 and WASM components. See the [Pishoo documentation](https://docs.dhttp.net/en/docs/core-components/pishoo) for configuration and usage.
 
+The current preview candidate is **0.9.1-preview.1**, based on 0.9.0. It adds
+offline developer-signature verification, local Jade development and the official
+author transition, and preserves identity ACL rules across reinstallation. See
+the [release notes](CHANGELOG.md#091-preview1---2026-11-04) for upgrade limits.
+
 ### Local development build
 
-Rust 1.96 or newer is required by Wasmtime 49. Dependencies are resolved from Cargo.lock, including the crates.io release of daccess 0.2.0; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
+Dependencies are resolved from Cargo.lock, including the crates.io release of daccess 0.2.0; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
 
 ```sh
-git clone --branch release/0.9.0 https://github.com/genmeta/pishoo.git
+git clone --branch v0.9.1-preview.1 https://github.com/genmeta/pishoo.git
 cd pishoo
 cargo build --locked -p pishoo --bin pishoo
 cargo test --locked --workspace -- --test-threads=1
@@ -44,7 +49,7 @@ The host build is independent of frontend tooling. Business products live in six
 
 ### Package releases
 
-New `.waz` releases are standard ZIP archives with a signed JSON manifest, runtime files and optional README.md/CHANGELOG.md. See [WAZ v1](WAZ.md). Publication and installation reject legacy WEBC releases; rebuild application packages and update both registry and host readers before rollout. Existing installations using the current WASM/App directory layout and private data are retained. Legacy archive layouts require explicit reinstallation. Stored releases are not converted or re-signed.
+New `.waz` releases are standard ZIP archives with a signed JSON manifest, runtime files and optional README.md/CHANGELOG.md. See [WAZ v1](WAZ.md). Publication and installation reject legacy WEBC releases; rebuild application packages and update both registry and host readers before rollout. Existing installed resources and private data are retained. This preparation does not migrate, delete or re-sign stored releases.
 
 ### Install Pishoo
 
@@ -59,7 +64,7 @@ wget -qO- https://download.dhttp.net/ppa/key/public.key | gpg --dearmor | sudo t
 sudo tee /etc/apt/sources.list.d/genmeta.sources > /dev/null <<'EOF'
 Types: deb
 URIs: https://download.dhttp.net/ppa/genmeta
-Suites: stable
+Suites: stable preview
 Components: main
 Signed-By: /etc/apt/keyrings/genmeta.gpg
 EOF
@@ -84,8 +89,8 @@ uses `DHTTP_HOME`. No `dhttp` group membership is required.
 #### macOS
 
 ```sh
-brew tap genmeta/stable https://github.com/genmeta/homebrew-stable
-brew trust genmeta/stable
+brew tap genmeta/preview https://github.com/genmeta/homebrew-preview
+brew trust genmeta/preview
 brew update
 brew install pishoo gmutils
 ```
@@ -136,11 +141,11 @@ validated and committed together at the exact versions declared by the new packa
 matching loaded dependencies are reused. Conflicts with other installed applications
 reject the update, and failures restore the previous installation. Same-author API
 and capability changes preserve existing ACL rules and private data. See the
-[0.9.0 release notes](CHANGELOG.md#090---2026-10-29).
+[preview.5 release notes](CHANGELOG.md#090-preview5---2026-10-23).
 
 ### Configuration
 
-Database SQL files live beside their owning modules in [contact/sql](src/contact/sql/) and [package/sql](src/package/sql/), with schema versions and migration source/target versions in their filenames.
+Database SQL files stay with their owning modules (`src/package/sql/`, `src/contact/sql/`, `src/setup/sql/`). See the [SQL layout and naming rules](docs/sql.md). Test-only historical schemas remain in `tests/fixtures/`.
 
 Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's home. Listening is stored in `<identity>/.volume/sys/setting/database` as the `setting` key `listen`; an absent key keeps the identity stopped across discovery and restarts. `genmeta listen --id NAME internal` opts in, `all` selects both internal and external scopes, and `genmeta listen --id NAME off` deletes the key after confirmation. Proxy rows use `proxy_location`. Legacy `db/config.db` is preserved but ignored. Current-path setting v1/v2 directories, including SQLite sidecars, are archived before fresh v3 initialization; old listener and proxy settings are not migrated. Valid v3 settings are retained. Endpoint and shared Network lifetimes are unchanged. See [Review implementation](REVIEW-IMPLEMENTATION-2026-10-21.md).
 
@@ -154,7 +159,7 @@ ACL management selects resources through query parameters: `/std/acl/access?api=
 
 Startup creates `.volume/sys/{setting,pkg,access,contact}/`, `lib/std/`, `app/`, `log/`, and `repo/`. New configuration stays stopped until listening is explicitly configured. New ACLs contain only native contact and permission-discovery rules. Business pages and APIs, including Workspace, Introduction and Profile, have no preconfigured grants or denials. Install Workspace and configure access as the verified owner; publishing an App does not publish its backend APIs. Existing authorization decisions are preserved. No business package or templates directory is created automatically. Package registration and the capability catalog are initialized before runtime loading; Libs load before Apps. Legacy archive layouts require explicit reinstallation.
 
-Native ACL defaults are written once when initializing a new authorization database: authenticated identities may POST/GET `/std/contact` and GET `/std/acl/status`, GET `/std/contact/list` is denied to visitors, and GET `/std/acl/permissions` is public. There is no defaults configuration file or provider exemption during installation. Access is managed in Workspace or with `genmeta access`; restarts and package installation never reapply defaults. New providers must not inherit existing ACL rules for their routes.
+Native ACL defaults are written once when initializing a new authorization database: authenticated identities may POST/GET `/std/contact` and GET `/std/acl/status`, GET `/std/contact/list` is denied to visitors, and GET `/std/acl/permissions` is public. There is no defaults configuration file or provider exemption during installation. Access is managed in Workspace or with `genmeta access`; restarts and package installation never reapply defaults. ACL rules belong to the identity and are evaluated by path and method independently of package authors. Installation never rejects a package merely because matching rules exist. Uninstallation retains both ACL rules and business data without a backup; after explicit removal, a different signed author can be installed under the same name and the existing path rules continue to apply. Same-name cross-author replacement remains blocked while the old package is installed.
 
 Existing daccess schema v0 databases are backed up through SQLite before the library upgrades them through schema v3. The older 0.8.2 `location_rule_sets/location_rules` format is unsupported and stops startup with the original database preserved; it is never silently replaced with new defaults. Missing, corrupt, incomplete, and unsupported databases are distinguished. Pishoo does not create identity credentials, `server.conf`, or an instance configuration file. Linux packages use `User=root` without setting `DHTTP_HOME`. Existing manual overrides remain authoritative; custom deployments can set them in `/etc/systemd/system/pishoo.service.d/`.
 
@@ -182,11 +187,13 @@ This diagnostic assumes an installed Lib published by `std.dhttp.net` declaring 
 
 ### Testing
 
-The root Cargo package builds only the host. Private unit tests use ordinary
-`mod tests` modules beside the implementation in `src/`; `tests/` holds CLI
-integration tests, WASM fixtures and opt-in scripts. Diagnostic binaries have an
-independent, unpublished manifest at `tests/tools/Cargo.toml` and are not host
-example targets. SDK/WIT and release tooling remain in `wit/` and `xtask/`.
+The root Cargo package builds only the host. Private unit tests live in
+`tests/unit/`, with shared test-only helpers in `tests/common/`. Production `src/`
+contains only cfg-gated test module declarations, reexports and injection hooks.
+`tests/` also holds CLI integration tests, WASM fixtures and opt-in scripts.
+Diagnostic binaries have an independent, unpublished manifest at
+`tests/tools/Cargo.toml` and are not host example targets. SDK/WIT and release
+tooling remain in `wit/` and `xtask/`. See [test layout](docs/testing-layout.md).
 
 Run the normal Rust checks from a release checkout with its registry lockfile:
 
@@ -267,7 +274,7 @@ Pishoo uses daccess 0.2.0 from crates.io in `Cargo.toml`, with the exact resolve
 
 App and Lib developers must distinguish `202 pending_review` from accepted business jobs. See the [approval integration guide](docs/approval-handling.md) for response handling, live waits, timeouts, identity-bound status queries, idempotency and pending-state UI guidance.
 
-### Local configuration with gmutils (release/0.9.0)
+### Local configuration with gmutils
 
 Use matching gmutils and Pishoo releases. `genmeta listen` and identity service
 activation delegate to Pishoo locally, even when HTTP listening is off:
@@ -298,3 +305,32 @@ are logged and retried without stopping healthy identities. Identities with old 
 empty host configuration get fresh defaults; credentials alone do not enable hosting.
 Unsupported future schemas, corrupt databases and filesystem errors are reported
 without overwriting those files or terminating the whole host.
+
+Developer-signed package installation is introduced in Pishoo 0.9.1-preview.1.
+The host independently checks the whole exact dependency closure, signed
+Registry publication receipts and independently distributed issuer CRLs.
+See [developer installation policy](docs/developer-install-policy.md) for the
+schema migration, structured errors and offline trust configuration. Historical
+compliant versions do not require the author to keep paying a current annual
+subscription. The exact official author is `dev.genmeta.tech.dhttp.net`; only historical
+`std.dhttp.net` keeps standard runtime placement. The production author-transfer
+authorization list is empty, so this candidate does not automatically transfer
+old installations or publish replacement application releases.
+
+Debug sandbox builds may set PISHOO_REGISTRY_NAME and PISHOO_REGISTRY_OWNER_HASH
+at compile time together with an isolated DHTTP_ROOT_CA_PEM and target directory.
+Release builds reject either Registry override, even if its value is empty.
+The official Registry pins are used when no override is supplied; setting these
+variables when running an already built executable does not change its pins.
+Pishoo startup and logging honor DHTTP_HOME. Registry supports REGISTRY_SCOPE=internal
+with local mDNS discovery, or REGISTRY_SCOPE=loopback for explicit localhost peers;
+the default scope remains external.
+
+
+## Local development with Jade
+
+Run an unpublished project with `jade run --id dev.zero.ai` using an already
+running local Pishoo process and the selected development identity. Local
+development requires no developer certificate or subscription. It provides isolated test data, file watching, atomic reloads and
+cleanup when the command exits. Formal publication and installation continue to
+require signed releases. See [the local development guide](docs/jade-run.md).

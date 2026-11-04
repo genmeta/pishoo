@@ -353,4 +353,5 @@ async fn deliver(
 }
 
 #[cfg(test)]
+#[path = "../../tests/unit/contact/delivery/tests.rs"]
 mod tests;

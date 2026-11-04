@@ -1,5 +1,6 @@
 //! Identity-bound HTTP services, components and management routes.
 mod contact;
+mod development;
 mod dns;
 mod error;
 mod package;
@@ -9,6 +10,7 @@ mod server;
 mod setup;
 
 #[cfg(test)]
+#[path = "../tests/common/test_support.rs"]
 mod test_support;
 
 pub use error::Error;

@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.9.1-preview.1] - 2026-11-04
+
+### Added
+
+- Verify developer-signed WAZ packages and immutable Registry publication
+  receipts offline. Bind the complete archive, canonical author, owner and
+  certificate chain to the Registry's authenticated publication time; ordinary
+  certificate expiry does not invalidate an accepted historical release.
+- Verify independently distributed issuer CRLs and retain authenticated newer
+  evidence without allowing rollback to older lists. Known revocations block
+  installation even after a cached list expires; stale supplied lists are
+  rejected. Missing CRLs mean revocation status is unknown, not guaranteed clear.
+- Serve local Jade projects from identity-owned `dev/<name>/` files through the
+  normal App and Lib URLs, reusing the running host. Require the authenticated
+  real owner and safe filesystem permissions; load changed WASM on demand and
+  fall back to installed dependencies when no local project exists. Local code
+  needs no developer certificate or subscription; formal store installs retain
+  all signature and publication checks. See [local development](docs/jade-run.md).
+- Support audited, compile-time author-transfer authorizations for exact
+  historical installations. Transfers preserve runtime files, private data, ACLs
+  and original signing facts, and commit each authorized group atomically.
+
+### Changed
+
+- Use `dev.genmeta.tech.dhttp.net` as the exact official package author, retaining
+  `std.dhttp.net` only for historical runtime compatibility. Preserve standard
+  `/std/<name>` routes and `.volume/std/<name>` data placement; other developer
+  names do not gain the standard namespace.
+- Accept both historical codeSigning-only certificates and the unified developer
+  certificate profile with serverAuth, clientAuth and codeSigning. Ordinary TLS
+  certificates cannot sign installable packages.
+- Keep ACLs as identity-owned path and method rules independently of package
+  authors. Existing rules no longer block first installation or reinstallation.
+  Uninstallation retains ACLs and business data without backing up or clearing
+  them; after explicit removal, another signed author may install the same name
+  and the existing rules continue to apply. Cross-author replacement of an
+  installed package, owner continuity and exact dependencies remain checked.
+- Move remaining test implementations and helpers out of `src/` into `tests/`.
+  Organize production SQL under its owning module with explicit migration order.
+
+### Fixed
+
+- Preserve committed package files when recovery-journal cleanup fails after
+  the database commit; later recovery completes cleanup without rolling back
+  committed resources.
+- Reject sandbox Registry overrides in production builds, including empty
+  overrides, and keep official Registry pins independent of runtime variables.
+- Honor `DHTTP_HOME` for user-mode startup and logging. Retain the Rust 1.96
+  minimum required by Wasmtime 49.
+
+### Upgrade notes
+
+- Pishoo and pishoo-common advance together to `0.9.1-preview.1`; the release tag
+  is `v0.9.1-preview.1`. The SDK remains `0.1.0-preview.2`.
+- Package schema v3 upgrades transactionally to v4 signing-evidence columns.
+  Existing registrations and data remain; missing historical evidence is not
+  fabricated. New installations require compatible developer-signed packages,
+  Registry receipts and exact dependency releases. See the
+  [installation policy](docs/developer-install-policy.md).
+- The production historical-author authorization list is currently empty.
+  This candidate does not automatically transfer existing official packages or
+  rewrite historical signed archives. Application publication and Registry
+  deployment are separate release steps.
+- Use matching gmutils/Jade for local development and publication. Local projects
+  use normal `/app/<name>`, `/<name>` or `/std/<name>` URLs without a `/dev` alias;
+  data belongs to the selected identity and survives removal of local code.
+- This is a preview candidate. Release preparation does not establish that
+  platform packaging, production migration or end-to-end rollout has passed.
+
 ## [0.9.0] - 2026-10-29
 
 - Release Pishoo 0.9 as stable, with business Apps and Libs installed separately

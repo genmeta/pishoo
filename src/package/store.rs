@@ -10,24 +10,35 @@ use dhttp_home::identity::IdentityProfile;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{Sandbox, installed_packages, package_metadata, read_package};
-#[cfg(test)]
-use super::{install_lib, package_openapi};
-#[cfg(test)]
-use crate::sandbox::Lib;
+use super::{Sandbox, installed_packages, package_metadata};
 use crate::{Error, Result};
 
-pub(crate) const STORE_NAME: &str = "store.dhttp.net";
+// Sandbox pins are a debug-build facility. Fail closed if a release build
+// inherits either override, including an empty value, from its build environment.
+pub(crate) const STORE_NAME: &str = {
+    assert!(
+        cfg!(debug_assertions)
+            || (option_env!("PISHOO_REGISTRY_NAME").is_none()
+                && option_env!("PISHOO_REGISTRY_OWNER_HASH").is_none()),
+        "PISHOO_REGISTRY_NAME and PISHOO_REGISTRY_OWNER_HASH are only allowed in debug builds"
+    );
+    match option_env!("PISHOO_REGISTRY_NAME") {
+        Some(value) => value,
+        None => "store.dhttp.net",
+    }
+};
 // Independent store-server/DEPLOYMENT.md, verified on 2026-10-13.
-pub(crate) const STORE_OWNER: &str =
-    "ffc3e50e1dfb7baca1cc07a7cbfcf8cb34a9bf5a9c25024fcf9a9786bb230746";
+pub(crate) const STORE_OWNER: &str = match option_env!("PISHOO_REGISTRY_OWNER_HASH") {
+    Some(value) => value,
+    None => "ffc3e50e1dfb7baca1cc07a7cbfcf8cb34a9bf5a9c25024fcf9a9786bb230746",
+};
 
 async fn download_release(
     endpoint: &dhttp::Endpoint,
     publisher: &str,
     name: &str,
     version: &str,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, Value)> {
     let id = format!("{publisher}/{name}");
     super::valid_id(&id)?;
     let parts = version.split('.').collect::<Vec<_>>();
@@ -45,7 +56,7 @@ async fn download_release(
     }
     let path = format!("/store/v1/packages/{publisher}/{name}/versions/{version}");
     let metadata: Value =
-        serde_json::from_slice(&store_get(endpoint, &path, 2 * 1024 * 1024).await?)
+        serde_json::from_slice(&store_get(endpoint, &path, 8 * 1024 * 1024).await?)
             .map_err(|_| Error::InvalidComponent("invalid store metadata".into()))?;
     let download = format!("{path}/package.waz");
     if metadata["id"] != id
@@ -59,6 +70,9 @@ async fn download_release(
             "store release identity, status or download path changed".into(),
         ));
     }
+    // Legacy metadata remains auditable, but its bytes are no longer eligible
+    // for new installation. Classify this before Registry rejects the download.
+    publication_time(&metadata)?;
     let size = metadata["size"]
         .as_u64()
         .filter(|size| *size > 0 && *size <= 64 * 1024 * 1024)
@@ -67,7 +81,7 @@ async fn download_release(
     // signed source bytes so the authenticated store digest can still be checked.
     let bytes = store_get(endpoint, &download, size as usize).await?;
     verify_release(&bytes, &metadata, publisher, name, version)?;
-    Ok(bytes)
+    Ok((bytes, metadata))
 }
 
 pub(crate) async fn install_store_package(
@@ -82,11 +96,11 @@ pub(crate) async fn install_store_package(
     super::valid_id(&root_id)?;
     let installed = installed_packages(profile, None)?;
     let mut pending = vec![(publisher.to_owned(), name.to_owned(), version.to_owned())];
-    let mut resources: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut resources: Vec<(String, Vec<u8>, Value)> = Vec::new();
     while let Some((publisher, name, version)) = pending.pop() {
         let id = format!("{publisher}/{name}");
-        if let Some((_, bytes)) = resources.iter().find(|(key, _)| key == &id) {
-            if package_metadata(&read_package(bytes)?)?["version"] != version {
+        if let Some((_, _, proof)) = resources.iter().find(|(key, _, _)| key == &id) {
+            if proof["version"] != version {
                 return Err(Error::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!("conflicting dependency versions for {id}"),
@@ -101,7 +115,7 @@ pub(crate) async fn install_store_package(
         }
         if resources
             .iter()
-            .any(|(other, _)| other != &id && other.rsplit('/').next() == Some(name.as_str()))
+            .any(|(other, _, _)| other != &id && other.rsplit('/').next() == Some(name.as_str()))
         {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -119,8 +133,32 @@ pub(crate) async fn install_store_package(
                 format!("package {name} is already installed by another author"),
             )));
         }
-        let bytes = download_release(endpoint, &publisher, &name, &version).await?;
-        let document = package_metadata(&read_package(&bytes)?)?;
+        let (bytes, mut proof) = download_release(endpoint, &publisher, &name, &version).await?;
+        if let Some(current) = installed.as_array().unwrap().iter().find(|p| p["id"] == id)
+            && current["author_owner_hash"].is_null()
+        {
+            let old_version = current["version"].as_str().ok_or_else(|| {
+                super::signing::policy("publisher_ownership_conflict", http::StatusCode::CONFLICT)
+            })?;
+            let (_, previous) =
+                match download_release(endpoint, &publisher, &name, old_version).await {
+                    Ok(release) => release,
+                    Err(Error::SigningStatusUnavailable) => {
+                        return Err(Error::SigningStatusUnavailable);
+                    }
+                    Err(_) => {
+                        return Err(super::signing::policy(
+                            "publisher_ownership_conflict",
+                            http::StatusCode::CONFLICT,
+                        ));
+                    }
+                };
+            proof["_previous_release"] = previous;
+        }
+        let document = package_metadata(&super::format::read_package_at(
+            &bytes,
+            proof["signature"]["verified_at"].as_i64().unwrap(),
+        )?)?;
         for dep in document["dependencies"].as_array().unwrap() {
             pending.push((
                 dep["publisher"].as_str().unwrap().to_owned(),
@@ -128,7 +166,7 @@ pub(crate) async fn install_store_package(
                 dep["version"].as_str().unwrap().to_owned(),
             ));
         }
-        resources.push((id, bytes));
+        resources.push((id, bytes, proof));
     }
     let ordered = order_packages(resources)?;
     tokio::task::block_in_place(|| {
@@ -138,21 +176,38 @@ pub(crate) async fn install_store_package(
         }
         // The root is last in dependency order. Prepare its response before the
         // commit so no fallible work follows the durable/runtime switch.
-        let result =
-            super::lib_metadata(&read_package(&ordered.last().unwrap().1)?, Some(&root_id));
+        let result = super::lib_metadata(
+            &super::format::read_package_at(
+                &ordered.last().unwrap().1,
+                ordered.last().unwrap().2["signature"]["verified_at"]
+                    .as_i64()
+                    .unwrap(),
+            )?,
+            Some(&root_id),
+        );
         super::files::install_packages(profile, &ordered, &mut sandbox)?;
         Ok(result)
     })
 }
 
-fn order_packages(mut resources: Vec<(String, Vec<u8>)>) -> Result<Vec<(String, Vec<u8>)>> {
-    let mut ordered: Vec<(String, Vec<u8>)> = Vec::new();
+fn order_packages(
+    mut resources: Vec<(String, Vec<u8>, Value)>,
+) -> Result<Vec<(String, Vec<u8>, Value)>> {
+    let mut ordered: Vec<(String, Vec<u8>, Value)> = Vec::new();
     while !resources.is_empty() {
         let mut ready = None;
-        for (index, (_, bytes)) in resources.iter().enumerate() {
-            let doc = package_metadata(&read_package(bytes)?)?;
+        for (index, (_, bytes, proof)) in resources.iter().enumerate() {
+            let doc = package_metadata(&super::format::read_package_at(
+                bytes,
+                proof["signature"]["verified_at"].as_i64().ok_or_else(|| {
+                    super::signing::policy(
+                        "package_policy_upgrade_required",
+                        http::StatusCode::UNPROCESSABLE_ENTITY,
+                    )
+                })?,
+            )?)?;
             if doc["dependencies"].as_array().unwrap().iter().all(|dep| {
-                ordered.iter().any(|(id, _)| {
+                ordered.iter().any(|(id, _, _)| {
                     id == &format!(
                         "{}/{}",
                         dep["publisher"].as_str().unwrap(),
@@ -189,7 +244,8 @@ async fn store_get(endpoint: &dhttp::Endpoint, path: &str, limit: usize) -> Resu
                 http::header::ACCEPT,
                 http::HeaderValue::from_static(content_type),
             )
-            .await?;
+            .await
+            .map_err(|_| Error::SigningStatusUnavailable)?;
         let remote = response
             .extensions()
             .get::<dhttp::RemoteAuthority>()
@@ -209,10 +265,7 @@ async fn store_get(endpoint: &dhttp::Endpoint, path: &str, limit: usize) -> Resu
                 return Err(Error::BadRequest("store version has been withdrawn".into()));
             }
             _ => {
-                return Err(Error::BadRequest(format!(
-                    "store request failed ({})",
-                    response.status()
-                )));
+                return Err(Error::SigningStatusUnavailable);
             }
         }
         if !response
@@ -231,7 +284,7 @@ async fn store_get(endpoint: &dhttp::Endpoint, path: &str, limit: usize) -> Resu
         use http_body_util::BodyExt;
         while let Some(frame) = body.frame().await {
             let data = frame
-                .map_err(|error| Error::Io(std::io::Error::other(error)))?
+                .map_err(|_| Error::SigningStatusUnavailable)?
                 .into_data()
                 .map_err(|_| Error::BadRequest("store response trailers are unsupported".into()))?;
             if data.len() > limit.saturating_sub(bytes.len()) {
@@ -244,10 +297,29 @@ async fn store_get(endpoint: &dhttp::Endpoint, path: &str, limit: usize) -> Resu
         Ok(bytes)
     })
     .await
-    .map_err(|_| Error::Deadline)?
+    .map_err(|_| Error::SigningStatusUnavailable)?
 }
 
-fn verify_release(
+fn publication_time(metadata: &Value) -> Result<i64> {
+    let signature = &metadata["signature"];
+    let invalid = || {
+        super::signing::policy(
+            "package_policy_upgrade_required",
+            http::StatusCode::UNPROCESSABLE_ENTITY,
+        )
+    };
+    let at = signature["verified_at"]
+        .as_i64()
+        .filter(|at| *at > 0 && *at <= chrono::Utc::now().timestamp())
+        .ok_or_else(invalid)?;
+    if signature["purpose"] != "code_signing" {
+        return Err(invalid());
+    }
+    super::signing::verify_receipt(metadata, at)?;
+    Ok(at)
+}
+
+pub(super) fn verify_release(
     bytes: &[u8],
     metadata: &Value,
     publisher: &str,
@@ -260,8 +332,28 @@ fn verify_release(
     {
         return Err(invalid("store package digest or size mismatch"));
     }
-    // Validate the entire signed ZIP package, not only the backend.
-    let package = read_package(bytes)?;
+    let signature = &metadata["signature"];
+    let at = publication_time(metadata)?;
+    let package = super::format::read_package_at(bytes, at)?;
+    let facts = super::signing::facts(&package, publisher, at)?;
+    for key in ["leaf_fingerprint_sha256", "issuer_id", "ski"] {
+        if signature[key] != facts[key] {
+            return Err(invalid(
+                "publication signature differs from package certificate",
+            ));
+        }
+    }
+    if signature["serial_number"]
+        .as_str()
+        .map(|s| s.trim_start_matches('0').to_ascii_lowercase())
+        != facts["serial_number"]
+            .as_str()
+            .map(|s| s.trim_start_matches('0').to_ascii_lowercase())
+    {
+        return Err(invalid(
+            "publication serial differs from package certificate",
+        ));
+    }
     let document = package_metadata(&package)?;
     let data = &package["signature.json"];
     let envelope: Value =
@@ -274,7 +366,10 @@ fn verify_release(
             "author":dependency["publisher"],"name":dependency["name"],"version":dependency["version"]
         }))
         .collect::<Vec<_>>();
-    if document["publisher"] != publisher
+    if metadata["id"] != format!("{publisher}/{name}")
+        || metadata["name"] != name
+        || metadata["version"] != version
+        || document["publisher"] != publisher
         || metadata["author"] != publisher
         || document["name"] != name
         || document["version"] != version
@@ -324,4 +419,5 @@ fn verify_release(
 }
 
 #[cfg(test)]
+#[path = "../../tests/unit/package/store/tests.rs"]
 mod tests;

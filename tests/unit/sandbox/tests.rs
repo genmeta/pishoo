@@ -1,0 +1,48 @@
+use std::path::Path;
+
+use bytes::Bytes;
+use http::Request;
+use http_body::Frame;
+use http_body_util::{BodyExt, StreamBody};
+use wasmtime::StoreLimits;
+
+use super::{host::identity, *};
+use crate::{
+    Body,
+    package::{
+        install_lib, installed_libs, read_package, remove_lib,
+        tests::{package_component, runtime_fixture},
+        validate_lib,
+    },
+};
+
+#[path = "tests/api.rs"]
+mod api;
+#[path = "tests/deployment.rs"]
+mod deployment;
+#[path = "tests/execution.rs"]
+mod execution;
+#[path = "tests/resources.rs"]
+mod resources;
+#[path = "tests/store_network.rs"]
+mod store_network;
+
+// Independent fixture routers own a collection initialized from each test's
+// supplied resources. Live management tests share one Sandbox between routers.
+pub(crate) fn api_router(sandbox: &Sandbox, endpoint: dhttp::Endpoint) -> axum::Router {
+    Sandbox::api_router(
+        Arc::new(RwLock::new(Sandbox {
+            libs: sandbox.libs.clone(),
+            apps: sandbox.apps.clone(),
+            runtime: sandbox.runtime.clone(),
+            tasks: sandbox.tasks.clone(),
+            dev_libs: HashMap::new(),
+        })),
+        endpoint.clone(),
+        Arc::new(access_control::AccessService::new(
+            sea_orm::DatabaseConnection::default(),
+            endpoint.name(),
+        )),
+        axum::Router::new(),
+    )
+}

@@ -137,4 +137,5 @@ fn outbound_uri(uri: &Uri) -> Result<(Uri, String)> {
 }
 
 #[cfg(test)]
+#[path = "../../tests/unit/routes/outbound/tests.rs"]
 mod tests;
