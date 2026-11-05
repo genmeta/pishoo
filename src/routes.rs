@@ -8,7 +8,6 @@ use axum::{
 };
 use http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
-use tokio_util::io::ReaderStream;
 
 use self::proxy::proxy;
 use crate::{Error, Result, setup::ProxyLocation};
@@ -42,12 +41,19 @@ fn reject(error: Error) -> Response {
 
 pub(crate) fn file_router(root: PathBuf) -> Router {
     Router::new()
-        .route("/std/file", any(|| async { StatusCode::NOT_FOUND }))
+        .route(
+            "/std/file",
+            any(|| async { (StatusCode::NOT_FOUND, [(header::CACHE_CONTROL, "no-store")]) }),
+        )
         .route(
             "/std/file/{*path}",
             any(move |request: Request<AxumBody>| {
                 let root = root.clone();
-                async move { static_file(&root, request).await.unwrap_or_else(reject) }
+                async move {
+                    static_file(&root, request).await.unwrap_or_else(|error| {
+                        ([(header::CACHE_CONTROL, "no-store")], reject(error)).into_response()
+                    })
+                }
             }),
         )
 }
@@ -129,7 +135,7 @@ async fn static_file(root: &std::path::Path, request: Request<AxumBody>) -> Resu
     }
     let mut path = std::path::PathBuf::from(decoded.trim_start_matches('/'));
     let root = root.to_path_buf();
-    let (file, metadata, path) = tokio::task::spawn_blocking(move || -> Result<_> {
+    tokio::task::spawn_blocking(move || -> Result<_> {
         let dir = cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority())
             .map_err(|_| Error::RouteNotFound)?;
         if path.as_os_str().is_empty() || dir.metadata(&path).is_ok_and(|m| m.is_dir()) {
@@ -140,30 +146,9 @@ async fn static_file(root: &std::path::Path, request: Request<AxumBody>) -> Resu
         if !metadata.is_file() {
             return Err(Error::RouteNotFound);
         }
-        Ok((file.into_std(), metadata, path))
+        crate::static_files::response(file.into_std(), &path.to_string_lossy(), &request)
     })
-    .await??;
-    let body = if request.method() == Method::HEAD {
-        AxumBody::empty()
-    } else {
-        AxumBody::from_stream(ReaderStream::with_capacity(
-            tokio::fs::File::from_std(file),
-            16 * 1024,
-        ))
-    };
-    let mut response = Response::new(body);
-    response
-        .headers_mut()
-        .insert(header::CONTENT_LENGTH, metadata.len().into());
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        mime_guess::from_path(path)
-            .first_or_octet_stream()
-            .as_ref()
-            .parse()
-            .unwrap(),
-    );
-    Ok(response)
+    .await?
 }
 
 #[cfg(test)]

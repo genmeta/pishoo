@@ -101,6 +101,51 @@ fn replace(path: &std::path::Path, bytes: &[u8]) {
 }
 
 #[tokio::test]
+async fn local_app_ranges_conditions_redirects_and_errors_remain_no_store() {
+    let (_temp, profile, sandbox) = environment();
+    std::fs::write(profile.join("dev/hello/app/index.html"), b"0123456789").unwrap();
+    let app = app(&profile, &sandbox);
+    let initial = app
+        .clone()
+        .oneshot(request("/app/hello/", true))
+        .await
+        .unwrap();
+    let etag = initial.headers()["etag"].clone();
+    assert_eq!(initial.headers()["cache-control"], "no-store");
+    let mut conditional = request("/app/hello/", true);
+    conditional
+        .headers_mut()
+        .insert("if-none-match", etag.clone());
+    let response = app.clone().oneshot(conditional).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let mut ranged = request("/app/hello/", true);
+    ranged
+        .headers_mut()
+        .insert("range", "bytes=2-4".parse().unwrap());
+    let response = app.clone().oneshot(ranged).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(text(response).await, b"234");
+    for (path, owner, status) in [
+        ("/app/hello", true, StatusCode::TEMPORARY_REDIRECT),
+        ("/app/hello/assets/missing.js", true, StatusCode::NOT_FOUND),
+        ("/app/hello/", false, StatusCode::FORBIDDEN),
+    ] {
+        let response = app.clone().oneshot(request(path, owner)).await.unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
+    replace(&profile.join("dev/hello/app/index.html"), b"replacement");
+    let mut conditional = request("/app/hello/", true);
+    conditional.headers_mut().insert("if-none-match", etag);
+    let response = app.oneshot(conditional).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(text(response).await, b"replacement");
+}
+
+#[tokio::test]
 async fn files_are_discovered_without_registration_and_survive_router_restart() {
     let (_temp, profile, sandbox) = environment();
     std::fs::write(profile.join("dev/hello/app/index.html"), "hello").unwrap();

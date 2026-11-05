@@ -17,6 +17,216 @@ const MIB: usize = 1024 * 1024;
 const CHUNK: usize = 64 * 1024;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run alone; isolated real QUIC/TLS/H3 and process-global roots, resolver and home"]
+async fn transport_static_ranges_and_conditionals() {
+    let root = tempfile::tempdir().unwrap();
+    credentials::generate(
+        root.path(),
+        &[
+            ("receiver", "receiver.dhttp.net"),
+            ("alice", "alice.dhttp.net"),
+        ],
+    );
+    let old_home = std::env::var_os("DHTTP_HOME");
+    unsafe {
+        std::env::set_var("DHTTP_HOME", root.path());
+    }
+    let _environment = scopeguard::guard(old_home, |previous| unsafe {
+        match previous {
+            Some(value) => std::env::set_var("DHTTP_HOME", value),
+            None => std::env::remove_var("DHTTP_HOME"),
+        }
+    });
+    dhttp::DhttpNetwork::init().await.unwrap();
+    qtls::RootCerts::set([dhttp::CertificateDer::from(
+        std::fs::read(root.path().join("ca.der")).unwrap(),
+    )])
+    .unwrap();
+    let peer = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let address = EndpointAddr::direct(peer.local_addr().unwrap());
+    qprotocol::Dock::global()
+        .add(peer.clone())
+        .unwrap()
+        .unwrap();
+    let _socket = scopeguard::guard(peer, |peer| {
+        qprotocol::Dock::global().remove(&peer);
+    });
+    dhttp::resolve::Resolver::add(Arc::new(PeerResolver(address)));
+    let profile = profile(root.path(), "receiver");
+    let directory = profile.join(".volume/sys/file/.file");
+    std::fs::create_dir_all(&directory).unwrap();
+    let content = payload(0, 256 * 1024, 17);
+    std::fs::write(directory.join("example.bin"), &content).unwrap();
+    let mut server = Server::load(profile, Arc::new(WasmRuntime::new().unwrap()))
+        .await
+        .unwrap();
+    server
+        .access
+        .set_policy(
+            access_control::Method::Unspecified,
+            "/std/file",
+            access_control::Effect::Allow,
+            access_control::Grantee::Named,
+        )
+        .await
+        .unwrap();
+    let app = server.router.clone();
+    let listener = server
+        .endpoint
+        .listen(
+            dhttp::Scope::Loopback | dhttp::Scope::Internal,
+            tower::service_fn(move |request: Request<Body>| {
+                let app = app.read().unwrap().clone();
+                async move { app.oneshot(request.map(AxumBody::new)).await }
+            }),
+        )
+        .await
+        .unwrap();
+    let _listener = scopeguard::guard(tokio::spawn(listener), |task| task.abort());
+    let client = dhttp::Endpoint::load("alice").await.unwrap();
+    let uri: http::Uri = "https://receiver.dhttp.net/std/file/example.bin"
+        .parse()
+        .unwrap();
+    timeout(Duration::from_secs(60), async {
+        let response = client.get(uri.clone()).await.unwrap();
+        assert_eq!(response.version(), http::Version::HTTP_3);
+        assert_eq!(response.status(), StatusCode::OK);
+        let etag = response.headers()[http::header::ETAG].clone();
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
+            content.as_slice()
+        );
+
+        let response = client
+            .get(uri.clone())
+            .header(http::header::RANGE, "bytes=65537-131073".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[http::header::CONTENT_LENGTH], "65537");
+        assert_eq!(
+            response.headers()[http::header::CONTENT_RANGE],
+            "bytes 65537-131073/262144"
+        );
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
+            &content[65537..131074]
+        );
+
+        let response = client
+            .get(uri.clone())
+            .header(http::header::IF_NONE_MATCH, etag.clone())
+            .header(http::header::RANGE, "bytes=999999-".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers()[http::header::CONTENT_LENGTH], "262144");
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+
+        let response = client
+            .head(uri.clone())
+            .header(http::header::RANGE, "bytes=2-4".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[http::header::CONTENT_LENGTH], "262144");
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+
+        let response = client
+            .get(uri.clone())
+            .header(http::header::RANGE, "bytes=999999-".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            response.headers()[http::header::CONTENT_RANGE],
+            "bytes */262144"
+        );
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+
+        let response = client.get(uri.clone()).await.unwrap();
+        let mut body = response.into_body();
+        assert!(body.frame().await.unwrap().unwrap().is_data());
+        drop(body);
+        let response = client
+            .get(uri.clone())
+            .header(http::header::RANGE, "bytes=-4".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
+            &content[content.len() - 4..]
+        );
+
+        server
+            .access
+            .set_policy(
+                access_control::Method::Unspecified,
+                "/std/file",
+                access_control::Effect::Deny,
+                access_control::Grantee::Named,
+            )
+            .await
+            .unwrap();
+        let response = client
+            .get(uri)
+            .header(http::header::IF_NONE_MATCH, etag)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()[http::header::CACHE_CONTROL], "no-store");
+        assert!(!response.headers().contains_key(http::header::ETAG));
+        response.into_body().collect().await.unwrap();
+    })
+    .await
+    .expect("static HTTP transport acceptance timed out");
+    server.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit two-machine NAT test; requires isolated home and SSH-exchanged public endpoints"]
 async fn transport_public_peer() {
     use hyper::{body::Incoming, service::service_fn};

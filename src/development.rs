@@ -35,6 +35,7 @@ pub(crate) fn router(
             fallback.clone(),
         );
         async move {
+            let app_request = request.uri().path().starts_with("/app/");
             let result: Result<axum::response::Response> = async {
                 let path = request.uri().path();
                 let (frontend, standard, tail) = if let Some(tail) = path.strip_prefix("/app/") {
@@ -87,13 +88,18 @@ pub(crate) fn router(
                 }
                 package::require_owner(&endpoint, &request)?;
                 if frontend {
-                    return tokio::task::spawn_blocking(move || {
+                    let mut response = tokio::task::spawn_blocking(move || {
                         let root = root(&profile)?;
                         let directory = child(&root, &name, true)?;
                         let app = child(&directory, "app", true)?;
                         crate::sandbox::app_response(&app, &suffix, &request)
                     })
-                    .await?;
+                    .await??;
+                    response.headers_mut().insert(
+                        http::header::CACHE_CONTROL,
+                        http::HeaderValue::from_static("no-store"),
+                    );
+                    return Ok(response);
                 }
                 let (lib, tasks) = tokio::task::spawn_blocking(move || {
                     let lib = load(&profile, &sandbox, &author, &name)?;
@@ -140,11 +146,18 @@ pub(crate) fn router(
                 if status.is_server_error() {
                     tracing::error!(%error, "development request failed");
                 }
-                (
+                let mut response = (
                     status,
                     status.canonical_reason().unwrap_or("request failed"),
                 )
-                    .into_response()
+                    .into_response();
+                if app_request {
+                    response.headers_mut().insert(
+                        http::header::CACHE_CONTROL,
+                        http::HeaderValue::from_static("no-store"),
+                    );
+                }
+                response
             })
         }
     });

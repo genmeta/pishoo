@@ -86,6 +86,8 @@ mod authorization;
 mod capabilities;
 #[path = "tests/routing.rs"]
 mod routing;
+#[path = "tests/static_files.rs"]
+mod static_files;
 
 #[path = "tests/websocket.rs"]
 pub(crate) mod websocket;

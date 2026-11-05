@@ -320,7 +320,14 @@ impl Sandbox {
                 result
                     .map_err(Error::from)
                     .and_then(|response| response)
-                    .unwrap_or_else(reject_api)
+                    .unwrap_or_else(|error| {
+                        use axum::response::IntoResponse;
+                        (
+                            [(http::header::CACHE_CONTROL, "no-store")],
+                            reject_api(error),
+                        )
+                            .into_response()
+                    })
             }
         });
         axum::Router::new()
@@ -343,7 +350,10 @@ pub(crate) fn app_response(
     if !matches!(request.method(), &Method::GET | &Method::HEAD) {
         return Ok((
             StatusCode::METHOD_NOT_ALLOWED,
-            [(header::ALLOW, "GET, HEAD")],
+            [
+                (header::ALLOW, "GET, HEAD"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
         )
             .into_response());
     }
@@ -352,7 +362,11 @@ pub(crate) fn app_response(
             Some(query) => format!("{}/?{query}", request.uri().path()),
             None => format!("{}/", request.uri().path()),
         };
-        return Ok(axum::response::Redirect::temporary(&location).into_response());
+        return Ok((
+            [(header::CACHE_CONTROL, "no-store")],
+            axum::response::Redirect::temporary(&location),
+        )
+            .into_response());
     }
     let suffix = percent_encoding::percent_decode_str(suffix)
         .decode_utf8()
@@ -392,30 +406,17 @@ pub(crate) fn app_response(
             app_file(directory, &file)?
         }
     };
-    let length = opened.metadata()?.len();
-    http::Response::builder()
-        .status(StatusCode::OK)
-        .header(
-            header::CONTENT_TYPE,
-            mime_guess::from_path(&file)
-                .first_or_octet_stream()
-                .to_string(),
-        )
-        .header(header::CONTENT_LENGTH, length)
-        .header(header::CACHE_CONTROL, "no-store")
-        .header("x-content-type-options", "nosniff")
-        .header("referrer-policy", "no-referrer")
-        .header("cross-origin-resource-policy", "same-origin")
-        .header("x-frame-options", "DENY")
-        .body(if request.method() == Method::HEAD {
-            axum::body::Body::empty()
-        } else {
-            axum::body::Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
-                tokio::fs::File::from_std(opened),
-                16 * 1024,
-            ))
-        })
-        .map_err(Error::Http)
+    let mut response = crate::static_files::response(opened, &file, request)?;
+    for (name, value) in [
+        ("referrer-policy", "no-referrer"),
+        ("cross-origin-resource-policy", "same-origin"),
+        ("x-frame-options", "DENY"),
+    ] {
+        response
+            .headers_mut()
+            .insert(name, http::HeaderValue::from_static(value));
+    }
+    Ok(response)
 }
 
 fn reject_api(error: Error) -> axum::response::Response {

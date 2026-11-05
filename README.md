@@ -327,6 +327,17 @@ with local mDNS discovery, or REGISTRY_SCOPE=loopback for explicit localhost pee
 the default scope remains external.
 
 
+## Static files and caching
+
+Host-served App files and `/std/file/…` support conditional GET/HEAD and single
+byte ranges. Successful GET responses use `private, no-cache`: browsers can
+retain files and validate them without downloading unchanged contents. App HEAD
+identity responses and local development App responses remain `no-store`.
+Multiple ranges and If-Range fall back to full responses in this version.
+See [static file HTTP behavior](docs/static-files.md) for conditions, status codes
+and file publication requirements. Profile avatars are WASM responses and need
+their own caching policy.
+
 ## Local development with Jade
 
 Run an unpublished project with `jade run --id dev.zero.ai` using an already

@@ -72,6 +72,11 @@ compiles WASM, caching by full package identity and file metadata. Invalid or
 removed WASM cannot execute a stale cache entry. Already-open files and captured
 invocations may finish.
 
+Local App files support the host's conditional requests and single byte ranges,
+but retain `Cache-Control: no-store`, including conditional responses, redirects
+and errors. Installed App caching does not override a local replacement. See
+[static file HTTP behavior](static-files.md).
+
 Ctrl+C/SIGTERM removes only the local App/API directories still owned by that
 watcher, including local dependencies. It preserves all development data and
 installed store dependencies. `--fresh` explicitly archives each local project's

@@ -1,6 +1,126 @@
 use super::*;
 
 #[tokio::test]
+async fn static_cache_validation_and_ranges_never_skip_current_authorization() {
+    use access_control::{Effect, Grantee};
+    use tower::ServiceExt;
+
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("index.html"), b"0123456789").unwrap();
+    let directory = Arc::new(std::fs::File::open(root.path()).unwrap());
+    let (access, _) = authorization_app(Effect::Deny).await;
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            "/app/workspace",
+            Effect::Allow,
+            Grantee::All,
+        )
+        .await
+        .unwrap();
+    let app = Router::new()
+        .fallback(axum::routing::any(move |request: Request<AxumBody>| {
+            let directory = directory.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    crate::sandbox::app_response(&directory, "/", &request).unwrap()
+                })
+                .await
+                .unwrap()
+            }
+        }))
+        .layer(axum::middleware::from_fn_with_state(
+            access.clone(),
+            authorize,
+        ));
+    let mut initial = anonymous_request();
+    *initial.uri_mut() = "/app/workspace/".parse().unwrap();
+    let response = app.clone().oneshot(initial).await.unwrap();
+    let etag = response.headers()[header::ETAG]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "private, no-cache"
+    );
+
+    for (caller, expected) in [(None, ""), (Some("bob.dhttp.net"), "bob.dhttp.net")] {
+        let mut request = anonymous_request();
+        *request.uri_mut() = "/app/workspace/".parse().unwrap();
+        *request.method_mut() = Method::HEAD;
+        request
+            .headers_mut()
+            .insert(header::IF_NONE_MATCH, etag.parse().unwrap());
+        if let Some(caller) = caller {
+            request.extensions_mut().remove::<dhttp::HandshakeSummary>();
+            request.extensions_mut().insert(
+                crate::test_support::identity::endpoint(caller)
+                    .local_authority()
+                    .unwrap(),
+            );
+        }
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers()["pishoo-viewer-name"], expected);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()["x-frame-options"], "DENY");
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "10");
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+    }
+    for effect in [Effect::Allow, Effect::Deny] {
+        access
+            .set_policy(
+                access_control::Method::Specified(Method::GET),
+                "/app/workspace",
+                effect,
+                Grantee::All,
+            )
+            .await
+            .unwrap();
+        for conditional in [true, false] {
+            let mut request = anonymous_request();
+            *request.uri_mut() = "/app/workspace/".parse().unwrap();
+            request
+                .headers_mut()
+                .insert(header::RANGE, "bytes=3-5".parse().unwrap());
+            if conditional {
+                request
+                    .headers_mut()
+                    .insert(header::IF_NONE_MATCH, etag.parse().unwrap());
+            }
+            let response = app.clone().oneshot(request).await.unwrap();
+            let expected = if effect == Effect::Deny {
+                StatusCode::FORBIDDEN
+            } else if conditional {
+                StatusCode::NOT_MODIFIED
+            } else {
+                StatusCode::PARTIAL_CONTENT
+            };
+            assert_eq!(response.status(), expected);
+            if effect == Effect::Deny {
+                assert!(!response.headers().contains_key(header::ETAG));
+                assert!(!response.headers().contains_key(header::CONTENT_RANGE));
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            } else if !conditional {
+                assert_eq!(
+                    response.into_body().collect().await.unwrap().to_bytes(),
+                    "345"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn app_head_exposes_verified_viewer_without_a_new_endpoint() {
     use access_control::{Effect, Grantee};
     use tower::ServiceExt;

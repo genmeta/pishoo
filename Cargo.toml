@@ -51,6 +51,7 @@ async-stream = "0.3"
 base64 = "0.22"
 chrono = "0.4"
 http = "1"
+httpdate = "1"
 http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
