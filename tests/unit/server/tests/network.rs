@@ -460,9 +460,21 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
         }
     });
     let _responder = scopeguard::guard(responder_task, |task| task.abort());
+    // A system service can load a profile outside its own default home. Keep a
+    // same-name profile there so reloading by name would silently use its old staple.
+    let process_home = tempfile::tempdir().unwrap();
+    let default_ssl = process_home.path().join("receiver/ssl");
+    std::fs::create_dir_all(&default_ssl).unwrap();
+    for name in ["fullchain.crt", "privkey.pem", "stapling.ocsp"] {
+        std::fs::copy(
+            root.path().join("receiver/ssl").join(name),
+            default_ssl.join(name),
+        )
+        .unwrap();
+    }
     let old_home = std::env::var_os("DHTTP_HOME");
     unsafe {
-        std::env::set_var("DHTTP_HOME", root.path());
+        std::env::set_var("DHTTP_HOME", process_home.path());
     }
     let _environment = scopeguard::guard(old_home, |previous| unsafe {
         match previous {
@@ -486,10 +498,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     });
     dhttp::resolve::Resolver::add(Arc::new(PeerResolver(address)));
     let profile = profile(root.path(), "receiver");
-    crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .unwrap()
-        .execute("UPDATE settings SET listen='all'", [])
-        .unwrap();
+    crate::configure(&profile, Some("all"), true).unwrap();
     let mut server = Server::load(profile, Arc::new(WasmRuntime::new().unwrap()))
         .await
         .unwrap();
@@ -518,15 +527,16 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     .await;
     assert_eq!(status, StatusCode::OK);
     // A disk config change must stay unapplied; no identity/Lib reload occurs.
-    rusqlite::Connection::open(server.profile.join(".volume/sys/setting/database"))
-        .unwrap()
-        .execute("UPDATE settings SET listen='internal'", [])
-        .unwrap();
+    crate::configure(&server.profile, Some("internal"), true).unwrap();
 
     let endpoint = renew_ocsp(&server.profile, &server.endpoint).await.unwrap();
     apply_ocsp(&mut server, endpoint).await.unwrap();
     assert_eq!(server.endpoint.local_authority().unwrap().ocsp(), renewed);
     assert_eq!(std::fs::read(server.profile.ocsp_path()).unwrap(), renewed);
+    assert_eq!(
+        std::fs::read(default_ssl.join("stapling.ocsp")).unwrap(),
+        before
+    );
     assert!(Arc::ptr_eq(&router, &server.router));
     assert_eq!(server.config.listen, "all");
     assert!(!Arc::ptr_eq(&publisher, server.publisher.as_ref().unwrap()));
