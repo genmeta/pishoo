@@ -4,12 +4,11 @@ fn test_router(
     _endpoint: dhttp::Endpoint,
     access: Arc<AccessService>,
     config: &ServerConfig,
-    profile: &dhttp_home::identity::IdentityProfile,
+    _profile: &dhttp_home::identity::IdentityProfile,
 ) -> Router {
     let proxies = config.proxy_locations.clone();
     Router::new()
         .merge(access_router(access.clone()))
-        .merge(file_router(profile.join("file")))
         .fallback(axum::routing::any(move |request: Request<AxumBody>| {
             proxy_pass(proxies.clone(), request)
         }))
@@ -207,66 +206,6 @@ async fn proxy_streams_response_chunks_before_upload_finishes() {
     server.abort();
 }
 
-#[tokio::test]
-async fn static_handles_streaming_head_and_directory_confinement() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("index.html"), "home").unwrap();
-    let req = Request::builder()
-        .uri("/std/file/index.html")
-        .body(AxumBody::empty())
-        .unwrap();
-    let response = static_file(root.path(), req).await.unwrap();
-    assert_eq!(
-        response.into_body().collect().await.unwrap().to_bytes(),
-        "home"
-    );
-    let req = Request::builder()
-        .method(Method::HEAD)
-        .uri("/std/file/index.html")
-        .body(AxumBody::empty())
-        .unwrap();
-    let response = static_file(root.path(), req).await.unwrap();
-    assert_eq!(response.headers()[header::CONTENT_LENGTH], "4");
-    assert!(
-        response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .is_empty()
-    );
-    for path in [
-        "/std/file/%2e%2e/secret",
-        "/std/file/missing",
-        "/std/file/nested/",
-    ] {
-        let req = Request::builder()
-            .uri(path)
-            .body(AxumBody::empty())
-            .unwrap();
-        assert!(matches!(
-            static_file(root.path(), req).await,
-            Err(Error::RouteNotFound)
-        ));
-    }
-    #[cfg(unix)]
-    {
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("secret"), "secret").unwrap();
-        std::os::unix::fs::symlink(outside.path().join("secret"), root.path().join("escape"))
-            .unwrap();
-        let req = Request::builder()
-            .uri("/std/file/escape")
-            .body(AxumBody::empty())
-            .unwrap();
-        assert!(matches!(
-            static_file(root.path(), req).await,
-            Err(Error::RouteNotFound)
-        ));
-    }
-}
-
 #[test]
 fn forwarding_keeps_repeated_values_and_removes_connection_tokens() {
     let mut headers = http::HeaderMap::new();
@@ -323,7 +262,7 @@ async fn trailing_slash_redirect_precedes_the_root_proxy() {
 }
 
 #[tokio::test]
-async fn file_route_is_separate_from_proxy_fallback() {
+async fn removed_file_routes_stay_closed_even_with_acl_and_root_proxy() {
     use tower::ServiceExt;
 
     let (access, _) = authorization_app(access_control::Effect::Allow).await;
@@ -362,7 +301,7 @@ async fn file_route_is_separate_from_proxy_fallback() {
         ("/std/file", StatusCode::NOT_FOUND),
         ("/std/file/", StatusCode::NOT_FOUND),
         ("/hello.txt", StatusCode::NOT_FOUND),
-        ("/std/file/hello.txt", StatusCode::OK),
+        ("/std/file/hello.txt", StatusCode::NOT_FOUND),
     ] {
         let mut request = anonymous_request();
         *request.uri_mut() = format!("https://owner.dhttp.net{path}").parse().unwrap();
@@ -395,10 +334,10 @@ async fn file_route_is_separate_from_proxy_fallback() {
         .parse()
         .unwrap();
     let response = root_proxy.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(
-        response.into_body().collect().await.unwrap().to_bytes(),
-        "hello"
+        std::fs::read(profile.join("file/hello.txt")).unwrap(),
+        b"hello"
     );
 }
 

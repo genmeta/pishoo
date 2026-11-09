@@ -34,9 +34,11 @@ pub(crate) struct Sandbox {
 pub struct WasmRuntime {
     engine: Engine,
     linker: Linker<StoreData>,
+    _epoch_shutdown: std::sync::mpsc::Sender<()>,
 }
 
 pub(crate) struct Lib {
+    pub(crate) stream_retired: tokio_util::sync::CancellationToken,
     pub(crate) openapi: oas3::OpenApiV3Spec,
     component: Component,
     runtime: Arc<WasmRuntime>,
@@ -88,6 +90,13 @@ impl Sandbox {
     /// Close WASM task tracking and discard the published Lib set.
     /// Server separately clears the HTTP router.
     pub(crate) fn close(&mut self) {
+        for lib in self
+            .libs
+            .values()
+            .chain(self.dev_libs.values().map(|(_, lib)| lib))
+        {
+            lib.stream_retired.cancel();
+        }
         self.tasks.close();
         self.libs.clear();
         self.apps.clear();
@@ -181,6 +190,9 @@ impl Sandbox {
             Err(error) => return Err(error),
         }
         let apps = installed_apps(profile, None)?;
+        for lib in self.libs.values() {
+            lib.stream_retired.cancel();
+        }
         self.libs = candidates;
         self.apps = apps;
         Ok(())
@@ -212,7 +224,19 @@ impl Sandbox {
                             Some(tail) => (true, tail),
                             None => (false, path.strip_prefix('/').unwrap_or(path)),
                         };
-                        let name = tail.split('/').next().unwrap_or("");
+                        let name = if standard {
+                            match tail.strip_prefix("comm/message") {
+                                Some(suffix) if suffix.is_empty() || suffix.starts_with('/') => {
+                                    "message"
+                                }
+                                _ if tail == "message" || tail.starts_with("message/") => {
+                                    return Err(Error::RouteNotFound);
+                                }
+                                _ => tail.split('/').next().unwrap_or(""),
+                            }
+                        } else {
+                            tail.split('/').next().unwrap_or("")
+                        };
                         let lib = sandbox
                             .libs
                             .iter()
@@ -304,7 +328,14 @@ impl Sandbox {
                 result
                     .map_err(Error::from)
                     .and_then(|response| response)
-                    .unwrap_or_else(reject_api)
+                    .unwrap_or_else(|error| {
+                        use axum::response::IntoResponse;
+                        (
+                            [(http::header::CACHE_CONTROL, "no-store")],
+                            reject_api(error),
+                        )
+                            .into_response()
+                    })
             }
         });
         axum::Router::new()
@@ -327,7 +358,10 @@ pub(crate) fn app_response(
     if !matches!(request.method(), &Method::GET | &Method::HEAD) {
         return Ok((
             StatusCode::METHOD_NOT_ALLOWED,
-            [(header::ALLOW, "GET, HEAD")],
+            [
+                (header::ALLOW, "GET, HEAD"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
         )
             .into_response());
     }
@@ -336,7 +370,11 @@ pub(crate) fn app_response(
             Some(query) => format!("{}/?{query}", request.uri().path()),
             None => format!("{}/", request.uri().path()),
         };
-        return Ok(axum::response::Redirect::temporary(&location).into_response());
+        return Ok((
+            [(header::CACHE_CONTROL, "no-store")],
+            axum::response::Redirect::temporary(&location),
+        )
+            .into_response());
     }
     let suffix = percent_encoding::percent_decode_str(suffix)
         .decode_utf8()
@@ -376,30 +414,17 @@ pub(crate) fn app_response(
             app_file(directory, &file)?
         }
     };
-    let length = opened.metadata()?.len();
-    http::Response::builder()
-        .status(StatusCode::OK)
-        .header(
-            header::CONTENT_TYPE,
-            mime_guess::from_path(&file)
-                .first_or_octet_stream()
-                .to_string(),
-        )
-        .header(header::CONTENT_LENGTH, length)
-        .header(header::CACHE_CONTROL, "no-store")
-        .header("x-content-type-options", "nosniff")
-        .header("referrer-policy", "no-referrer")
-        .header("cross-origin-resource-policy", "same-origin")
-        .header("x-frame-options", "DENY")
-        .body(if request.method() == Method::HEAD {
-            axum::body::Body::empty()
-        } else {
-            axum::body::Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
-                tokio::fs::File::from_std(opened),
-                16 * 1024,
-            ))
-        })
-        .map_err(Error::Http)
+    let mut response = crate::static_files::response(opened, &file, request)?;
+    for (name, value) in [
+        ("referrer-policy", "no-referrer"),
+        ("cross-origin-resource-policy", "same-origin"),
+        ("x-frame-options", "DENY"),
+    ] {
+        response
+            .headers_mut()
+            .insert(name, http::HeaderValue::from_static(value));
+    }
+    Ok(response)
 }
 
 fn reject_api(error: Error) -> axum::response::Response {

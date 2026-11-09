@@ -3,11 +3,13 @@ mod contact;
 mod development;
 mod dns;
 mod error;
+mod file;
 mod package;
 mod routes;
 mod sandbox;
 mod server;
 mod setup;
+mod static_files;
 
 #[cfg(test)]
 #[path = "../tests/common/test_support.rs"]

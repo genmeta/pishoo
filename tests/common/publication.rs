@@ -85,7 +85,13 @@ pub(crate) fn release_proof_at(bytes: &[u8], now: i64) -> Value {
         .as_array()
         .unwrap()
         .iter()
-        .map(|dep| json!({"author":dep["publisher"],"name":dep["name"],"version":dep["version"]}))
+        .map(|dep| {
+            let mut item = json!({"name":dep["name"],"version":dep["version"]});
+            if let Some(author) = dep.get("publisher") {
+                item["author"] = author.clone();
+            }
+            item
+        })
         .collect::<Vec<_>>()
         .into();
     proof["package_sha256"] = format!("{:x}", Sha256::digest(bytes)).into();

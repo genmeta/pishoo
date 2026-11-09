@@ -34,16 +34,16 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
                 let mut document = json!({"openapi":"3.1.0","info":{"title":"Message","version":"1.0.0","description":"test","license":{"name":"MIT"}},
                 "x-pishoo":{"kind":"lib","publisher":publisher,"name":"message","dependencies":[]},
                 "x-access-groups":{"message":{"title":title,"operations":["receive"],"app":app}},
-                "paths":{"/message":{"post":{"operationId":"receive","summary":"Receive messages","x-access-group":"message","responses":{"200":{"description":"ok"}}}}}});
+                "paths":{"/comm/message":{"post":{"operationId":"receive","summary":"Receive messages","x-access-group":"message","responses":{"200":{"description":"ok"}}}}}});
                 if legacy {
                     document["x-pishoo"]["access-groups"] = document
                         .as_object_mut()
                         .unwrap()
                         .remove("x-access-groups")
                         .unwrap();
-                    document["paths"]["/message"]["post"]["x-pishoo"] =
+                    document["paths"]["/comm/message"]["post"]["x-pishoo"] =
                         json!({"access-group":"message"});
-                    document["paths"]["/message"]["post"]
+                    document["paths"]["/comm/message"]["post"]
                         .as_object_mut()
                         .unwrap()
                         .remove("x-access-group");
@@ -68,9 +68,9 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
                     .unwrap();
                 tx.commit().unwrap();
                 let path = if crate::package::is_standard_author(publisher) {
-                    "/std/message"
+                    "/std/comm/message"
                 } else {
-                    "/message/message"
+                    "/message/comm/message"
                 };
                 assert_eq!(
                     db.query_row(
@@ -145,9 +145,9 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
 fn app_capability_rejects_missing_frontend_and_untrusted_targets() {
     for author in ["std.dhttp.net", "alice.dhttp.net"] {
         for (app, path, has_app) in [
-            (json!(true), "/message", false),
-            (json!("/app/workspace"), "/message", true),
-            (json!({"path":"/std/acl"}), "/message", true),
+            (json!(true), "/comm/message", false),
+            (json!("/app/workspace"), "/comm/message", true),
+            (json!({"path":"/std/acl"}), "/comm/message", true),
             (json!(true), "/app/workspace", true),
             (json!(true), "/app/message", true),
             (json!(true), "/app/message/../workspace", true),

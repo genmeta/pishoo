@@ -120,3 +120,48 @@ fn real_signed_zip_packages_use_the_native_reader() {
     }
     assert!(count > 0);
 }
+
+#[test]
+fn exact_dependencies_omit_authors_and_reject_malformed_or_ambiguous_names() {
+    for dependencies in [
+        json!([{"name":"profile","version":"1.0.0"}]),
+        json!([{"author":"alice.dhttp.net","name":"profile","version":"1.0.0"}]),
+    ] {
+        let mut files = frontend();
+        let mut manifest: Value = serde_json::from_slice(&files["manifest.json"]).unwrap();
+        manifest["dependencies"] = dependencies.clone();
+        files.insert(
+            "manifest.json".into(),
+            serde_json::to_vec(&manifest).unwrap(),
+        );
+        let bytes = signed(files);
+        let mut parsed = read_package(&bytes).unwrap();
+        let metadata = package_metadata(&parsed).unwrap();
+        assert_eq!(metadata["dependencies"][0]["name"], "profile");
+        assert_eq!(
+            metadata["dependencies"][0].get("publisher").is_some(),
+            dependencies[0].get("author").is_some()
+        );
+        manifest["dependencies"][0]["version"] = "2.0.0".into();
+        parsed.insert(
+            "manifest.json".into(),
+            serde_json::to_vec(&manifest).unwrap(),
+        );
+        assert!(read_package(&waz_write(&parsed).unwrap()).is_err());
+    }
+    for dependencies in [
+        json!([{"name":"profile","version":"1.0.0","path":"../profile"}]),
+        json!([{"name":"profile","version":"01.0.0"}]),
+        json!([{"name":"docs","version":"1.0.0"}]),
+        json!([{"name":"profile","version":"1.0.0"},{"author":"bob.dhttp.net","name":"profile","version":"2.0.0"}]),
+    ] {
+        let mut files = frontend();
+        let mut manifest: Value = serde_json::from_slice(&files["manifest.json"]).unwrap();
+        manifest["dependencies"] = dependencies;
+        files.insert(
+            "manifest.json".into(),
+            serde_json::to_vec(&manifest).unwrap(),
+        );
+        assert!(read_package(&signed(files)).is_err());
+    }
+}

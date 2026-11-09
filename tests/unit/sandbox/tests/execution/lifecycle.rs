@@ -28,7 +28,7 @@ async fn replacing_an_unpolled_body_keeps_other_execution_running() {
 }
 
 #[tokio::test]
-async fn dropping_pending_execute_leaves_guest_owned_until_upload_ends() {
+async fn dropping_pending_execute_reaps_guest_without_upload_eof() {
     let directory = tempfile::tempdir().unwrap();
     let lib = load(READ, directory.path());
     let tasks = TaskTracker::new();
@@ -38,8 +38,8 @@ async fn dropping_pending_execute_leaves_guest_owned_until_upload_ends() {
     tokio::task::yield_now().await;
     execute.abort();
     assert!(execute.await.unwrap_err().is_cancelled());
-    drop(tx);
     reaped(&tasks).await;
+    assert!(tx.is_closed());
 }
 
 #[tokio::test(start_paused = true)]
@@ -94,4 +94,106 @@ async fn cpu_only_guest_exhausts_fuel() {
     .unwrap();
     assert!(matches!(result, Err(Error::Guest(error)) if format!("{error:#}").contains("fuel")));
     reaped(&tasks).await;
+}
+
+const PROBE: &[u8] = include_bytes!("../../../../fixtures/pishoo-stream-probe.wasm");
+
+#[tokio::test]
+async fn unpolled_standard_stream_drop_reaps_guest_waiting_on_timer() {
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskTracker::new();
+    let lib = load(PROBE, directory.path());
+    let response = invoke(lib, &tasks)
+        .await
+        .execute(request("/idle", empty()))
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1);
+    drop(response);
+    reaped(&tasks).await;
+}
+
+#[tokio::test]
+async fn retiring_version_cancels_all_its_http_calls_and_preserves_other_versions() {
+    let directory = tempfile::tempdir().unwrap();
+    let other_directory = tempfile::tempdir().unwrap();
+    let lib = load(PROBE, directory.path());
+    let other = load(PROBE, other_directory.path());
+    let old_tasks = TaskTracker::new();
+    let new_tasks = TaskTracker::new();
+    let idle = invoke(lib.clone(), &old_tasks)
+        .await
+        .execute(request("/idle", empty()))
+        .await
+        .unwrap();
+    let finite = invoke(lib.clone(), &old_tasks)
+        .await
+        .execute(request("/text?count=100", empty()))
+        .await
+        .unwrap();
+    let mut current = invoke(other, &new_tasks)
+        .await
+        .execute(request("/text", empty()))
+        .await
+        .unwrap();
+    lib.stream_retired.cancel();
+    reaped(&old_tasks).await;
+    assert_eq!(new_tasks.len(), 1);
+    assert!(current.body_mut().frame().await.unwrap().unwrap().is_data());
+    drop((idle, finite, current));
+    reaped(&new_tasks).await;
+}
+
+#[tokio::test]
+async fn response_eof_reaps_guest_even_when_body_is_retained() {
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskTracker::new();
+    let lib = load(PROBE, directory.path());
+    let mut response = invoke(lib, &tasks)
+        .await
+        .execute(request("/eof", empty()))
+        .await
+        .unwrap();
+    let mut bytes = Vec::new();
+    while let Some(frame) = response.body_mut().frame().await {
+        bytes.extend_from_slice(&frame.unwrap().into_data().unwrap());
+    }
+    assert_eq!(bytes, b"ready\n");
+    reaped(&tasks).await;
+    drop(response);
+}
+
+#[tokio::test]
+async fn trap_after_headers_ends_body_and_releases_store() {
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskTracker::new();
+    let lib = load(PROBE, directory.path());
+    let response = invoke(lib, &tasks)
+        .await
+        .execute(request("/trap", empty()))
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), response.into_body().collect())
+        .await
+        .unwrap();
+    if let Ok(body) = result {
+        assert_eq!(body.to_bytes(), "ready\n");
+    }
+    reaped(&tasks).await;
+}
+
+#[tokio::test]
+async fn sandbox_close_retires_standard_http_streams() {
+    let directory = tempfile::tempdir().unwrap();
+    let lib = load(PROBE, directory.path());
+    let mut sandbox = Sandbox::new(lib.runtime.clone());
+    sandbox.libs.insert("test".into(), lib.clone());
+    let response = invoke(lib, &sandbox.tasks)
+        .await
+        .execute(request("/idle", empty()))
+        .await
+        .unwrap();
+    sandbox.close();
+    sandbox.wait().await.unwrap();
+    drop(response);
 }

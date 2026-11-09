@@ -61,6 +61,8 @@ fn successful_load_replaces_libs_and_removes_missing_versions() {
     sandbox.load_libs(&profile).unwrap();
     let replacement = sandbox.libs["alpha"].clone();
     assert!(!Arc::ptr_eq(&alpha, &replacement));
+    assert!(alpha.stream_retired.is_cancelled());
+    assert!(!replacement.stream_retired.is_cancelled());
     assert!(!sandbox.libs.contains_key("beta"));
     assert!(Arc::ptr_eq(&runtime, &sandbox.runtime));
     assert_eq!(sandbox.tasks.len(), 1);
@@ -84,7 +86,7 @@ fn startup_reads_raw_components_while_inputs_require_source_signatures() {
     assert!(wasmparser::Parser::is_component(&bytes));
     assert_eq!(
         bytes,
-        std::fs::read(profile.join("lib/alpha.wasm")).unwrap()
+        std::fs::read(profile.join("lib/alpha_1.0.0.wasm")).unwrap()
     );
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     assert!(install_lib(&profile, "alpha", &bytes, &runtime).is_err());
@@ -109,12 +111,13 @@ fn invalid_candidate_rejects_reload_and_retains_the_published_version() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     sandbox.load_libs(&profile).unwrap();
     let original = sandbox.libs["alpha"].clone();
-    std::fs::write(profile.join("lib/alpha.wasm"), b"invalid wasm").unwrap();
+    std::fs::write(profile.join("lib/alpha_1.0.0.wasm"), b"invalid wasm").unwrap();
     assert!(matches!(
         sandbox.load_libs(&profile),
         Err(Error::InvalidComponent(_))
     ));
     assert!(Arc::ptr_eq(&original, &sandbox.libs["alpha"]));
+    assert!(!original.stream_retired.is_cancelled());
 }
 
 #[test]
@@ -129,7 +132,7 @@ fn missing_registered_files_reject_reload_and_keep_loaded_libs() {
 }
 
 #[test]
-fn database_registration_controls_loading_without_revalidating_versions() {
+fn database_registration_selects_exact_filename_and_legacy_layout_remains_readable() {
     let directory = tempfile::tempdir().unwrap();
     let profile = profile(directory.path());
     let runtime = Arc::new(WasmRuntime::new().unwrap());
@@ -147,9 +150,15 @@ fn database_registration_controls_loading_without_revalidating_versions() {
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs.len(), 1);
     assert!(sandbox.libs.contains_key("alpha"));
-    assert!(profile.join("lib/beta.wasm").is_file());
+    assert!(profile.join("lib/beta_1.0.0.wasm").is_file());
     db.execute("UPDATE package SET version='2.0.0' WHERE name='alpha'", [])
         .unwrap();
+    assert!(sandbox.load_libs(&profile).is_err());
+    std::fs::rename(
+        profile.join("lib/alpha_1.0.0.wasm"),
+        profile.join("lib/alpha.wasm"),
+    )
+    .unwrap();
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs["alpha"].openapi.info.version, "1.0.0");
     assert_eq!(
@@ -193,7 +202,7 @@ fn startup_uses_current_runtime_files_without_integrity_comparison_or_repair() {
         &runtime,
     )
     .unwrap();
-    let wasm = profile.join("lib/hello.wasm");
+    let wasm = profile.join("lib/hello_1.0.0.wasm");
     let mut changed = std::fs::read(&wasm).unwrap();
     let name = b"local-note";
     let mut payload = vec![name.len() as u8];

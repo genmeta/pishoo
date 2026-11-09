@@ -8,7 +8,7 @@ use crate::{
     test_support::credentials as network_credentials,
 };
 
-async fn journal_credentials(
+pub(super) async fn journal_credentials(
     root: &Path,
 ) -> (
     dhttp::LocalAuthority,
@@ -44,7 +44,7 @@ async fn journal_credentials(
 
 // RemoteAuthority has no public constructor: obtain it through the real,
 // certificate- and OCSP-verified TLS handshake, without changing qtls.
-fn journal_remote(
+pub(super) fn journal_remote(
     client: &dhttp::LocalAuthority,
     server: &dhttp::LocalAuthority,
 ) -> dhttp::RemoteAuthority {

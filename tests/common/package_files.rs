@@ -74,6 +74,7 @@ pub(crate) fn install_package(
         write_expanded(&dir, &package, id, kind)?;
     }
     let tx = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let previous = registered_packages(&tx, "lib", None)?;
     for kind in ["lib", "app"] {
         if metadata[format!("has_{kind}")] == true {
             check_routes(profile, &tx, id, kind, &package)?;
@@ -81,7 +82,7 @@ pub(crate) fn install_package(
     }
     save_registration(&tx, id, &metadata, &package)?;
     scopeguard::ScopeGuard::into_inner(cleanup);
-    commit_package_files(profile, id, &parent, &stage, &name, tx)?;
+    commit_package_files(profile, id, &previous, &parent, &stage, &name, tx)?;
     Ok(lib_metadata(&package, Some(id)))
 }
 

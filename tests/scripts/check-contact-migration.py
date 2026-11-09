@@ -112,7 +112,7 @@ class ContactMigration(unittest.TestCase):
         db.execute("UPDATE contacts SET alias='Alex', expired_after=101")
         db.execute("UPDATE contacts SET description='Changed after expiry'")
         self.assertTrue(all(row[0] > 100 for row in db.execute('SELECT updated_at FROM contacts')))
-        self.rule(db, 'GET', '/std/message', 'allow', 'alice.dhttp.net', 0)
+        self.rule(db, 'GET', '/std/comm/message', 'allow', 'alice.dhttp.net', 0)
         db.execute("DELETE FROM contacts WHERE name='alice.dhttp.net'")
         self.assertEqual(db.execute('SELECT name FROM contact_deletions').fetchall(), [('alice.dhttp.net',)])
         self.assertFalse(db.execute("SELECT 1 FROM access_rules WHERE grantee='alice.dhttp.net'").fetchall())

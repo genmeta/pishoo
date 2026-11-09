@@ -216,9 +216,11 @@ async fn deliver(
         let mut db = job_db.lock().map_err(|_| fail(500, "contact database lock poisoned"))?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
         expire_requests(&tx)?;
+        // An active receipt completes this application. Existing active rows
+        // are terminal too; no migration or perpetual relationship polling.
         let job = tx.query_row(
             "SELECT id,target_name,application_id,description,requested_capabilities,offered_capabilities,status,contact_id,contact_subject,requested_access,offers,created_at,review_id,review_subject,review_method,review_path \
-             FROM outbound_contact_request WHERE status IN ('queued','pending','active') AND next_attempt_at<=?1 AND (status='active' OR expired_after>?1) \
+             FROM outbound_contact_request WHERE status IN ('queued','pending') AND next_attempt_at<=?1 AND expired_after>?1 \
              AND (lease_until IS NULL OR lease_until<=?1) ORDER BY next_attempt_at,id LIMIT 1",
             [now()],
             |row| Ok(DeliveryJob {
@@ -342,7 +344,7 @@ async fn deliver(
             params![next_review.as_ref().map(|r|r.id), next_review.as_ref().map(|r|r.subject.as_str()), next_review.as_ref().map(|r|r.method.as_str()), next_review.as_ref().map(|r|r.path.as_str()), id,lease]).map_err(storage)?;
         match outcome {
             Ok(receipt)=> {
-                db.execute("UPDATE outbound_contact_request SET status=?1,remote_expired_after=?2,expired_after=CASE WHEN ?1='pending' THEN min(delivery_deadline,?2) ELSE expired_after END,last_checked_at=?3,next_attempt_at=?4,attempt_count=attempt_count+1,error_message=NULL,lease_until=NULL,updated_at=?3 WHERE id=?5 AND lease_until=?6",params![string(&receipt,"status")?,receipt["valid_before"].as_i64().unwrap(),now(),now()+if receipt["status"]=="active" {30}else{3},id,lease]).map_err(storage)?;
+                db.execute("UPDATE outbound_contact_request SET status=?1,remote_expired_after=?2,expired_after=CASE WHEN ?1='pending' THEN min(delivery_deadline,?2) ELSE expired_after END,last_checked_at=?3,next_attempt_at=?4,attempt_count=attempt_count+1,error_message=NULL,lease_until=NULL,updated_at=?3 WHERE id=?5 AND lease_until=?6",params![string(&receipt,"status")?,receipt["valid_before"].as_i64().unwrap(),now(),now()+if receipt["status"]=="pending" {3}else{0},id,lease]).map_err(storage)?;
             }
             Err((code,error))=> {
                 db.execute("UPDATE outbound_contact_request SET status=CASE WHEN ?1 THEN 'failed' ELSE status END,attempt_count=attempt_count+CASE WHEN ?2='need_review' THEN 0 ELSE 1 END,error_message=?2,next_attempt_at=?3,lease_until=NULL,last_checked_at=?4,updated_at=?4 WHERE id=?5 AND lease_until=?6",params![error != "need_review" && matches!(code,400|403|404|409|410),error,now()+if error == "need_review" {30} else {5},now(),id,lease]).map_err(storage)?;

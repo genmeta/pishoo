@@ -461,7 +461,8 @@ fn check_routes(
                 continue;
             }
             let root = child_dir(&profile_dir(profile)?, std::ffi::OsStr::new(other_kind))?;
-            for (path, methods) in installed_routes(&root, &other, other_kind)? {
+            let metadata = registered_metadata(conn, other_kind, &other)?;
+            for (path, methods) in installed_routes(&root, &other, other_kind, &metadata)? {
                 if let Some(ours) = routes.get(&path)
                     && ((kind == "lib" && other_kind == "lib")
                         || methods.iter().any(|m| ours.contains(m)))
@@ -481,12 +482,11 @@ fn installed_routes(
     root: &std::fs::File,
     id: &str,
     kind: &str,
+    metadata: &serde_json::Value,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
     if kind == "lib" {
-        let file = expanded_file(
-            &resource_parent(root, id, false)?,
-            &format!("{}.wasm", id.rsplit('/').next().unwrap()),
-        )?;
+        let parent = resource_parent(root, id, false)?;
+        let file = expanded_file(&parent, &installed_wasm_name(&parent, id, metadata)?)?;
         return package_routes(
             &std::collections::BTreeMap::from([("backend.wasm".into(), read_runtime_wasm(file)?)]),
             id,
@@ -584,9 +584,13 @@ fn save_registration(
         [name],
     )?;
     for (dependency, version) in declared_dependencies(api) {
-        let (dependency_author, dependency_name) = dependency.split_once('/').unwrap();
+        let (dependency_author, dependency_name) = dependency
+            .split_once('/')
+            .map_or((None, dependency.as_str()), |(author, name)| {
+                (Some(author), name)
+            });
         let matches: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM package WHERE author=?1 AND name=?2 AND version=?3)",
+            "SELECT EXISTS(SELECT 1 FROM package WHERE (?1 IS NULL OR author=?1) AND name=?2 AND version=?3)",
             rusqlite::params![dependency_author, dependency_name, version],
             |r| r.get(0),
         )?;
@@ -651,10 +655,9 @@ fn declared_dependencies(api: &serde_json::Value) -> Vec<(String, String)> {
         .flatten()
         .map(|dep| {
             (
-                format!(
-                    "{}/{}",
-                    dep["publisher"].as_str().unwrap(),
-                    dep["name"].as_str().unwrap()
+                dep["publisher"].as_str().map_or_else(
+                    || dep["name"].as_str().unwrap().to_owned(),
+                    |author| format!("{author}/{}", dep["name"].as_str().unwrap()),
                 ),
                 dep["version"].as_str().unwrap().to_owned(),
             )
@@ -718,6 +721,34 @@ fn expanded_file(dir: &std::fs::File, path: &str) -> Result<std::fs::File> {
     Err(expanded_error())
 }
 
+fn versioned_wasm_name(id: &str, metadata: &serde_json::Value) -> Result<String> {
+    valid_id(id)?;
+    let version = metadata["version"].as_str().ok_or_else(expanded_error)?;
+    if version.is_empty()
+        || version.len() > 128
+        || !version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
+    {
+        return Err(expanded_error());
+    }
+    Ok(format!("{}_{version}.wasm", id.rsplit('/').next().unwrap()))
+}
+
+// Only a missing exact version may fall back to the previous unversioned layout.
+fn installed_wasm_name(
+    parent: &std::fs::File,
+    id: &str,
+    metadata: &serde_json::Value,
+) -> Result<String> {
+    let leaf = versioned_wasm_name(id, metadata)?;
+    match rustix::fs::statat(parent, &leaf, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => Ok(leaf),
+        Err(rustix::io::Errno::NOENT) => Ok(format!("{}.wasm", id.rsplit('/').next().unwrap())),
+        Err(error) => Err(layout_error(error)),
+    }
+}
+
 fn write_expanded(
     dir: &std::fs::File,
     package: &super::PackageFiles,
@@ -727,7 +758,7 @@ fn write_expanded(
     if kind == "lib" {
         write_component(
             dir,
-            &format!("{}.wasm", id.rsplit('/').next().unwrap()),
+            &versioned_wasm_name(id, &package_metadata(package)?)?,
             package.get("backend.wasm").ok_or_else(expanded_error)?,
         )?;
     } else {
@@ -781,12 +812,12 @@ pub(crate) fn disk_bytes(
     valid_id(id)?;
     let mut database = installation_database(profile, false)?;
     let conn = database.transaction()?;
-    if registered_metadata(&conn, "lib", id)?["has_lib"] != true {
+    let metadata = registered_metadata(&conn, "lib", id)?;
+    if metadata["has_lib"] != true {
         return Err(Error::RouteNotFound);
     }
-    let file = resource_parent(&locked, id, false).and_then(|parent| {
-        expanded_file(&parent, &format!("{}.wasm", id.rsplit('/').next().unwrap()))
-    });
+    let file = resource_parent(&locked, id, false)
+        .and_then(|parent| expanded_file(&parent, &installed_wasm_name(&parent, id, &metadata)?));
     read_runtime_wasm(file?)
 }
 
@@ -901,6 +932,7 @@ pub(super) fn install_packages(
     flock(&parent, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
     let mut database = installation_database(profile, true)?;
     let tx = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let previous = registered_packages(&tx, "lib", None)?;
     let mut names = std::collections::HashSet::new();
     let mut changed = Vec::new();
     for (index, (id, bytes, proof)) in packages.iter().enumerate() {
@@ -1061,7 +1093,7 @@ pub(super) fn install_packages(
             inherit_owner(&dir, &parent)?;
             write_expanded(&dir, package, id, kind)?;
             let payload = if kind == "lib" {
-                expanded_file(&dir, &format!("{short}.wasm"))?
+                expanded_file(&dir, &versioned_wasm_name(id, metadata)?)?
             } else {
                 dir
             };
@@ -1116,11 +1148,13 @@ pub(super) fn install_packages(
         )?;
     }
     scopeguard::ScopeGuard::into_inner(cleanup);
-    commit_packages_files(profile, &entries, &parent, &stage, &name, tx)?;
+    commit_packages_files(profile, &entries, &previous, &parent, &stage, &name, tx)?;
     // Everything below is infallible. New requests see the whole new graph;
     // in-flight requests continue to own their original Arc<Lib> snapshots.
     for (id, _, _, _) in changed {
-        sandbox.libs.remove(id);
+        if let Some(old) = sandbox.libs.remove(id) {
+            old.stream_retired.cancel();
+        }
         sandbox.apps.remove(id);
     }
     sandbox.libs.extend(libs);
@@ -1132,12 +1166,21 @@ pub(super) fn install_packages(
 fn commit_package_files(
     profile: &IdentityProfile,
     id: &str,
+    previous: &[(String, String)],
     parent: &std::fs::File,
     stage: &std::fs::File,
     name: &str,
     tx: rusqlite::Transaction<'_>,
 ) -> Result<()> {
-    commit_packages_files(profile, &[(id, "", stage)], parent, stage, name, tx)
+    commit_packages_files(
+        profile,
+        &[(id, "", stage)],
+        previous,
+        parent,
+        stage,
+        name,
+        tx,
+    )
 }
 
 // All packages and both runtime parts share one SQLite decision and one durable
@@ -1145,6 +1188,7 @@ fn commit_package_files(
 fn commit_packages_files(
     profile: &IdentityProfile,
     entries: &[(&str, &str, &std::fs::File)],
+    previous: &[(String, String)],
     parent: &std::fs::File,
     stage: &std::fs::File,
     name: &str,
@@ -1184,25 +1228,30 @@ fn commit_packages_files(
             if target.metadata()?.dev() != parent.metadata()?.dev() {
                 return Err(expanded_error());
             }
-            let leaf = if kind == "lib" {
-                format!("{short}.wasm")
+            let old_leaf = if kind == "lib" {
+                match previous.iter().find(|(other, _)| other == id) {
+                    Some((_, version)) => {
+                        installed_wasm_name(&target, id, &serde_json::json!({"version":version}))?
+                    }
+                    None => format!("{short}.wasm"),
+                }
             } else {
                 short.to_owned()
             };
             let old = match rustix::fs::statat(
                 &target,
-                leaf.as_str(),
+                old_leaf.as_str(),
                 rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
             ) {
                 Ok(stat) => {
                     if kind == "lib" {
-                        if !expanded_file(&target, &leaf)?.metadata()?.is_file()
+                        if !expanded_file(&target, &old_leaf)?.metadata()?.is_file()
                             || stat.st_nlink != 1
                         {
                             return Err(expanded_error());
                         }
                     } else {
-                        child_dir(&target, std::ffi::OsStr::new(&leaf))?;
+                        child_dir(&target, std::ffi::OsStr::new(&old_leaf))?;
                     }
                     true
                 }
@@ -1214,8 +1263,20 @@ fn commit_packages_files(
                 Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => false,
                 Err(error) => return Err(error),
             };
-            resources.push(serde_json::json!({"kind":kind,"old":old,"new":new}));
-            targets.push((package_stage, kind, target, leaf, old, new));
+            let leaf = if kind == "lib" && new {
+                versioned_wasm_name(id, &registered_metadata(&tx, "lib", id)?)?
+            } else {
+                old_leaf.clone()
+            };
+            if leaf != old_leaf {
+                match rustix::fs::statat(&target, &leaf, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+                    Err(rustix::io::Errno::NOENT) => {}
+                    Err(error) => return Err(layout_error(error)),
+                    Ok(_) => return Err(expanded_error()),
+                }
+            }
+            resources.push(serde_json::json!({"kind":kind,"old":old,"new":new,"old_leaf":old_leaf,"new_leaf":leaf}));
+            targets.push((package_stage, kind, target, old_leaf, leaf, old, new));
         }
         let facts: String =
             tx.query_row(include_str!("sql/registration_facts.sql"), [short], |r| {
@@ -1249,10 +1310,15 @@ fn commit_packages_files(
         Ok(())
     };
     let result = (|| -> Result<()> {
-        for &(package_stage, kind, ref target, ref leaf, old, new) in &targets {
+        for &(package_stage, kind, ref target, ref old_leaf, ref leaf, old, new) in &targets {
             if old {
-                renameat(target, leaf.as_str(), package_stage, format!("old-{kind}"))
-                    .map_err(layout_error)?;
+                renameat(
+                    target,
+                    old_leaf.as_str(),
+                    package_stage,
+                    format!("old-{kind}"),
+                )
+                .map_err(layout_error)?;
             }
             if new {
                 let dir = child_dir(package_stage, std::ffi::OsStr::new(&format!("new-{kind}")))?;
@@ -1273,7 +1339,7 @@ fn commit_packages_files(
     })();
     if let Err(error) = result {
         let rollback = (|| -> Result<()> {
-            for &(package_stage, kind, ref target, ref leaf, old, new) in &targets {
+            for &(package_stage, kind, ref target, ref old_leaf, ref leaf, old, new) in &targets {
                 let backup = format!("old-{kind}");
                 let has_backup = rustix::fs::statat(
                     package_stage,
@@ -1302,7 +1368,7 @@ fn commit_packages_files(
                     }
                 }
                 if has_backup {
-                    renameat(package_stage, backup.as_str(), target, leaf.as_str())
+                    renameat(package_stage, backup.as_str(), target, old_leaf.as_str())
                         .map_err(layout_error)?;
                 }
                 target.sync_all()?;
@@ -1340,6 +1406,7 @@ pub(crate) fn remove_package(profile: &IdentityProfile, id: &str) -> Result<()> 
     mkdirat(&parent, &name, Mode::from_raw_mode(0o700)).map_err(layout_error)?;
     let stage = child_dir(&parent, std::ffi::OsStr::new(&name))?;
     let tx = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let previous = registered_packages(&tx, "lib", None)?;
     let referenced: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM package_dependency WHERE dependency_name=?1)",
         [short],
@@ -1356,7 +1423,7 @@ pub(crate) fn remove_package(profile: &IdentityProfile, id: &str) -> Result<()> 
     // Existing access_rules and the Lib's private business data are retained.
     crate::routes::permissions(&tx, short, &[])?;
     tx.execute("DELETE FROM package WHERE name=?1", [short])?;
-    commit_package_files(profile, id, &parent, &stage, &name, tx)
+    commit_package_files(profile, id, &previous, &parent, &stage, &name, tx)
 }
 
 /// Open registered frontend directories without loading their contents.

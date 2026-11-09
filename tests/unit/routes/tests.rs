@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use super::{
     access::authorize,
     proxy::{clean_hop_headers, proxy_uri},
-    static_file, *,
+    *,
 };
 use crate::{
     Error,

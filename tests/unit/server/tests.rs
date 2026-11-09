@@ -11,7 +11,7 @@ use super::{
 use crate::{Error, setup::load_server_config};
 
 #[tokio::test]
-async fn system_static_files_are_separate_from_ordinary_proxy_paths() {
+async fn old_static_files_are_not_exposed_and_proxy_paths_stay_separate() {
     use http_body_util::BodyExt;
     use hyper::{body::Incoming, service::service_fn};
     use hyper_util::rt::TokioIo;
@@ -63,7 +63,12 @@ async fn system_static_files_are_separate_from_ordinary_proxy_paths() {
         .unwrap();
     let local = server.endpoint.local_authority().unwrap();
     for (location, path, expected_status, expected) in [
-        ("/", "/std/file/local.txt", http::StatusCode::OK, "static"),
+        (
+            "/",
+            "/std/file/local.txt",
+            http::StatusCode::NOT_FOUND,
+            "Not Found",
+        ),
         (
             "/",
             "/echo/upload",
@@ -246,6 +251,37 @@ async fn system_static_files_are_separate_from_ordinary_proxy_paths() {
             "{location}: {path}"
         );
     }
+    for path in [
+        "/std/file",
+        "/std/file/upload",
+        "/std/file/copy",
+        "/std/file/library",
+        "/std/sys/file",
+    ] {
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri(path)
+            .extension(dhttp::HandshakeSummary {
+                alpn: None,
+                local: Some(local.clone()),
+                remote: None,
+            })
+            .body(AxumBody::empty())
+            .unwrap();
+        assert_eq!(
+            current_router(&server)
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            http::StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(server.profile.join(".volume/sys/file/.file/local.txt")).unwrap(),
+        b"static"
+    );
     upstream.abort();
 }
 
@@ -482,9 +518,9 @@ async fn dhttp_route_matches_target_root_with_or_without_slash_and_child_paths()
     .unwrap();
 
     for path in [
-        "/std/dhttp/bob.dhttp.net",
-        "/std/dhttp/bob.dhttp.net/",
-        "/std/dhttp/bob.dhttp.net/a/b",
+        "/std/forward/bob.dhttp.net",
+        "/std/forward/bob.dhttp.net/",
+        "/std/forward/bob.dhttp.net/a/b",
     ] {
         server
             .access

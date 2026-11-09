@@ -35,6 +35,7 @@ pub(crate) fn router(
             fallback.clone(),
         );
         async move {
+            let app_request = request.uri().path().starts_with("/app/");
             let result: Result<axum::response::Response> = async {
                 let path = request.uri().path();
                 let (frontend, standard, tail) = if let Some(tail) = path.strip_prefix("/app/") {
@@ -44,25 +45,37 @@ pub(crate) fn router(
                 } else {
                     (false, false, path.trim_start_matches('/'))
                 };
-                let (name, suffix) = tail
+                let lookup = if standard {
+                    tail.strip_prefix("comm/")
+                        .filter(|s| *s == "message" || s.starts_with("message/"))
+                        .unwrap_or(tail)
+                } else {
+                    tail
+                };
+                let (name, suffix) = lookup
                     .split_once('/')
-                    .map_or((tail, ""), |(name, _)| (name, &tail[name.len()..]));
+                    .map_or((lookup, ""), |(name, _)| (name, &lookup[name.len()..]));
                 // Local files require the real owner, independently of identity spelling.
                 // Native services retain precedence over local projects.
                 let local_exists = package::valid_id(name).is_ok()
                     && profile.join("dev").join(name).try_exists()?;
                 if !local_exists {
-                    sandbox
-                        .write()
-                        .unwrap()
-                        .dev_libs
-                        .retain(|id, _| id.rsplit('/').next() != Some(name));
+                    sandbox.write().unwrap().dev_libs.retain(|id, (_, lib)| {
+                        let keep = id.rsplit('/').next() != Some(name);
+                        if !keep {
+                            lib.stream_retired.cancel();
+                        }
+                        keep
+                    });
                 }
                 if package::valid_id(name).is_err()
                     || (!frontend
                         && (name == "app"
                             || standard
-                                && matches!(name, "sys" | "acl" | "contact" | "dhttp" | "file")))
+                                && (matches!(
+                                    name,
+                                    "sys" | "acl" | "contact" | "forward" | "file" | "comm"
+                                ) || name == "message" && lookup == tail)))
                     || !local_exists
                 {
                     return Ok(fallback
@@ -85,13 +98,18 @@ pub(crate) fn router(
                 }
                 package::require_owner(&endpoint, &request)?;
                 if frontend {
-                    return tokio::task::spawn_blocking(move || {
+                    let mut response = tokio::task::spawn_blocking(move || {
                         let root = root(&profile)?;
                         let directory = child(&root, &name, true)?;
                         let app = child(&directory, "app", true)?;
                         crate::sandbox::app_response(&app, &suffix, &request)
                     })
-                    .await?;
+                    .await??;
+                    response.headers_mut().insert(
+                        http::header::CACHE_CONTROL,
+                        http::HeaderValue::from_static("no-store"),
+                    );
+                    return Ok(response);
                 }
                 let (lib, tasks) = tokio::task::spawn_blocking(move || {
                     let lib = load(&profile, &sandbox, &author, &name)?;
@@ -138,11 +156,18 @@ pub(crate) fn router(
                 if status.is_server_error() {
                     tracing::error!(%error, "development request failed");
                 }
-                (
+                let mut response = (
                     status,
                     status.canonical_reason().unwrap_or("request failed"),
                 )
-                    .into_response()
+                    .into_response();
+                if app_request {
+                    response.headers_mut().insert(
+                        http::header::CACHE_CONTROL,
+                        http::HeaderValue::from_static("no-store"),
+                    );
+                }
+                response
             })
         }
     });
@@ -255,11 +280,13 @@ fn load(
     let (_root, mut file, author) = match opened {
         Ok(opened) => opened,
         Err(error) => {
-            sandbox
-                .write()
-                .unwrap()
-                .dev_libs
-                .retain(|id, _| id.rsplit('/').next() != Some(name));
+            sandbox.write().unwrap().dev_libs.retain(|id, (_, lib)| {
+                let keep = id.rsplit('/').next() != Some(name);
+                if !keep {
+                    lib.stream_retired.cancel();
+                }
+                keep
+            });
             return Err(error);
         }
     };
@@ -275,9 +302,13 @@ fn load(
         return Ok(lib.clone());
     }
     // Changed or removed files never fall back to stale executable code.
-    state
-        .dev_libs
-        .retain(|id, _| id.rsplit('/').next() != Some(name));
+    state.dev_libs.retain(|id, (_, lib)| {
+        let keep = id.rsplit('/').next() != Some(name);
+        if !keep {
+            lib.stream_retired.cancel();
+        }
+        keep
+    });
     let mut bytes = Vec::new();
     (&mut file)
         .take(64 * 1024 * 1024 + 1)

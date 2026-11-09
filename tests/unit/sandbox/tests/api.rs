@@ -196,8 +196,8 @@ async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_pack
         .insert("alice.dhttp.net/journal".into(), ordinary);
     let router = api_router(&sandbox, crate::test_support::identity::endpoint("alice"));
     for path in [
-        "/std/message",
-        "/std/message/undeclared",
+        "/std/comm/message",
+        "/std/comm/message/undeclared",
         "/journal/missing",
         "/journal/message",
         "/journal/std/xxxx?value=a%2Fb",
@@ -214,12 +214,16 @@ async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_pack
         );
     }
     for path in [
+        "/std/message",
+        "/std/message/file",
+        "/std/comm/voip",
+        "/std/comm/group",
         "/std/xxxx",
         "/std/journal/std/xxxx",
         "/journalish/std/xxxx",
         "/message/message",
-        "/std/message-other",
-        "/std/message-other/deep",
+        "/std/comm/message-other",
+        "/std/comm/message-other/deep",
     ] {
         assert_eq!(
             status(&router, Method::POST, path).await,
@@ -238,7 +242,7 @@ async fn standard_lib_selection_uses_the_name_instead_of_declared_paths() {
     sandbox.libs.insert("std.dhttp.net/profile".into(), lib);
     let router = api_router(&sandbox, crate::test_support::identity::endpoint("alice"));
     assert_eq!(
-        status(&router, Method::POST, "/std/message").await,
+        status(&router, Method::POST, "/std/comm/message").await,
         StatusCode::NOT_FOUND
     );
     for path in ["/std/profile", "/std/profile/undeclared?value=a%2Fb"] {
@@ -327,7 +331,7 @@ async fn routers_keep_their_lib_snapshot() {
 }
 
 #[tokio::test]
-async fn routed_executions_exceed_four_concurrent_requests_and_survive_close() {
+async fn routed_executions_exceed_four_concurrent_requests_and_reap_after_close() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
     let lib = load(&sandbox, directory.path(), r#"{"/run":{"post":{}}}"#);
@@ -355,7 +359,91 @@ async fn routed_executions_exceed_four_concurrent_requests_and_survive_close() {
     assert_eq!(sandbox.tasks.len(), 8);
     sandbox.close();
     assert_eq!(sandbox.tasks.len(), 8);
+    sandbox.wait().await.unwrap();
+    assert!(sandbox.tasks.is_empty());
     drop(responses);
+}
+
+#[tokio::test]
+async fn app_ranges_and_conditions_follow_the_selected_file_including_spa_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("assets")).unwrap();
+    std::fs::write(root.path().join("index.html"), b"0123456789").unwrap();
+    std::fs::write(root.path().join("assets/app.js"), b"script").unwrap();
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    sandbox.apps.insert(
+        "alice.dhttp.net/hello".into(),
+        (
+            "1.0.0".into(),
+            Arc::new(std::fs::File::open(root.path()).unwrap()),
+        ),
+    );
+    let router = api_router(
+        &sandbox,
+        crate::test_support::identity::endpoint("alice.dhttp.net"),
+    );
+    let initial = router
+        .clone()
+        .oneshot(request(Method::GET, "/app/hello/"))
+        .await
+        .unwrap();
+    let etag = initial.headers()["etag"].clone();
+    for path in [
+        "/app/hello/",
+        "/app/hello/conversations/bob",
+        "/app/hello/index.html?view=1",
+    ] {
+        let mut conditional = request(Method::GET, path);
+        conditional
+            .headers_mut()
+            .insert("if-none-match", etag.clone());
+        conditional
+            .headers_mut()
+            .insert("range", "bytes=99-".parse().unwrap());
+        let response = router.clone().oneshot(conditional).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "{path}");
+        assert_eq!(response.headers()["cache-control"], "private, no-cache");
+        assert_eq!(response.headers()["x-frame-options"], "DENY");
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+        let mut ranged = request(Method::GET, path);
+        ranged
+            .headers_mut()
+            .insert("range", "bytes=-3".parse().unwrap());
+        let response = router.clone().oneshot(ranged).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()["content-type"], "text/html");
+        assert_eq!(response.headers()["content-range"], "bytes 7-9/10");
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "789"
+        );
+    }
+    for (method, path, status) in [
+        (Method::GET, "/app/hello", StatusCode::TEMPORARY_REDIRECT),
+        (
+            Method::GET,
+            "/app/hello/assets/missing.js",
+            StatusCode::NOT_FOUND,
+        ),
+        (Method::POST, "/app/hello/", StatusCode::METHOD_NOT_ALLOWED),
+        (Method::GET, "/app/absent/", StatusCode::NOT_FOUND),
+    ] {
+        let mut request = request(method, path);
+        request
+            .headers_mut()
+            .insert("if-none-match", "*".parse().unwrap());
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
 }
 
 #[tokio::test]
@@ -397,7 +485,7 @@ async fn app_static_files_are_read_on_demand_and_open_responses_survive_replacem
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["cache-control"], "private, no-cache");
     assert_eq!(
         response.into_body().collect().await.unwrap().to_bytes(),
         "new script"

@@ -57,3 +57,8 @@ signed WAZ packages with Jade; the retired embedded-signature packer is not bund
 Business App/Lib sources are maintained in independent product repositories and are
 not bundled with the SDK. Online package installation applies runtime resources
 immediately and does not change access rules.
+
+Standard HTTP streaming uses WASI P2 Body, output streams and clocks directly;
+no SDK event interface is required.
+The experimental `pishoo:events/change@0.1.0` import is no longer provided.
+Components built against that experiment must be rebuilt using supported imports.

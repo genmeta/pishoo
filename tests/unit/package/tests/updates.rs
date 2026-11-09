@@ -24,7 +24,7 @@ fn release(
 ) -> (String, Vec<u8>) {
     let dependencies = dependencies
         .iter()
-        .map(|(name, version)| json!({"publisher":"alice.dhttp.net","name":name,"version":version}))
+        .map(|(name, version)| json!({"name":name,"version":version}))
         .collect::<Vec<_>>();
     let document = json!({
         "openapi":"3.1.0", "info":{"title":name,"version":version,"description":"Dependency update fixture","license":{"name":"MIT"}},
@@ -112,6 +112,11 @@ fn dependency_update_switches_direct_and_shared_transitive_dependencies_together
             .unwrap();
     let next_releases = releases("2.0.0");
     install_packages(&profile, &next_releases, &mut sandbox).unwrap();
+    for name in ["profile", "message"] {
+        assert!(profile.join(format!("lib/{name}_2.0.0.wasm")).is_file());
+        assert!(!profile.join(format!("lib/{name}_1.0.0.wasm")).exists());
+        assert!(!profile.join(format!("lib/{name}.wasm")).exists());
+    }
     let catalog = installed_packages(&profile, None).unwrap();
     for package in catalog.as_array().unwrap() {
         assert_eq!(package["version"], "2.0.0");
@@ -219,16 +224,19 @@ fn dependency_update_rolls_back_all_files_registration_capabilities_and_runtime_
     let mut sandbox = installed(&profile);
     let before = facts(&profile);
     let previous = sandbox.libs["alice.dhttp.net/profile"].clone();
-    let wasm = std::fs::read(profile.join("lib/profile.wasm")).unwrap();
+    let wasm = std::fs::read(profile.join("lib/profile_1.0.0.wasm")).unwrap();
     let db =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
     db.execute_batch("CREATE TABLE pkg_registry.fail_commit(name TEXT REFERENCES package(name) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER pkg_registry.reject_update AFTER UPDATE ON package WHEN NEW.name='workspace' BEGIN INSERT INTO fail_commit VALUES('missing'); END;").unwrap();
     let mut next = releases("2.0.0");
     next.insert(0, release("extra", "2.0.0", true, &[]));
     assert!(install_packages(&profile, &next, &mut sandbox).is_err());
+    for name in ["profile", "message"] {
+        assert!(!profile.join(format!("lib/{name}_2.0.0.wasm")).exists());
+    }
     assert_eq!(facts(&profile), before);
     assert_eq!(
-        std::fs::read(profile.join("lib/profile.wasm")).unwrap(),
+        std::fs::read(profile.join("lib/profile_1.0.0.wasm")).unwrap(),
         wasm
     );
     for name in ["workspace", "introduction"] {
@@ -269,4 +277,33 @@ fn dependency_install_can_fill_missing_packages_and_rejects_inconsistent_graphs(
     install_packages(&profile, &releases("2.0.0"), &mut sandbox).unwrap();
     assert_eq!(sandbox.libs.len(), 2);
     assert_eq!(sandbox.apps.len(), 2);
+}
+
+#[test]
+fn legacy_wasm_is_loaded_then_replaced_by_versioned_installation_and_removed() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
+    let (id, bytes) = release("message", "1.0.0", false, &[]);
+    install_package(&profile, &id, &bytes, &runtime).unwrap();
+    std::fs::rename(
+        profile.join("lib/message_1.0.0.wasm"),
+        profile.join("lib/message.wasm"),
+    )
+    .unwrap();
+    let mut sandbox = Sandbox::new(runtime);
+    sandbox.load_libs(&profile).unwrap();
+    install_packages(
+        &profile,
+        &[release("message", "2.0.0", false, &[])],
+        &mut sandbox,
+    )
+    .unwrap();
+    assert!(!profile.join("lib/message.wasm").exists());
+    assert!(profile.join("lib/message_2.0.0.wasm").is_file());
+    sandbox.load_libs(&profile).unwrap();
+    assert_eq!(sandbox.libs[&id].openapi.info.version, "2.0.0");
+    remove_package(&profile, &id).unwrap();
+    assert!(!profile.join("lib/message_2.0.0.wasm").exists());
 }

@@ -9,8 +9,17 @@ use axum::{
 };
 use http::StatusCode;
 
-use super::reject;
 use crate::Error;
+
+// Authorization failures must not outlive the policy decision in a cache.
+// Successful guest/proxy responses retain their own cache semantics.
+fn reject(error: Error) -> Response {
+    (
+        [(http::header::CACHE_CONTROL, "no-store")],
+        super::reject(error),
+    )
+        .into_response()
+}
 
 pub(crate) async fn authorize(
     axum::extract::State(access): axum::extract::State<Arc<AccessService>>,
@@ -123,11 +132,20 @@ pub(crate) async fn authorize(
             true
         }
         Err(sea_orm::DbErr::Type(message)) => {
-            return (StatusCode::BAD_REQUEST, message).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                [(http::header::CACHE_CONTROL, "no-store")],
+                message,
+            )
+                .into_response();
         }
         Err(e) => {
             tracing::error!(error = %e, "authorization failed");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(http::header::CACHE_CONTROL, "no-store")],
+            )
+                .into_response();
         }
     };
     if !allowed {

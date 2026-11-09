@@ -143,5 +143,9 @@ pub(super) async fn renew_ocsp(
     let authority = endpoint.local_authority()?;
     let response = fetch_ocsp(authority.certificates()).await?;
     cache_ocsp(profile, &response)?;
-    endpoint.reload().await.map_err(Into::into)
+    // Root services can host profiles from other accounts or the global home.
+    endpoint
+        .reload_from(profile.path())
+        .await
+        .map_err(Into::into)
 }

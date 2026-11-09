@@ -1,14 +1,9 @@
-use std::path::PathBuf;
-
 use axum::{
-    Router,
     body::Body as AxumBody,
     response::{IntoResponse, Response},
-    routing::any,
 };
 use http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
-use tokio_util::io::ReaderStream;
 
 use self::proxy::proxy;
 use crate::{Error, Result, setup::ProxyLocation};
@@ -18,7 +13,7 @@ mod outbound;
 
 mod proxy;
 
-pub(crate) const DHTTP_PREFIX: &str = "/std/dhttp/";
+pub(crate) const DHTTP_PREFIX: &str = "/std/forward/";
 
 pub(crate) use access::{access_router, authorize};
 pub(crate) use capabilities::{capabilities_router, permissions};
@@ -26,6 +21,42 @@ pub(crate) use outbound::forward_dhttp;
 
 pub(crate) fn reserved(path: &str) -> bool {
     path == "/std" || path.starts_with("/std/")
+}
+
+/// Normalize before ACL and routing, so authorization observes the effective method.
+pub(crate) async fn normalize_method(
+    mut request: Request<AxumBody>,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut values = request.headers().get_all("x-http-method-override").iter();
+    if let Some(value) = values.next() {
+        let method = Method::from_bytes(value.as_bytes());
+        if values.next().is_some()
+            || request.method() != Method::POST
+            || !method.as_ref().is_ok_and(|method| {
+                matches!(
+                    *method,
+                    Method::GET
+                        | Method::HEAD
+                        | Method::POST
+                        | Method::PUT
+                        | Method::PATCH
+                        | Method::DELETE
+                        | Method::OPTIONS
+                )
+            })
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CACHE_CONTROL, "no-store")],
+                "invalid X-HTTP-Method-Override",
+            )
+                .into_response();
+        }
+        *request.method_mut() = method.unwrap();
+        request.headers_mut().remove("x-http-method-override");
+    }
+    next.run(request).await
 }
 
 fn reject(error: Error) -> Response {
@@ -38,18 +69,6 @@ fn reject(error: Error) -> Response {
         status.canonical_reason().unwrap_or("request failed"),
     )
         .into_response()
-}
-
-pub(crate) fn file_router(root: PathBuf) -> Router {
-    Router::new()
-        .route("/std/file", any(|| async { StatusCode::NOT_FOUND }))
-        .route(
-            "/std/file/{*path}",
-            any(move |request: Request<AxumBody>| {
-                let root = root.clone();
-                async move { static_file(&root, request).await.unwrap_or_else(reject) }
-            }),
-        )
 }
 
 pub(crate) async fn proxy_pass(
@@ -107,63 +126,6 @@ pub(crate) async fn proxy_pass(
         }
         Err(error) => reject(error),
     }
-}
-
-async fn static_file(root: &std::path::Path, request: Request<AxumBody>) -> Result<Response> {
-    if request.method() != Method::GET && request.method() != Method::HEAD {
-        return Err(Error::MethodNotAllowed);
-    }
-    let path = request
-        .uri()
-        .path()
-        .strip_prefix("/std/file/")
-        .ok_or(Error::RouteNotFound)?;
-    if path.is_empty() {
-        return Err(Error::RouteNotFound);
-    }
-    let decoded = percent_encoding::percent_decode_str(path)
-        .decode_utf8()
-        .map_err(|_| Error::BadRequest("invalid path encoding".into()))?;
-    if decoded.contains(['\\', '\0']) || decoded.split('/').any(|p| p == ".." || p == ".") {
-        return Err(Error::RouteNotFound);
-    }
-    let mut path = std::path::PathBuf::from(decoded.trim_start_matches('/'));
-    let root = root.to_path_buf();
-    let (file, metadata, path) = tokio::task::spawn_blocking(move || -> Result<_> {
-        let dir = cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority())
-            .map_err(|_| Error::RouteNotFound)?;
-        if path.as_os_str().is_empty() || dir.metadata(&path).is_ok_and(|m| m.is_dir()) {
-            path.push("index.html");
-        }
-        let file = dir.open(&path).map_err(|_| Error::RouteNotFound)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() {
-            return Err(Error::RouteNotFound);
-        }
-        Ok((file.into_std(), metadata, path))
-    })
-    .await??;
-    let body = if request.method() == Method::HEAD {
-        AxumBody::empty()
-    } else {
-        AxumBody::from_stream(ReaderStream::with_capacity(
-            tokio::fs::File::from_std(file),
-            16 * 1024,
-        ))
-    };
-    let mut response = Response::new(body);
-    response
-        .headers_mut()
-        .insert(header::CONTENT_LENGTH, metadata.len().into());
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        mime_guess::from_path(path)
-            .first_or_octet_stream()
-            .as_ref()
-            .parse()
-            .unwrap(),
-    );
-    Ok(response)
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.9.1--preview.1-1f6feb?style=flat-square" alt="Version 0.9.1-preview.1">
+  <img src="https://img.shields.io/badge/version-0.9.1-1f6feb?style=flat-square" alt="Version 0.9.1">
   <img src="https://img.shields.io/badge/Rust-2024-dea584?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-4c956c?style=flat-square" alt="Apache-2.0 license"></a>
 </p>
@@ -28,7 +28,7 @@ Pishoo takes its name from Pixiu (貔貅), an auspicious creature in ancient Chi
 Pishoo 0.9 uses per-identity SQLite configuration, name-based access control,
 and WASM components. See the [Pishoo documentation](https://docs.dhttp.net/en/docs/core-components/pishoo) for configuration and usage.
 
-The current preview candidate is **0.9.1-preview.1**, based on 0.9.0. It adds
+The current release candidate is **0.9.1**, based on 0.9.0. It adds
 offline developer-signature verification, local Jade development and the official
 author transition, and preserves identity ACL rules across reinstallation. See
 the [release notes](CHANGELOG.md#091-preview1---2026-11-04) for upgrade limits.
@@ -38,7 +38,7 @@ the [release notes](CHANGELOG.md#091-preview1---2026-11-04) for upgrade limits.
 Dependencies are resolved from Cargo.lock, including the crates.io release of daccess 0.2.0; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
 
 ```sh
-git clone --branch v0.9.1-preview.1 https://github.com/genmeta/pishoo.git
+git clone --branch v0.9.1 https://github.com/genmeta/pishoo.git
 cd pishoo
 cargo build --locked -p pishoo --bin pishoo
 cargo test --locked --workspace -- --test-threads=1
@@ -145,7 +145,7 @@ and capability changes preserve existing ACL rules and private data. See the
 
 ### Configuration
 
-Database SQL files stay with their owning modules (`src/package/sql/`, `src/contact/sql/`, `src/setup/sql/`). See the [SQL layout and naming rules](docs/sql.md). Test-only historical schemas remain in `tests/fixtures/`.
+Database SQL stays with its owning module: related runtime statements use named constants in `sql.rs`; schemas, migrations, and cohesive standalone scripts stay in `sql/`. See the [SQL layout and naming rules](docs/sql.md). Test-only historical schemas remain in `tests/fixtures/`.
 
 Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's home. Listening is stored in `<identity>/.volume/sys/setting/database` as the `setting` key `listen`; an absent key keeps the identity stopped across discovery and restarts. `genmeta listen --id NAME internal` opts in, `all` selects both internal and external scopes, and `genmeta listen --id NAME off` deletes the key after confirmation. Proxy rows use `proxy_location`. Legacy `db/config.db` is preserved but ignored. Current-path setting v1/v2 directories, including SQLite sidecars, are archived before fresh v3 initialization; old listener and proxy settings are not migrated. Valid v3 settings are retained. Endpoint and shared Network lifetimes are unchanged. See [Review implementation](REVIEW-IMPLEMENTATION-2026-10-21.md).
 
@@ -163,13 +163,13 @@ Native ACL defaults are written once when initializing a new authorization datab
 
 Existing daccess schema v0 databases are backed up through SQLite before the library upgrades them through schema v3. The older 0.8.2 `location_rule_sets/location_rules` format is unsupported and stops startup with the original database preserved; it is never silently replaced with new defaults. Missing, corrupt, incomplete, and unsupported databases are distinguished. Pishoo does not create identity credentials, `server.conf`, or an instance configuration file. Linux packages use `User=root` without setting `DHTTP_HOME`. Existing manual overrides remain authoritative; custom deployments can set them in `/etc/systemd/system/pishoo.service.d/`.
 
-Static files under `<identity-home>/<identity>/file/` are served at `/std/file/{path}`. The `/std/file` path itself is unavailable. Ordinary `/file/*` paths use configured proxies; there is no static-file proxy override.
+`<identity-home>/<identity>/file/` is the personal file library. It has no static HTTP endpoint; explicit business actions copy verified content into it. `/std/file` is an internal per-Lib storage capability only. Ordinary `/file/*` paths still use configured proxies.
 
 The same-identity DHTTP forwarding route streams request bytes through the native request writer. Request trailers are currently unsupported: declared trailers are rejected before forwarding, and trailers discovered during upload cancel that upload. Response bodies and trailers retain their native streaming behavior.
 
 ### Run
 
-Start the development build as the account that owns the identities in `~/.dhttp`. Identities and configuration load at startup; the running process automatically discovers new identities and applies listen and proxy changes. Setting listen to off stops hosting and preserves mounts and business data. Loaded identities require restart or disable/enable to replace certificate/key credentials. Libs load at startup, while online installation/update/removal changes the running Lib collection immediately. SIGHUP requests the existing serial identity/configuration reconciliation. Every 72 hours after startup, Pishoo fetches and validates fresh OCSP proofs for loaded identities, atomically updates their caches, and refreshes TLS registration, DNS publishers, and application outbound credentials. A failed refresh logs the identity and reason and retains its previous in-memory credentials; the next attempt is at the next scheduled refresh. Refreshes do not renew expired identity certificates.
+Start the development build as the account that owns the identities in `~/.dhttp`. Identities and configuration load at startup; the running process automatically discovers new identities and applies listen and proxy changes. Setting listen to off stops hosting and preserves mounts and business data. Loaded identities require restart or disable/enable to replace certificate/key credentials. Libs load at startup, while online installation/update/removal changes the running Lib collection immediately. SIGHUP requests the existing serial identity/configuration reconciliation. Every 72 hours after startup, Pishoo fetches and validates fresh OCSP proofs for loaded identities, atomically updates their caches, and refreshes TLS registration, DNS publishers, and application outbound credentials. Cache writes and TLS reloads use each loaded identity's actual profile directory, including when a root service hosts identities from other accounts or the global home. A failed refresh logs the identity and reason and retains its previous in-memory credentials; the next attempt is at the next scheduled refresh. Refreshes do not renew expired identity certificates.
 
 Startup skips identities with invalid credentials, including expired certificates, and logs the identity name and reason. Other identities continue loading. A skipped identity is retried by the periodic identity scan. Per-identity configuration, database, Lib and listener failures are logged and retried without stopping healthy identities. Missing or invalid local OCSP caches are prepared during startup; the running process refreshes OCSP every 72 hours, while certificate/key changes require restart.
 
@@ -231,9 +231,9 @@ Rust components can use the [Pishoo SDK](wit/README.md) for verified identity an
 
 Online installation/update/removal publishes runtime changes immediately. `pishoo reload` is for identity/configuration reconciliation and is not an extra package activation step.
 
-A `.waz` (Wasm Archive Zip) is a standard ZIP archive with a signed JSON manifest, optional backend and optional static pages. The host verifies and installs ZIP entries directly, without an intermediate container format. Installation expands runtime files to `lib/<name>.wasm` (or `lib/std/<name>.wasm`) and `app/<name>/`. One package registration in `.volume/sys/pkg/database` records metadata, timestamps and the installed resource parts. App pages, assets and deep links use `/app/<name>/`; Lib APIs keep their existing mounts. Business data stays private in its `.volume` namespace. Updates and removals commit the package's runtime files and registration together. Only this current installed layout is loaded; old archive or proof-based layouts must be explicitly reinstalled from a current signed ZIP package and are not reconstructed or migrated automatically.
+A `.waz` (Wasm Archive Zip) is a standard ZIP archive with a signed JSON manifest, optional backend and optional static pages. The host verifies and installs ZIP entries directly, without an intermediate container format. Installation expands runtime files to `lib/<name>_<version>.wasm` (or `lib/std/<name>_<version>.wasm`) and `app/<name>/`. One package registration in `.volume/sys/pkg/database` records metadata, timestamps and the installed resource parts. App pages, assets and deep links use `/app/<name>/`; Lib APIs keep their existing mounts. Business data stays private in its `.volume` namespace. Updates and removals commit the package's runtime files and registration together. The exact installed version selects the WASM filename; existing unversioned WASM files remain readable and are replaced on the next successful installation. Only expanded runtime files are loaded; old archive or proof-based layouts must be explicitly reinstalled from a current signed ZIP package and are not reconstructed or migrated automatically.
 
-Requests select an App or Lib by its directory name without registering each business route: `/app/<name>/` serves the App, `/<name>/...` invokes `lib/<name>.wasm`, and `/std/<name>/...` invokes `lib/std/<name>.wasm` after native services. Ordinary Libs receive the suffix after their name (or `/` at the root); standard Libs retain `/<name>/...` after `/std` is removed. The Lib handles its own paths and methods; OpenAPI supplies documentation and capability declarations. Loaded resources are reused across requests.
+Requests select an App or Lib by its directory name without registering each business route: `/app/<name>/` serves the App, `/<name>/...` invokes `lib/<name>_<version>.wasm`, and `/std/<name>/...` invokes `lib/std/<name>_<version>.wasm` after native services. Ordinary Libs receive the suffix after their name (or `/` at the root); standard Libs retain `/<name>/...` after `/std` is removed. The Lib handles its own paths and methods; OpenAPI supplies documentation and capability declarations. Loaded resources are reused across requests.
 
 Lib compilation uses Wasmtime's persistent machine-code cache. Installation validation, runtime loading, and later service starts reuse compiled code when the WASM content, compiler version, and engine settings match. Each load reads and prepares installed runtime resources, including necessary compilation/linking; source signature and package-policy checks occur at installation/update. Wasmtime uses its platform cache directory and optional standard `wasmtime/config.toml` configuration; no cache setup is required. Cache initialization failures log a warning and fall back to ordinary compilation. A newly built WASM still needs its first compilation. Development builds optimize Cranelift and its register allocator to reduce this first-compilation cost while retaining Pishoo debug information and the normal WASM execution optimization level. Building these dependencies initially takes longer; release builds already optimize them.
 
@@ -306,7 +306,7 @@ empty host configuration get fresh defaults; credentials alone do not enable hos
 Unsupported future schemas, corrupt databases and filesystem errors are reported
 without overwriting those files or terminating the whole host.
 
-Developer-signed package installation is introduced in Pishoo 0.9.1-preview.1.
+Developer-signed package installation is introduced in Pishoo 0.9.1.
 The host independently checks the whole exact dependency closure, signed
 Registry publication receipts and independently distributed issuer CRLs.
 See [developer installation policy](docs/developer-install-policy.md) for the
@@ -326,6 +326,17 @@ Pishoo startup and logging honor DHTTP_HOME. Registry supports REGISTRY_SCOPE=in
 with local mDNS discovery, or REGISTRY_SCOPE=loopback for explicit localhost peers;
 the default scope remains external.
 
+
+## Static files and caching
+
+Host-served App files support conditional GET/HEAD and single
+byte ranges. Successful GET responses use `private, no-cache`: browsers can
+retain files and validate them without downloading unchanged contents. App HEAD
+identity responses and local development App responses remain `no-store`.
+Multiple ranges and If-Range fall back to full responses in this version.
+See [static file HTTP behavior](docs/static-files.md) for conditions, status codes
+and file publication requirements. Profile avatars are WASM responses and need
+their own caching policy.
 
 ## Local development with Jade
 

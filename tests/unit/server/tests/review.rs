@@ -305,3 +305,53 @@ async fn package_recovery_restores_uncommitted_removal_and_finishes_committed_re
         assert!(!stage.exists());
     }
 }
+
+#[tokio::test]
+async fn package_recovery_restores_versioned_and_legacy_filenames_after_interruption() {
+    for old_leaf in ["hello.wasm", "hello_1.0.0.wasm"] {
+        for phase in 0..=3 {
+            let root = tempfile::tempdir().unwrap();
+            let profile = identity(root.path()).await;
+            let stage = profile.join(".pishoo-versioned-test");
+            std::fs::create_dir_all(stage.join("new-lib")).unwrap();
+            let new_leaf = "hello_2.0.0.wasm";
+            let old = profile.join(format!("lib/{old_leaf}"));
+            let new = profile.join(format!("lib/{new_leaf}"));
+            let candidate = stage.join("new-lib").join(new_leaf);
+            std::fs::write(&old, b"old-lib").unwrap();
+            std::fs::write(&candidate, b"new-lib").unwrap();
+            let db =
+                crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+                    .unwrap();
+            db.execute("INSERT INTO package(name,author,version,has_lib,has_app) VALUES('hello','alice.dhttp.net',?1,1,0)", [if phase == 3 { "2.0.0" } else { "1.0.0" }]).unwrap();
+            let facts: String = db
+                .query_row(
+                    include_str!("../../../../src/package/sql/registration_facts.sql"),
+                    ["hello"],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            drop(db);
+            if phase >= 1 {
+                std::fs::rename(&old, stage.join("old-lib")).unwrap();
+            }
+            if phase >= 2 {
+                std::fs::rename(&candidate, &new).unwrap();
+            }
+            let journal = json!({"id":"alice.dhttp.net/hello","facts":if phase == 3 {facts} else {"uncommitted".into()},"resources":[
+                {"kind":"lib","old":true,"new":true,"old_leaf":old_leaf,"new_leaf":new_leaf},
+                {"kind":"app","old":false,"new":false,"old_leaf":"hello","new_leaf":"hello"}
+            ]});
+            std::fs::write(stage.join(".transaction.json"), journal.to_string()).unwrap();
+            initialize_directories(&profile).unwrap();
+            if phase == 3 {
+                assert_eq!(std::fs::read(&new).unwrap(), b"new-lib");
+                assert!(!old.exists());
+            } else {
+                assert_eq!(std::fs::read(&old).unwrap(), b"old-lib");
+                assert!(!new.exists());
+            }
+            assert!(!stage.exists());
+        }
+    }
+}

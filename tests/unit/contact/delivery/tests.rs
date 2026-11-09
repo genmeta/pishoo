@@ -50,9 +50,9 @@ fn status_polling_never_creates_another_approval_or_accepts_a_relationship() {
 fn legacy_capabilities_are_never_reinterpreted() {
     assert!(operation_snapshot(None, r#"["Receive messages"]"#).is_err());
     assert_eq!(operation_snapshot(None, "[]").unwrap(), json!({}));
-    let snapshot = r#"{"/std/message":["POST"]}"#;
+    let snapshot = r#"{"/std/comm/message":["POST"]}"#;
     assert_eq!(
         operation_snapshot(Some(snapshot), r#"["Receive messages"]"#).unwrap(),
-        json!({"/std/message":["POST"]})
+        json!({"/std/comm/message":["POST"]})
     );
 }

@@ -5,11 +5,10 @@ use dhttp_home::{DhttpHome, identity::IdentityProfile};
 use futures::{StreamExt, stream::FuturesUnordered};
 use tokio::time::Instant;
 
-use super::{Server, current_router, native_router, ocsp::renew_ocsp};
+use super::{Server, current_router, ocsp::renew_ocsp};
 use crate::{
     Error, Result, dns,
-    routes::authorize,
-    sandbox::{Sandbox, WasmRuntime},
+    sandbox::WasmRuntime,
     setup::{ServerConfig, read_server_config},
 };
 
@@ -52,9 +51,9 @@ pub async fn run() -> Result<()> {
             std::time::Duration::from_secs(1),
         );
         config_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut wasi_ticks = tokio::time::interval(std::time::Duration::from_secs(3));
-        wasi_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut runs = FuturesUnordered::new();
+        let mut contact_ticks = tokio::time::interval(std::time::Duration::from_secs(3));
+        contact_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut contact_runs = FuturesUnordered::new();
         let mut ocsp_ticks = ocsp_ticks();
         let mut ocsp_updates = FuturesUnordered::new();
         let interrupt = tokio::signal::ctrl_c();
@@ -91,23 +90,20 @@ pub async fn run() -> Result<()> {
                             next_due = Some(next_due.map_or(due, |previous| previous.min(due)));
                         }
                     }
-                    _ = wasi_ticks.tick(), if runs.is_empty() => {
+                    _ = contact_ticks.tick(), if contact_runs.is_empty() => {
                         for server in servers.values() {
-                            let sandbox = server.sandbox.clone();
                             let endpoint = server.endpoint.clone();
                             let access = server.access.clone();
                             let profile = server.profile.clone();
                             let contact_db = server.contact_db.clone();
-                            let api = native_router(server).layer(axum::middleware::from_fn_with_state(access.clone(),authorize));
-                            runs.push(async move {
+                            contact_runs.push(async move {
                                 if let Err(error) = crate::contact::contact_jobs(&profile, &endpoint, &access, &contact_db).await {
                                     tracing::warn!(identity = endpoint.name(), %error, "Contact delivery failed");
                                 }
-                                Sandbox::run(sandbox,endpoint,access,api).await
                             });
                         }
                     }
-                    _ = runs.next(), if !runs.is_empty() => {},
+                    _ = contact_runs.next(), if !contact_runs.is_empty() => {},
                     _ = async {
                         #[cfg(unix)]
                         { reload.recv().await; }

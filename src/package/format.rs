@@ -41,7 +41,11 @@ pub(super) fn read_package_at(bytes: &[u8], at: i64) -> Result<PackageFiles> {
 
 fn validate_contents(files: &PackageFiles) -> Result<Value> {
     let metadata = package_metadata(files)?;
-    if metadata["name"] == "std" {
+    if metadata["name"] == "std"
+        || metadata["name"] == "comm"
+            && metadata["has_lib"] == true
+            && crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or(""))
+    {
         return Err(invalid(
             "package name conflicts with the native std namespace",
         ));
@@ -83,7 +87,7 @@ fn validate_contents(files: &PackageFiles) -> Result<Value> {
                         "/sys",
                         "/pishoo",
                         "/file",
-                        "/dhttp",
+                        "/forward",
                     ]
                     .iter()
                     .any(|prefix| {
@@ -97,7 +101,11 @@ fn validate_contents(files: &PackageFiles) -> Result<Value> {
             return Err(invalid("standard Lib conflicts with a reserved API path"));
         }
         if crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or("")) {
-            let prefix = format!("/{}", metadata["name"].as_str().unwrap());
+            let prefix = if metadata["name"] == "message" {
+                "/comm/message".to_owned()
+            } else {
+                format!("/{}", metadata["name"].as_str().unwrap())
+            };
             if api.paths.as_ref().unwrap().keys().any(|path| {
                 path != &prefix
                     && !path
@@ -287,21 +295,30 @@ pub(crate) fn package_metadata(files: &PackageFiles) -> Result<Value> {
     let mut ids = HashSet::new();
     let mut dependencies_out = Vec::new();
     for dependency in dependencies {
-        let author = text(dependency, "author")?;
+        let author = dependency
+            .get("author")
+            .map(|_| text(dependency, "author"))
+            .transpose()?;
         let dep_name = text(dependency, "name")?;
         let dep_version = text(dependency, "version")?;
-        let dep_id = format!("{author}/{dep_name}");
-        if dependency.as_object().is_none_or(|o| o.len() != 3)
+        let dep_id = format!("{}/{dep_name}", author.unwrap_or(publisher));
+        if dependency
+            .as_object()
+            .is_none_or(|o| o.len() != 2 + usize::from(author.is_some()))
             || super::valid_id(&dep_id).is_err()
-            || dhttp_home::normalize_name(author).as_deref() != Some(author)
+            || author
+                .is_some_and(|author| dhttp_home::normalize_name(author).as_deref() != Some(author))
             || !release_version(dep_version)
-            || !ids.insert(dep_id.clone())
-            || dep_id == id
+            || !ids.insert(dep_name)
+            || dep_name == name
         {
             return Err(invalid("invalid, duplicate or self package dependency"));
         }
-        dependencies_out
-            .push(serde_json::json!({"publisher":author,"name":dep_name,"version":dep_version}));
+        let mut item = serde_json::json!({"name":dep_name,"version":dep_version});
+        if let Some(author) = author {
+            item["publisher"] = author.into();
+        }
+        dependencies_out.push(item);
     }
     let has_lib = manifest.get("backend").is_some();
     let has_app = manifest.get("frontend").is_some();

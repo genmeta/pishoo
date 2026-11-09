@@ -10,6 +10,13 @@ use wasmtime_wasi_http::{Error as HttpError, RequestOptions, WasiBody, WasiHttpH
 use super::super::Outgoing;
 
 impl WasiHttpHooks for Outgoing {
+    fn p2_outgoing_body_buffer_chunks(&mut self) -> usize {
+        2
+    }
+    fn p2_outgoing_body_chunk_size(&mut self) -> usize {
+        16 * 1024
+    }
+
     fn send_request(
         &mut self,
         mut request: Request<WasiBody>,
@@ -102,7 +109,7 @@ impl WasiHttpHooks for Outgoing {
                     let frame = frame?;
                     let data = frame.into_data().map_err(|_| HttpError::HttpProtocolError)?;
                     bytes = bytes.saturating_add(data.len());
-                    if bytes > 1024 * 1024 {
+                    if bytes > 20 * 1024 * 1024 {
                         Err(HttpError::HttpRequestBodySize(None))?;
                     }
                     yield http_body::Frame::data(data);
@@ -230,7 +237,7 @@ impl WasiHttpHooks for Outgoing {
                     let frame = frame?;
                     if let Some(data) = frame.data_ref() {
                         bytes = bytes.saturating_add(data.len());
-                        if bytes > 1024 * 1024 {
+                        if bytes > 20 * 1024 * 1024 {
                             Err(HttpError::HttpResponseBodySize(None))?;
                         }
                     }

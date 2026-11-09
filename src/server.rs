@@ -7,9 +7,7 @@ use tower::ServiceExt;
 
 use crate::{
     Body, Error, Result, dns,
-    routes::{
-        DHTTP_PREFIX, authorize, capabilities_router, file_router, forward_dhttp, proxy_pass,
-    },
+    routes::{DHTTP_PREFIX, authorize, capabilities_router, forward_dhttp, proxy_pass},
     sandbox::{Sandbox, WasmRuntime},
     setup::{ServerConfig, config_router, load_server_config},
 };
@@ -70,7 +68,6 @@ fn native_router(server: &Server) -> Router {
             server.endpoint.clone(),
             server.sandbox.clone(),
         ))
-        .merge(file_router(server.profile.join(".volume/sys/file/.file")))
         .merge(dhttp_router(server.endpoint.clone()))
         .fallback(any(move |mut request: Request<AxumBody>| {
             let endpoint = endpoint.clone();
@@ -133,10 +130,16 @@ fn native_router(server: &Server) -> Router {
 fn current_router(server: &Server) -> Router {
     let proxies = server.config.proxy_locations.clone();
     let native = native_router(server);
-    let outgoing = native.clone().layer(axum::middleware::from_fn_with_state(
-        server.access.clone(),
-        authorize,
-    ));
+    let outgoing = native
+        .clone()
+        .merge(crate::file::library_router(
+            server.profile.join("file"),
+            server.endpoint.clone(),
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            server.access.clone(),
+            authorize,
+        ));
     let api = Sandbox::api_router(
         server.sandbox.clone(),
         server.endpoint.clone(),
@@ -182,18 +185,22 @@ fn current_router(server: &Server) -> Router {
             }
         },
     ));
-    crate::development::router(
-        server.profile.clone(),
-        server.sandbox.clone(),
-        server.endpoint.clone(),
-        server.access.clone(),
-        outgoing,
-        routes,
-    )
-    .layer(axum::middleware::from_fn_with_state(
-        server.access.clone(),
-        authorize,
-    ))
+    Router::new()
+        .fallback_service(
+            crate::development::router(
+                server.profile.clone(),
+                server.sandbox.clone(),
+                server.endpoint.clone(),
+                server.access.clone(),
+                outgoing,
+                routes,
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                server.access.clone(),
+                authorize,
+            )),
+        )
+        .layer(axum::middleware::from_fn(crate::routes::normalize_method))
 }
 
 fn open_access_log(profile: &IdentityProfile) -> Result<std::fs::File> {
