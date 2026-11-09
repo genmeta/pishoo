@@ -152,7 +152,7 @@ fn complete_ids_conflict_with_legacy_names_and_reject_other_authors() {
     assert!(install_lib(&profile, "bob.dhttp.net/note", &bytes, &runtime).is_err());
     super::super::remove_lib(&profile, id).unwrap();
     super::super::remove_lib(&profile, id).unwrap();
-    assert!(!profile.join("lib/note.wasm").exists());
+    assert!(!profile.join("lib/note_1.2.4.wasm").exists());
     assert!(profile.join(".volume/note").is_dir());
     let outside = root.path().join("outside");
     std::fs::create_dir(&outside).unwrap();

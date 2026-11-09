@@ -38,8 +38,6 @@ pub struct WasmRuntime {
 }
 
 pub(crate) struct Lib {
-    id: String,
-    changes: tokio::sync::watch::Sender<u64>,
     pub(crate) stream_retired: tokio_util::sync::CancellationToken,
     pub(crate) openapi: oas3::OpenApiV3Spec,
     component: Component,
@@ -48,8 +46,6 @@ pub(crate) struct Lib {
 }
 
 struct StoreData {
-    cancelled: tokio_util::sync::CancellationToken,
-    changes: tokio::sync::watch::Sender<u64>,
     table: ResourceTable,
     wasi: WasiCtx,
     http: WasiHttpCtx,
@@ -228,7 +224,19 @@ impl Sandbox {
                             Some(tail) => (true, tail),
                             None => (false, path.strip_prefix('/').unwrap_or(path)),
                         };
-                        let name = tail.split('/').next().unwrap_or("");
+                        let name = if standard {
+                            match tail.strip_prefix("comm/message") {
+                                Some(suffix) if suffix.is_empty() || suffix.starts_with('/') => {
+                                    "message"
+                                }
+                                _ if tail == "message" || tail.starts_with("message/") => {
+                                    return Err(Error::RouteNotFound);
+                                }
+                                _ => tail.split('/').next().unwrap_or(""),
+                            }
+                        } else {
+                            tail.split('/').next().unwrap_or("")
+                        };
                         let lib = sandbox
                             .libs
                             .iter()

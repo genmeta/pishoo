@@ -63,19 +63,19 @@ async fn upload_rejects_trailers_and_body_errors() {
 fn outbound_prefix_preserves_target_path_and_query() {
     for (incoming, expected) in [
         (
-            "https://alice.dhttp.net/std/dhttp/bob.dhttp.net",
+            "https://alice.dhttp.net/std/forward/bob.dhttp.net",
             "https://bob.dhttp.net/",
         ),
         (
-            "https://alice.dhttp.net/std/dhttp/bob.dhttp.net/?x=1",
+            "https://alice.dhttp.net/std/forward/bob.dhttp.net/?x=1",
             "https://bob.dhttp.net/?x=1",
         ),
         (
-            "https://alice.dhttp.net/std/dhttp/bob~/std/contact?x=1",
+            "https://alice.dhttp.net/std/forward/bob~/std/contact?x=1",
             "https://bob.dhttp.net/std/contact?x=1",
         ),
         (
-            "https://alice.dhttp.net/std/dhttp/bob.dhttp.net:7/a%2Fb?q=%2F",
+            "https://alice.dhttp.net/std/forward/bob.dhttp.net:7/a%2Fb?q=%2F",
             "https://bob.dhttp.net:7/a%2Fb?q=%2F",
         ),
     ] {
@@ -87,10 +87,10 @@ fn outbound_prefix_preserves_target_path_and_query() {
 #[test]
 fn outbound_prefix_rejects_invalid_targets() {
     for incoming in [
-        "https://alice.dhttp.net/std/dhttp/",
-        "https://alice.dhttp.net/std/dhttp/bad_name/a",
-        "https://alice.dhttp.net/std/dhttp/bob.dhttp.net:wrong/a",
-        "https://alice.dhttp.net/std/dhttp/bob.dhttp.net:2147483648/a",
+        "https://alice.dhttp.net/std/forward/",
+        "https://alice.dhttp.net/std/forward/bad_name/a",
+        "https://alice.dhttp.net/std/forward/bob.dhttp.net:wrong/a",
+        "https://alice.dhttp.net/std/forward/bob.dhttp.net:2147483648/a",
     ] {
         assert!(
             outbound_uri(&incoming.parse().unwrap()).is_err(),
@@ -115,7 +115,7 @@ async fn anonymous_caller_cannot_use_outbound_proxy() {
     )
     .unwrap();
     let mut request = Request::builder()
-        .uri(format!("https://{name}/std/dhttp/bob.dhttp.net/contact"))
+        .uri(format!("https://{name}/std/forward/bob.dhttp.net/contact"))
         .body(AxumBody::empty())
         .unwrap();
     request.extensions_mut().insert(dhttp::HandshakeSummary {

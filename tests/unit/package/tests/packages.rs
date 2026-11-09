@@ -119,9 +119,11 @@ pub(crate) fn package_fixture(
         .unwrap()
         .iter()
         .map(|dep| {
-            json!({
-                "author":dep["publisher"],"name":dep["name"],"version":dep["version"]
-            })
+            let mut item = json!({"name":dep["name"],"version":dep["version"]});
+            if let Some(author) = dep.get("publisher") {
+                item["author"] = author.clone();
+            }
+            item
         })
         .collect::<Vec<_>>();
     let mut manifest = json!({"format":"waz/1","package":{
@@ -735,7 +737,7 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
     )
     .unwrap();
     remove_lib(&profile, "alice.dhttp.net/parent").unwrap();
-    assert!(profile.join("lib/first.wasm").is_file());
+    assert!(profile.join("lib/first_1.0.0.wasm").is_file());
     assert_eq!(
         std::fs::read(profile.join(".volume/first/keep.db")).unwrap(),
         b"keep"
@@ -904,7 +906,7 @@ fn old_business_prefixes_remain_proxyable() {
         )
         .unwrap();
     }
-    for path in ["/std", "/std/message", "/std/workspace/"] {
+    for path in ["/std", "/std/comm/message", "/std/workspace/"] {
         assert!(
             crate::setup::config_database(
                 &profile,
@@ -936,7 +938,7 @@ async fn legacy_capability_prefixes_are_projected_then_migrated_without_changing
     .unwrap();
     db.execute_batch("INSERT INTO package(has_lib,has_app,name,author,version) VALUES(1,0,'journal','alice.dhttp.net','1.0.0'),(1,0,'message','std.dhttp.net','1.0.0');
         INSERT INTO lib_capability VALUES('journal','write','Journal'),('message','write','Message');
-        INSERT INTO lib_capability_operation VALUES('journal','write','POST','/std/entries'),('message','write','POST','/std/message');").unwrap();
+        INSERT INTO lib_capability_operation VALUES('journal','write','POST','/std/entries'),('message','write','POST','/std/comm/message');").unwrap();
     let acl = rusqlite::Connection::open(profile.join(".volume/sys/access/database")).unwrap();
     acl.execute_batch("CREATE TABLE preserved_rules(api TEXT); INSERT INTO preserved_rules VALUES('/std/entries')").unwrap();
     for migrated in [false, true] {
@@ -958,7 +960,7 @@ async fn legacy_capability_prefixes_are_projected_then_migrated_without_changing
                 .unwrap();
         assert_eq!(
             value,
-            json!({"alice.dhttp.net/journal · Journal":{"/journal/entries":["POST"]},"std.dhttp.net/message · Message":{"/std/message":["POST"]}})
+            json!({"alice.dhttp.net/journal · Journal":{"/journal/entries":["POST"]},"std.dhttp.net/message · Message":{"/std/comm/message":["POST"]}})
         );
         let stored: String = db
             .query_row(
@@ -1008,7 +1010,7 @@ fn standard_lib_declarations_stay_in_the_filename_namespace() {
         ("/profile/", true),
         ("/profile/nickname", true),
         ("/profile-other", false),
-        ("/message", false),
+        ("/comm/message", false),
     ] {
         let document = json!({
             "openapi":"3.1.0",
@@ -1232,7 +1234,7 @@ fn access_groups_validate_modern_and_legacy_declarations() {
     let document = json!({"openapi":"3.1.0","info":{"title":"Message","version":"1.0.0","description":"test","license":{"name":"MIT"}},
         "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":"message","dependencies":[]},
         "x-access-groups":{"message":{"title":"Receive","operations":["receive"]}},
-        "paths":{"/message":{"post":{"operationId":"receive","summary":"Receive messages","x-access-group":"message","responses":{"200":{"description":"ok"}}}}}});
+        "paths":{"/comm/message":{"post":{"operationId":"receive","summary":"Receive messages","x-access-group":"message","responses":{"200":{"description":"ok"}}}}}});
     let authority = publisher("std.dhttp.net", 'a');
     let package = |doc: &Value| {
         package_fixture(
@@ -1262,8 +1264,8 @@ fn access_groups_validate_modern_and_legacy_declarations() {
         .unwrap()
         .remove("x-access-groups")
         .unwrap();
-    legacy["paths"]["/message"]["post"]["x-pishoo"] = json!({"access-group":"message"});
-    legacy["paths"]["/message"]["post"]
+    legacy["paths"]["/comm/message"]["post"]["x-pishoo"] = json!({"access-group":"message"});
+    legacy["paths"]["/comm/message"]["post"]
         .as_object_mut()
         .unwrap()
         .remove("x-access-group");
@@ -1298,17 +1300,17 @@ fn access_groups_validate_modern_and_legacy_declarations() {
             "group must contain operations",
         ),
         (
-            "/paths/~1message/post/x-access-group",
+            "/paths/~1comm~1message/post/x-access-group",
             json!("other"),
             "access-groups disagree with operation annotations",
         ),
         (
-            "/paths/~1message/post/x-access-group",
+            "/paths/~1comm~1message/post/x-access-group",
             json!(["message"]),
             "invalid access-group",
         ),
         (
-            "/paths/~1message/post/x-access-group",
+            "/paths/~1comm~1message/post/x-access-group",
             Value::Null,
             "invalid access-group",
         ),
@@ -1328,7 +1330,8 @@ fn access_groups_validate_modern_and_legacy_declarations() {
         if field == "x-access-groups" {
             invalid["x-pishoo"]["access-groups"] = document[field].clone();
         } else {
-            invalid["paths"]["/message"]["post"]["x-pishoo"] = json!({"access-group":"message"});
+            invalid["paths"]["/comm/message"]["post"]["x-pishoo"] =
+                json!({"access-group":"message"});
         }
         assert!(
             read_package(&package(&invalid))
@@ -1342,7 +1345,7 @@ fn access_groups_validate_modern_and_legacy_declarations() {
     invalid.as_object_mut().unwrap().remove("x-access-groups");
     assert!(read_package(&package(&invalid)).is_err());
     let mut invalid = document;
-    invalid["paths"]["/message"]["post"]
+    invalid["paths"]["/comm/message"]["post"]
         .as_object_mut()
         .unwrap()
         .remove("x-access-group");
@@ -1372,7 +1375,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
         )
     };
     let id = "std.dhttp.net/message";
-    let bytes = make_lib("message", "1.0.0", "/message", "post", "1v1聊天");
+    let bytes = make_lib("message", "1.0.0", "/comm/message", "post", "1v1聊天");
     install_lib(&profile, id, &bytes, &runtime).unwrap();
     let db =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
@@ -1392,19 +1395,19 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         )
         .unwrap(),
-        ("POST".into(), "/std/message".into())
+        ("POST".into(), "/std/comm/message".into())
     );
     // Another Lib cannot divide methods of the same business path.
     assert!(
         install_lib(
             &profile,
             "std.dhttp.net/other",
-            &make_lib("other", "1.0.0", "/message", "get", "Other"),
+            &make_lib("other", "1.0.0", "/comm/message", "get", "Other"),
             &runtime
         )
         .is_err()
     );
-    assert!(!profile.join("lib/other.wasm").exists());
+    assert!(!profile.join("lib/other_1.0.0.wasm").exists());
     // Native services cannot become WASM capabilities.
     for path in [
         "/acl/capabilities",
@@ -1423,7 +1426,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
         install_lib(
             &profile,
             id,
-            &make_lib("message", "2.0.0", "/message", "post", "Changed"),
+            &make_lib("message", "2.0.0", "/comm/message", "post", "Changed"),
             &runtime
         )
         .is_err()
@@ -1450,7 +1453,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     let doc = json!({"openapi":"3.1.0","info":{"title":"Message","version":"1.0.0","description":"test","license":{"name":"MIT"}},
         "x-pishoo":{"publisher":"std.dhttp.net","name":"message"},
         "x-access-groups":{"message":{"title":"1v1聊天","operations":["receive"]}},
-        "paths":{"/message":{"post":{"operationId":"receive","summary":"Receive","x-access-group":"message"}}}});
+        "paths":{"/comm/message":{"post":{"operationId":"receive","summary":"Receive","x-access-group":"message"}}}});
     let combined = package_fixture(
         &doc,
         include_bytes!("../../../fixtures/wasi-http-read-request-then-respond.wasm"),
@@ -1464,17 +1467,17 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
         (Method::GET, "/app/message/", StatusCode::OK),
         (
             Method::POST,
-            "/std/message",
+            "/std/comm/message",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
         (
             Method::DELETE,
-            "/std/message",
+            "/std/comm/message",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
         (
             Method::GET,
-            "/std/message/missing",
+            "/std/comm/message/missing",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
     ] {
@@ -1528,7 +1531,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     access
         .set_policy(
             access_control::Method::Specified(Method::POST),
-            "/std/message",
+            "/std/comm/message",
             access_control::Effect::Allow,
             grantee.clone(),
         )
@@ -1538,7 +1541,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     install_lib(&profile, id, &bytes, &runtime).unwrap();
     assert_eq!(
         db.query_row(
-            "SELECT effect FROM acl.access_rules WHERE api='/std/message' AND method='POST'",
+            "SELECT effect FROM acl.access_rules WHERE api='/std/comm/message' AND method='POST'",
             [],
             |row| row.get::<_, String>(0)
         )
@@ -1548,7 +1551,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     access
         .remove_policy(
             access_control::Method::Specified(Method::POST),
-            "/std/message",
+            "/std/comm/message",
             grantee,
         )
         .await

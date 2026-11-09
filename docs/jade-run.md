@@ -1,5 +1,12 @@
 # Local development with Jade
 
+Dependencies contain only an exact `name` and `version`; local Jade declarations
+may also set `path`, which is omitted from the release. The store resolves each
+package name to its unique author. A name stays reserved after withdrawal.
+Cross-author name claims return `409 package_name_conflict`; every repeated
+version upload, including identical bytes, returns `409 package_version_conflict`.
+Historical signed dependencies with authors remain readable without rewriting packages.
+
 `jade run` uses the explicitly selected development identity and reuses the running
 Pishoo process. Pass the actual child name, for example `--id dev.alex.chen`;
 Jade never adds or removes `dev.` from explicit input. A main name `dev.wang` requires
@@ -23,20 +30,18 @@ jade run --id dev.zero.ai
 
 ```toml
 [[dependencies]]
-author = "std.dhttp.net"
 name = "profile"
 version = "0.3.0"
 path = "../profile"
 
 [[dependencies]]
-author = "std.dhttp.net"
 name = "message"
 version = "0.2.1"
 ```
 
 A dependency with `path` is built and watched locally. Paths resolve relative to
-the declaring `jade.toml`, including nested dependencies. Local package author,
-name and version must match the dependency. Cycles, conflicting versions/authors,
+the declaring `jade.toml`, including nested dependencies. Local package name and
+version must match the dependency. Cycles, conflicting versions,
 and different local projects with the same short name are rejected. Dependencies
 without `path` are installed at exactly the declared version through the normal
 Pishoo store API, retaining its signature, receipt, revocation and recursive

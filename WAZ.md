@@ -1,5 +1,12 @@
 # WAZ v1 package format
 
+Dependencies contain only an exact `name` and `version`; local Jade declarations
+may also set `path`, which is omitted from the release. The store resolves each
+package name to its unique author. A name stays reserved after withdrawal.
+Cross-author name claims return `409 package_name_conflict`; every repeated
+version upload, including identical bytes, returns `409 package_version_conflict`.
+Historical signed dependencies with authors remain readable without rewriting packages.
+
 A `.waz` release is a standard ZIP archive with MIME `application/zip`. It can be
 listed and extracted with ordinary ZIP tools. Publication and installation accept
 this format only; previous WEBC release files must be rebuilt from source.
@@ -51,7 +58,7 @@ source. The existing `release-notes` setting remains a short release summary.
 
 All shown package fields are required; `repository` is an optional HTTPS URL.
 Author is a canonical DHTTP identity, name is a package short name, and version is
-`MAJOR.MINOR.PATCH`. Dependencies use exact `{ "author", "name", "version" }`
+`MAJOR.MINOR.PATCH`. Dependencies use exact `{ "name", "version" }`
 objects, with at most 100 entries. The optional `backend` and `frontend` fields
 must match the actual runtime files and use the fixed paths shown above. Unknown
 manifest and package fields are rejected.

@@ -109,7 +109,7 @@ impl WasiHttpHooks for Outgoing {
                     let frame = frame?;
                     let data = frame.into_data().map_err(|_| HttpError::HttpProtocolError)?;
                     bytes = bytes.saturating_add(data.len());
-                    if bytes > 1024 * 1024 {
+                    if bytes > 20 * 1024 * 1024 {
                         Err(HttpError::HttpRequestBodySize(None))?;
                     }
                     yield http_body::Frame::data(data);
@@ -237,7 +237,7 @@ impl WasiHttpHooks for Outgoing {
                     let frame = frame?;
                     if let Some(data) = frame.data_ref() {
                         bytes = bytes.saturating_add(data.len());
-                        if bytes > 1024 * 1024 {
+                        if bytes > 20 * 1024 * 1024 {
                             Err(HttpError::HttpResponseBodySize(None))?;
                         }
                     }

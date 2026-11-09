@@ -180,8 +180,6 @@ fn write_declarations(
     method: &Method,
     groups: &Value,
 ) -> Result<()> {
-    use std::io::Read;
-
     use rustix::fs::{FlockOperation, Mode, OFlags};
 
     // Serialize with package installation/removal before taking the same DB
@@ -228,19 +226,11 @@ fn write_declarations(
         if installed.as_ref().is_some_and(|(_, has_app)| *has_app) {
             available.insert(("GET".to_owned(), format!("/app/{name}")));
         }
-        let root = cap_std::fs::Dir::from_std_file(crate::package::lib_root(profile)?);
-        let file = root.open(if standard {
-            format!("std/{name}.wasm")
-        } else {
-            format!("{name}.wasm")
-        })?;
-        if !file.metadata()?.is_file() {
-            return Err(Error::InvalidConfig(
-                "Lib component must be a regular file".into(),
-            ));
-        }
-        let mut bytes = Vec::new();
-        file.take(64 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+        let id = installed
+            .as_ref()
+            .and_then(|(author, _)| author.as_deref())
+            .map_or_else(|| name.to_owned(), |author| format!("{author}/{name}"));
+        let bytes = crate::package::disk_bytes(profile, &crate::package::lib_root(profile)?, &id)?;
         let openapi = crate::package::validate_lib(&bytes)?;
         for (path, item) in openapi.paths.as_ref().unwrap() {
             for (method, _) in item.methods() {

@@ -12,7 +12,7 @@ const OFFICIAL: &str =
 fn compile(directory: &Path, debug: bool, name: Option<&str>, owner: Option<&str>) -> Output {
     let original = include_str!("../src/package/store.rs");
     let start = original.find("pub(crate) const STORE_NAME:").unwrap();
-    let end = original.find("\nasync fn download_release(").unwrap();
+    let end = original.find("\nasync fn ").unwrap();
     let source = format!(
         "{}\nfn main() {{ println!(\"{{}}\\n{{}}\", STORE_NAME, STORE_OWNER); }}\n",
         &original[start..end]

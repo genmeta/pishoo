@@ -45,9 +45,16 @@ pub(crate) fn router(
                 } else {
                     (false, false, path.trim_start_matches('/'))
                 };
-                let (name, suffix) = tail
+                let lookup = if standard {
+                    tail.strip_prefix("comm/")
+                        .filter(|s| *s == "message" || s.starts_with("message/"))
+                        .unwrap_or(tail)
+                } else {
+                    tail
+                };
+                let (name, suffix) = lookup
                     .split_once('/')
-                    .map_or((tail, ""), |(name, _)| (name, &tail[name.len()..]));
+                    .map_or((lookup, ""), |(name, _)| (name, &lookup[name.len()..]));
                 // Local files require the real owner, independently of identity spelling.
                 // Native services retain precedence over local projects.
                 let local_exists = package::valid_id(name).is_ok()
@@ -65,7 +72,10 @@ pub(crate) fn router(
                     || (!frontend
                         && (name == "app"
                             || standard
-                                && matches!(name, "sys" | "acl" | "contact" | "dhttp" | "file")))
+                                && (matches!(
+                                    name,
+                                    "sys" | "acl" | "contact" | "forward" | "file" | "comm"
+                                ) || name == "message" && lookup == tail)))
                     || !local_exists
                 {
                     return Ok(fallback

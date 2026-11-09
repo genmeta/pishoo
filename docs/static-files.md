@@ -1,7 +1,6 @@
 # Static file HTTP behavior
 
-Pishoo serves installed App files at `/app/<name>/…` and native files at
-`/std/file/…`. Both support conditional GET/HEAD and single byte ranges. File
+Pishoo serves installed App files at `/app/<name>/…` with conditional GET/HEAD and single byte ranges. The former `/std/file/…` static service is removed; personal files remain on disk and private native file operations are available only through business backends. File
 selection, directory confinement, App redirects and page deep-link fallback keep
 their existing rules. Every network request passes through current authorization
 before a file is selected or a conditional response is generated.
@@ -10,8 +9,7 @@ before a file is selected or a conditional response is generated.
 
 | Response | Cache-Control |
 | --- | --- |
-| Installed App and native file GET, including 206 and 304 | `private, no-cache` |
-| Native file HEAD | `private, no-cache` |
+| Installed App GET, including 206 and 304 | `private, no-cache` |
 | App HEAD, which exposes the current verified viewer | `no-store` |
 | Local development App | `no-store` |
 | Static redirects and errors; authorization failures | `no-store` |

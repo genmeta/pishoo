@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.1] - Unreleased
+
+- Rename the forwarding entry to `/std/forward/*` and route Message through `/std/comm/message`; remove the old external Message/file routes.
+- Provide internal resumable native files through each Lib’s actual `/db` directory capability. Keep completed attachments in contact/date/original-name directories; save separate personal copies only on explicit request.
+- Install WASM with exact versioned filenames, retaining read compatibility with existing unversioned installations and transactional recovery.
+- Show API metadata from the loaded component even when its OpenAPI version differs from the installed package version.
+- Stop periodic WASM CLI invocation; retain the independent native contact job timer.
+- Support all WASI HTTP streams with the same replenished execution budget and bounded cancellation; remove the experimental Message events import.
+- Serve conditional static responses and single byte ranges with private cache revalidation.
+- Resolve exact dependencies by name/version through the authenticated store while retaining package authors and historical author constraints.
+- Increase WASM outgoing request/response body limits to 20 MiB for bounded attachment transport.
+- Refresh OCSP from the loaded identity profile.
+- Carry forward developer signatures, offline publication receipts and local Jade development from 0.9.1-preview.1. The SDK remains 0.1.0-preview.2.
+
 ## [0.9.1-preview.1] - 2026-11-04
 
 ### Added

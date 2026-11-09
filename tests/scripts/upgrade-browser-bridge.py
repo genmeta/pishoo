@@ -30,8 +30,8 @@ class Bridge(BaseHTTPRequestHandler):
             self.send_error(413);return
         body=self.rfile.read(length)
         target=HOST;path=self.path
-        if path.startswith('/std/dhttp/store.dhttp.net/'):
-            target='store.dhttp.net';path=path.removeprefix('/std/dhttp/store.dhttp.net')
+        if path.startswith('/std/forward/store.dhttp.net/'):
+            target='store.dhttp.net';path=path.removeprefix('/std/forward/store.dhttp.net')
         with tempfile.TemporaryDirectory(prefix='upgrade-http-',dir=ROOT/'requests') as directory:
             directory=Path(directory);output=directory/'response';upload=directory/'request'
             command=[str(CLIENT),'curl','--id',HOST,'--dns','h3','--connect-timeout','8','-sS','-X',self.command,'-o',str(output),'-w','%{response_code}\n'+''.join('%{header{'+name+'}}\n' for name in HEADERS)]

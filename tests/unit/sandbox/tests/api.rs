@@ -196,8 +196,8 @@ async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_pack
         .insert("alice.dhttp.net/journal".into(), ordinary);
     let router = api_router(&sandbox, crate::test_support::identity::endpoint("alice"));
     for path in [
-        "/std/message",
-        "/std/message/undeclared",
+        "/std/comm/message",
+        "/std/comm/message/undeclared",
         "/journal/missing",
         "/journal/message",
         "/journal/std/xxxx?value=a%2Fb",
@@ -214,12 +214,16 @@ async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_pack
         );
     }
     for path in [
+        "/std/message",
+        "/std/message/file",
+        "/std/comm/voip",
+        "/std/comm/group",
         "/std/xxxx",
         "/std/journal/std/xxxx",
         "/journalish/std/xxxx",
         "/message/message",
-        "/std/message-other",
-        "/std/message-other/deep",
+        "/std/comm/message-other",
+        "/std/comm/message-other/deep",
     ] {
         assert_eq!(
             status(&router, Method::POST, path).await,
@@ -238,7 +242,7 @@ async fn standard_lib_selection_uses_the_name_instead_of_declared_paths() {
     sandbox.libs.insert("std.dhttp.net/profile".into(), lib);
     let router = api_router(&sandbox, crate::test_support::identity::endpoint("alice"));
     assert_eq!(
-        status(&router, Method::POST, "/std/message").await,
+        status(&router, Method::POST, "/std/comm/message").await,
         StatusCode::NOT_FOUND
     );
     for path in ["/std/profile", "/std/profile/undeclared?value=a%2Fb"] {
@@ -327,7 +331,7 @@ async fn routers_keep_their_lib_snapshot() {
 }
 
 #[tokio::test]
-async fn routed_executions_exceed_four_concurrent_requests_and_survive_close() {
+async fn routed_executions_exceed_four_concurrent_requests_and_reap_after_close() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
     let lib = load(&sandbox, directory.path(), r#"{"/run":{"post":{}}}"#);
@@ -355,6 +359,8 @@ async fn routed_executions_exceed_four_concurrent_requests_and_survive_close() {
     assert_eq!(sandbox.tasks.len(), 8);
     sandbox.close();
     assert_eq!(sandbox.tasks.len(), 8);
+    sandbox.wait().await.unwrap();
+    assert!(sandbox.tasks.is_empty());
     drop(responses);
 }
 

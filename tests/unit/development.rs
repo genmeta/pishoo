@@ -570,13 +570,13 @@ async fn installed_dependency_and_native_routes_remain_available_with_local_file
         Router::new(),
         Router::new()
             .route(
-                "/std/message/list",
+                "/std/comm/message/list",
                 axum::routing::get(|| async { "installed dependency" }),
             )
             .route("/std/sys/listen", axum::routing::get(|| async { "native" })),
     );
     for (path, expected) in [
-        ("/std/message/list", "installed dependency"),
+        ("/std/comm/message/list", "installed dependency"),
         ("/std/sys/listen", "native"),
     ] {
         let response = routes.clone().oneshot(request(path, true)).await.unwrap();

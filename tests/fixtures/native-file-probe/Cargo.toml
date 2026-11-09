@@ -1,0 +1,11 @@
+[package]
+name = "native-file-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[workspace]
+[lib]
+path = "src/probe.rs"
+crate-type = ["cdylib"]
+[dependencies]
+wasip2 = "=1.0.4"

@@ -9,4 +9,3 @@ path = "src/lib_stream_probe.rs"
 crate-type = ["cdylib"]
 [dependencies]
 wasip2 = "=1.0.4"
-wit-bindgen = "=0.51.0"

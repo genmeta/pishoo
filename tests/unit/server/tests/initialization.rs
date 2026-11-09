@@ -73,6 +73,8 @@ fn profile(root: &std::path::Path, name: &str) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join(name)).unwrap();
     std::fs::create_dir_all(profile.path()).unwrap();
     initialize_directories(&profile).unwrap();
+    assert!(profile.join("file").is_dir());
+    assert_eq!(std::fs::read_dir(profile.join("file")).unwrap().count(), 0);
     profile
 }
 
@@ -188,7 +190,7 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
             (Method::DELETE, "/std/profile/avatar"),
             (Method::GET, "/std/contact/list"),
             (Method::PATCH, "/std/contact?name=bob.dhttp.net"),
-            (Method::PUT, "/std/message"),
+            (Method::PUT, "/std/comm/message"),
             (Method::POST, "/app/introduction/"),
             (Method::GET, "/app/workspace-other/"),
         ] {

@@ -358,7 +358,7 @@ async fn two_profiles_send_over_real_dhttp_mtls_to_the_same_remote() -> TestResu
     access
         .set_policy(
             AccessMethod::Specified(http::Method::POST),
-            "/std/message",
+            "/std/comm/message",
             Effect::Allow,
             Grantee::One(alice.name().as_full().to_owned()),
         )
@@ -371,7 +371,7 @@ async fn two_profiles_send_over_real_dhttp_mtls_to_the_same_remote() -> TestResu
         .request(
             "receiver.dhttp.net",
             http::Method::POST,
-            "/std/message",
+            "/std/comm/message",
             body.clone(),
         )
         .await
@@ -384,7 +384,7 @@ async fn two_profiles_send_over_real_dhttp_mtls_to_the_same_remote() -> TestResu
         .request(
             "receiver.dhttp.net",
             http::Method::POST,
-            "/std/message",
+            "/std/comm/message",
             body,
         )
         .await

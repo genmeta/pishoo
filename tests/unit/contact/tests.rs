@@ -53,7 +53,7 @@ async fn offered_capabilities_create_a_pinned_contact_before_granting_selected_o
     let target = "bob.dhttp.net";
     let subject = "b".repeat(64);
     let selected = vec![
-        json!({"id":"dev.dhttp.net/message#message","endpoints":[{"method":"PUT","path":"/std/message"}]}),
+        json!({"id":"dev.dhttp.net/message#message","endpoints":[{"method":"PUT","path":"/std/comm/message"}]}),
     ];
     assert!(contact(&access, &endpoint, target).await.is_err());
     grant_offered(
@@ -75,7 +75,7 @@ async fn offered_capabilities_create_a_pinned_contact_before_granting_selected_o
         .unwrap();
     assert_eq!(
         rules[target],
-        json!({"/std/message":{"allow":["PUT"],"review":[],"deny":[]}})
+        json!({"/std/comm/message":{"allow":["PUT"],"review":[],"deny":[]}})
     );
 
     assert_eq!(

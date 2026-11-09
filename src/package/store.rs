@@ -33,6 +33,46 @@ pub(crate) const STORE_OWNER: &str = match option_env!("PISHOO_REGISTRY_OWNER_HA
     None => "ffc3e50e1dfb7baca1cc07a7cbfcf8cb34a9bf5a9c25024fcf9a9786bb230746",
 };
 
+// Resolve only through the authenticated, pinned store, then verify the canonical release normally.
+async fn resolve_author(endpoint: &dhttp::Endpoint, name: &str, version: &str) -> Result<String> {
+    super::valid_id(name)?;
+    if name.contains('/')
+        || version.split('.').count() != 3
+        || version.split('.').any(|part| {
+            part.is_empty()
+                || !part.bytes().all(|b| b.is_ascii_digit())
+                || part.parse::<u64>().is_err()
+                || (part.len() > 1 && part.starts_with('0'))
+        })
+    {
+        return Err(Error::BadRequest(
+            "invalid package name or exact version".into(),
+        ));
+    }
+    let metadata: Value = serde_json::from_slice(
+        &store_get(
+            endpoint,
+            &format!("/store/v1/packages/{name}/versions/{version}"),
+            8 * 1024 * 1024,
+        )
+        .await?,
+    )
+    .map_err(|_| Error::InvalidComponent("invalid store metadata".into()))?;
+    let author = metadata["author"]
+        .as_str()
+        .ok_or_else(|| Error::InvalidComponent("missing store package author".into()))?;
+    super::valid_id(&format!("{author}/{name}"))?;
+    if metadata["name"] != name
+        || metadata["version"] != version
+        || metadata["id"] != format!("{author}/{name}")
+    {
+        return Err(Error::InvalidComponent(
+            "store resolved a different package".into(),
+        ));
+    }
+    Ok(author.to_owned())
+}
+
 async fn download_release(
     endpoint: &dhttp::Endpoint,
     publisher: &str,
@@ -92,6 +132,12 @@ pub(crate) async fn install_store_package(
     version: &str,
     sandbox: &Arc<RwLock<Sandbox>>,
 ) -> Result<Value> {
+    let publisher = if publisher.is_empty() {
+        resolve_author(endpoint, name, version).await?
+    } else {
+        publisher.to_owned()
+    };
+    let publisher = publisher.as_str();
     let root_id = format!("{publisher}/{name}");
     super::valid_id(&root_id)?;
     let installed = installed_packages(profile, None)?;
@@ -160,8 +206,19 @@ pub(crate) async fn install_store_package(
             proof["signature"]["verified_at"].as_i64().unwrap(),
         )?)?;
         for dep in document["dependencies"].as_array().unwrap() {
+            let author = match dep["publisher"].as_str() {
+                Some(author) => author.to_owned(),
+                None => {
+                    resolve_author(
+                        endpoint,
+                        dep["name"].as_str().unwrap(),
+                        dep["version"].as_str().unwrap(),
+                    )
+                    .await?
+                }
+            };
             pending.push((
-                dep["publisher"].as_str().unwrap().to_owned(),
+                author,
                 dep["name"].as_str().unwrap().to_owned(),
                 dep["version"].as_str().unwrap().to_owned(),
             ));
@@ -208,11 +265,11 @@ fn order_packages(
             )?)?;
             if doc["dependencies"].as_array().unwrap().iter().all(|dep| {
                 ordered.iter().any(|(id, _, _)| {
-                    id == &format!(
-                        "{}/{}",
-                        dep["publisher"].as_str().unwrap(),
-                        dep["name"].as_str().unwrap()
-                    )
+                    id.rsplit('/').next() == dep["name"].as_str()
+                        && dep["publisher"].as_str().is_none_or(|author| {
+                            id.split_once('/')
+                                .is_some_and(|(publisher, _)| publisher == author)
+                        })
                 })
             }) {
                 ready = Some(index);
@@ -362,9 +419,14 @@ pub(super) fn verify_release(
         .as_array()
         .unwrap()
         .iter()
-        .map(|dependency| serde_json::json!({
-            "author":dependency["publisher"],"name":dependency["name"],"version":dependency["version"]
-        }))
+        .map(|dependency| {
+            let mut item =
+                serde_json::json!({"name":dependency["name"],"version":dependency["version"]});
+            if let Some(author) = dependency.get("publisher") {
+                item["author"] = author.clone();
+            }
+            item
+        })
         .collect::<Vec<_>>();
     if metadata["id"] != format!("{publisher}/{name}")
         || metadata["name"] != name

@@ -258,7 +258,11 @@ async fn frontend_pages_assets_and_head_share_the_root_get_rule_without_opening_
                 }
             }
         }
-        for path in ["/std/message", "/journal/entries", "/app/workspace-other/"] {
+        for path in [
+            "/std/comm/message",
+            "/journal/entries",
+            "/app/workspace-other/",
+        ] {
             let mut request = anonymous_request();
             *request.uri_mut() = path.parse().unwrap();
             assert_eq!(
@@ -412,7 +416,7 @@ async fn contact_approval_is_local_and_the_applicant_reads_its_relationship() {
             serde_json::json!({
                 "from":"peer.dhttp.net", "to":"owner.dhttp.net",
                 "application_id": application_id, "description": "Chat",
-                "requested_access": {"/std/message": ["POST"]}, "offers": {},
+                "requested_access": {"/std/comm/message": ["POST"]}, "offers": {},
             })
             .to_string(),
         ))

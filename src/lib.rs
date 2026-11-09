@@ -3,6 +3,7 @@ mod contact;
 mod development;
 mod dns;
 mod error;
+mod file;
 mod package;
 mod routes;
 mod sandbox;

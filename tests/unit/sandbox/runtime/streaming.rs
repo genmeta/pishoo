@@ -11,54 +11,8 @@ fn fuel_refill_is_bounded_by_time_and_burst() {
     );
 }
 
-#[test]
-fn accept_header_does_not_grant_streaming_for_wildcards_or_zero_quality() {
-    assert!(accepts_events("text/event-stream"));
-    assert!(accepts_events("application/json, text/event-stream;q=0.5"));
-    for value in [
-        "*/*",
-        "application/json",
-        "text/event-stream;q=0",
-        "text/event-stream;q=NaN",
-    ] {
-        assert!(!accepts_events(value));
-    }
-}
-
-#[test]
-fn stream_allowlist_uses_identity_method_and_exact_guest_path() {
-    assert!(stream_operation(
-        "std.dhttp.net/message",
-        &http::Method::GET,
-        "/message/list"
-    ));
-    assert!(stream_operation(
-        "dev.genmeta.tech.dhttp.net/message",
-        &http::Method::GET,
-        "/message/list"
-    ));
-    for id in [
-        "message",
-        "evil.example/message",
-        "dev.genmeta.dhttp.net/message",
-        "std.dhttp.net/profile",
-    ] {
-        assert!(!stream_operation(id, &http::Method::GET, "/message/list"));
-    }
-    assert!(!stream_operation(
-        "std.dhttp.net/message",
-        &http::Method::POST,
-        "/message/list"
-    ));
-    assert!(!stream_operation(
-        "std.dhttp.net/message",
-        &http::Method::GET,
-        "/message/list/"
-    ));
-}
-
 #[tokio::test]
-async fn epoch_refills_stream_but_not_ordinary_execution_after_idle() {
+async fn epoch_refills_http_but_not_cli_after_idle() {
     let runtime = WasmRuntime::new().unwrap();
     let module = wasmtime::Module::new(
         &runtime.engine,
@@ -67,9 +21,9 @@ async fn epoch_refills_stream_but_not_ordinary_execution_after_idle() {
                 (loop $l local.get $n i32.const 1 i32.sub local.tee $n br_if $l)))"#,
     )
     .unwrap();
-    for streaming in [false, true] {
+    for replenish in [false, true] {
         let mut store = Store::new(&runtime.engine, ());
-        configure_execution(&mut store, streaming).unwrap();
+        configure_execution(&mut store, replenish).unwrap();
         let instance = wasmtime::Instance::new_async(&mut store, &module, &[])
             .await
             .unwrap();
@@ -80,12 +34,12 @@ async fn epoch_refills_stream_but_not_ordinary_execution_after_idle() {
         tokio::time::sleep(Duration::from_millis(50)).await;
         runtime.engine.increment_epoch();
         let result = work.call_async(&mut store, 10_000).await;
-        assert_eq!(result.is_ok(), streaming);
+        assert_eq!(result.is_ok(), replenish);
     }
 }
 
 #[tokio::test]
-async fn cpu_only_stream_still_exhausts_its_budget() {
+async fn cpu_only_http_still_exhausts_its_budget() {
     let runtime = WasmRuntime::new().unwrap();
     let module = wasmtime::Module::new(
         &runtime.engine,
@@ -132,5 +86,19 @@ async fn explicit_limits_reject_guest_memory_growth() {
             .await
             .unwrap(),
         -1
+    );
+}
+
+#[test]
+fn experimental_events_import_is_rejected_at_link_validation() {
+    let runtime = WasmRuntime::new().unwrap();
+    let bytes = wat::parse_str(
+        r#"(component
+        (import "pishoo:events/change@0.1.0" (instance
+            (export "current" (func (result u64))))))"#,
+    )
+    .unwrap();
+    assert!(
+        matches!(runtime.compile(&bytes), Err(Error::InvalidComponent(message)) if message.contains("pishoo:events/change"))
     );
 }

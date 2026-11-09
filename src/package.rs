@@ -309,13 +309,13 @@ async fn pkg_management_request(
         let input: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|_| Error::BadRequest("invalid store installation JSON".into()))?;
         if input.as_object().is_none_or(|value| {
-            value.len() != 3
+            value.len() != 2 + usize::from(value.contains_key("author"))
                 || value
                     .keys()
                     .any(|key| !matches!(key.as_str(), "author" | "name" | "version"))
         }) {
             return Err(Error::BadRequest(
-                "installation requires only author, name and version".into(),
+                "installation requires name and version, with optional author".into(),
             ));
         }
         let text = |key: &str| {
@@ -334,7 +334,11 @@ async fn pkg_management_request(
         let mut value = install_store_package(
             &profile,
             &endpoint,
-            text("author")?,
+            if input.get("author").is_some() {
+                text("author")?
+            } else {
+                ""
+            },
             name,
             text("version")?,
             &sandbox,
@@ -370,9 +374,12 @@ async fn pkg_management_request(
                 .libs
                 .get(value["id"].as_str().unwrap())
                 .cloned();
-            if let Some(lib) = loaded
-                && value["version"].as_str() == Some(lib.openapi.info.version.as_str())
-            {
+            // Installation facts and the current runtime are distinct. Local
+            // preview code can differ from the registered release; its APIs
+            // must still be discoverable under this exact installed identity.
+            // Keep version/signing facts unchanged, and expose the runtime's
+            // own version in its existing OpenAPI document.
+            if let Some(lib) = loaded {
                 let id = value["id"].as_str().unwrap();
                 let prefix =
                     if crate::package::is_standard_author(id.split('/').next().unwrap_or("")) {

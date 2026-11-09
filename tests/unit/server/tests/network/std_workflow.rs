@@ -315,7 +315,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     let catalog = expect(alice, Method::GET, "/std/acl/permissions", Value::Null, 200).await;
     assert_eq!(
         catalog["std.dhttp.net/message · message"],
-        json!({"/std/message":["PUT"]})
+        json!({"/std/comm/message":["PUT"]})
     );
     assert!(catalog.as_object().unwrap().values().all(|paths| {
         !paths
@@ -345,7 +345,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 if case == 0 { 404 } else { 204 },
             )
             .await;
-            rule(server, "**", "PUT", "/std/message", "deny").await;
+            rule(server, "**", "PUT", "/std/comm/message", "deny").await;
         }
         let payload = |target: &str| json!({"target_name":target,"description":format!("crossed case {case}"),"requested_capabilities":["message"],"offered_capabilities":["message"]});
         let (a, b) = tokio::join!(
@@ -389,13 +389,13 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         );
         if case == 0 {
             // Approving the actual request persists ACL independently of contact acceptance.
-            rule(bob, alice.name(), "PUT", "/std/message", "review").await;
+            rule(bob, alice.name(), "PUT", "/std/comm/message", "review").await;
             let payload = json!({"client_message_id":"review-before-contact","content":"先审批后加好友","media_type":"text/plain"});
             let (status, pending) = remote_json(
                 &alice.endpoint,
                 bob.name(),
                 Method::PUT,
-                "/std/message?scenario=before-contact",
+                "/std/comm/message?scenario=before-contact",
                 payload.clone(),
             )
             .await;
@@ -412,12 +412,12 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 &alice.endpoint,
                 bob.name(),
                 Method::PUT,
-                "/std/message?scenario=before-contact",
+                "/std/comm/message?scenario=before-contact",
                 payload,
             )
             .await;
             assert_eq!(status, StatusCode::CREATED, "approved request: {body}");
-            rule(bob, alice.name(), "PUT", "/std/message", "deny").await;
+            rule(bob, alice.name(), "PUT", "/std/comm/message", "deny").await;
             eprintln!("PASS request approval is independent of contact acceptance");
         }
         let mut granted = [false, false];
@@ -447,7 +447,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 assert_eq!(after["subject_id"], before["subject_id"]);
                 assert_eq!(after["status"], "active");
             } else {
-                rule(server, peer.name(), "PUT", "/std/message", "allow").await;
+                rule(server, peer.name(), "PUT", "/std/comm/message", "allow").await;
                 granted[action % 2] = true;
             }
             let a = refresh(alice, &a["id"]).await;
@@ -466,7 +466,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 )
                 .await;
                 let allowed = granted[usize::from(receiver.name() == bob.name())];
-                let (status, body) = remote_json(&sender.endpoint, receiver.name(), Method::PUT, "/std/message", json!({"client_message_id":format!("order-{case}-{action}-{}",sender.name().trim_end_matches(".dhttp.net")),"content":"乱序权限探测","media_type":"text/plain"})).await;
+                let (status, body) = remote_json(&sender.endpoint, receiver.name(), Method::PUT, "/std/comm/message", json!({"client_message_id":format!("order-{case}-{action}-{}",sender.name().trim_end_matches(".dhttp.net")),"content":"乱序权限探测","media_type":"text/plain"})).await;
                 assert_eq!(
                     status.as_u16(),
                     if allowed { 201 } else { 403 },
@@ -480,7 +480,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             let sent = expect(
                 server,
                 Method::PUT,
-                "/std/message",
+                "/std/comm/message",
                 json!({"to":peer.name(),"content":text,"media_type":"text/plain","client_message_id":format!("queued-{case}-{}",server.name())}),
                 202,
             )
@@ -489,7 +489,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             let local = expect(
                 server,
                 Method::GET,
-                &format!("/std/message/list?name={}", peer.name()),
+                &format!("/std/comm/message/list?name={}", peer.name()),
                 Value::Null,
                 200,
             )
@@ -505,7 +505,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             let received = expect(
                 peer,
                 Method::GET,
-                &format!("/std/message/list?name={}", server.name()),
+                &format!("/std/comm/message/list?name={}", server.name()),
                 Value::Null,
                 200,
             )
@@ -533,13 +533,13 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     }
 
     // Review permission and friendship acceptance are independent; approval persists an ordinary ACL grant.
-    rule(bob, alice.name(), "PUT", "/std/message", "review").await;
+    rule(bob, alice.name(), "PUT", "/std/comm/message", "review").await;
     let payload = json!({"client_message_id":"review-order","content":"请求审批重试","media_type":"text/plain"});
     let (status, pending) = remote_json(
         &alice.endpoint,
         bob.name(),
         Method::PUT,
-        "/std/message?scenario=active-review",
+        "/std/comm/message?scenario=active-review",
         payload.clone(),
     )
     .await;
@@ -548,7 +548,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         &alice.endpoint,
         bob.name(),
         Method::PUT,
-        "/std/message?scenario=active-review",
+        "/std/comm/message?scenario=active-review",
         payload.clone(),
     )
     .await;
@@ -574,7 +574,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         &alice.endpoint,
         bob.name(),
         Method::PUT,
-        "/std/message?scenario=active-review",
+        "/std/comm/message?scenario=active-review",
         payload.clone(),
     )
     .await;
@@ -583,7 +583,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         &alice.endpoint,
         bob.name(),
         Method::PUT,
-        "/std/message?scenario=active-review",
+        "/std/comm/message?scenario=active-review",
         payload,
     )
     .await;
@@ -591,7 +591,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     assert_eq!(duplicate["index"], receipt["index"]);
     let rules = expect(bob, Method::GET, "/std/acl/allow", Value::Null, 200).await;
     assert!(
-        rules[alice.name()]["/std/message"]["allow"]
+        rules[alice.name()]["/std/comm/message"]["allow"]
             .as_array()
             .is_some_and(|m| m.contains(&json!("PUT")))
     );
@@ -726,7 +726,7 @@ fn install_signed_workspace_in_isolated_manual_test_profile() {
         "LOCAL APP INSTALL {} {}",
         installed["id"], installed["version"]
     );
-    assert!(profile.join("lib/std/message.wasm").is_file());
+    assert!(profile.join("lib/std/comm/message_0.2.0.wasm").is_file());
     assert!(profile.join("app/workspace/index.html").is_file());
     let db =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();

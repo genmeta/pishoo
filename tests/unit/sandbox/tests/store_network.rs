@@ -253,7 +253,7 @@ async fn store_app_updates_exact_dependencies_through_the_management_api() {
             let lib = &loaded.libs[&format!("alice.dhttp.net/{name}")];
             assert_eq!(lib.openapi.info.version, version);
             assert!(wasmparser::Parser::is_component(
-                &std::fs::read(profile.join(format!("lib/{name}.wasm"))).unwrap()
+                &std::fs::read(profile.join(format!("lib/{name}_{version}.wasm"))).unwrap()
             ));
         }
         assert_eq!(

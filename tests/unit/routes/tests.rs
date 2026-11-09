@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use super::{
     access::authorize,
     proxy::{clean_hop_headers, proxy_uri},
-    static_file, *,
+    *,
 };
 use crate::{
     Error,
@@ -86,8 +86,6 @@ mod authorization;
 mod capabilities;
 #[path = "tests/routing.rs"]
 mod routing;
-#[path = "tests/static_files.rs"]
-mod static_files;
 
 #[path = "tests/websocket.rs"]
 pub(crate) mod websocket;

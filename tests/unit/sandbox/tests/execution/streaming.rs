@@ -125,8 +125,6 @@ async fn large_echo_reports_fuel_exhaustion() {
     let mut store = Store::new(
         &lib.runtime.engine,
         StoreData {
-            cancelled: tokio_util::sync::CancellationToken::new(),
-            changes: tokio::sync::watch::channel(0).0,
             table: wasmtime::component::ResourceTable::new(),
             wasi,
             http: WasiHttpCtx::new(),
@@ -195,4 +193,93 @@ async fn large_echo_reports_fuel_exhaustion() {
         Some(&wasmtime::Trap::OutOfFuel)
     );
     assert!(received > 0 && received < 100 * 1024 * 1024);
+}
+
+#[tokio::test]
+async fn standard_streams_need_no_events_imports_or_special_request_headers() {
+    let directory = tempfile::tempdir().unwrap();
+    let lib = load(
+        include_bytes!("../../../../fixtures/pishoo-stream-probe.wasm"),
+        directory.path(),
+    );
+    let tasks = TaskTracker::new();
+    for (path, mime) in [
+        ("/sse", "text/event-stream"),
+        ("/ndjson", "application/x-ndjson"),
+        ("/text", "text/plain"),
+    ] {
+        let mut response = invoke(lib.clone(), &tasks)
+            .await
+            .execute(request(&format!("{path}?count=2"), empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["content-type"], mime);
+        assert_eq!(
+            response
+                .body_mut()
+                .frame()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_data()
+                .unwrap(),
+            "ready\n"
+        );
+        assert_eq!(
+            tasks.len(),
+            1,
+            "response must arrive before handler completion"
+        );
+        let rest = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(rest, "tick\ntick\n");
+    }
+    reaped(&tasks).await;
+}
+
+#[tokio::test]
+async fn slow_binary_reader_applies_backpressure_then_receives_all_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let lib = load(
+        include_bytes!("../../../../fixtures/pishoo-stream-probe.wasm"),
+        directory.path(),
+    );
+    let tasks = TaskTracker::new();
+    let mut response = invoke(lib, &tasks)
+        .await
+        .execute(request("/binary?count=16", empty()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(tasks.len(), 1, "guest must wait for bounded output buffers");
+    let mut received = Vec::new();
+    while let Some(frame) = response.body_mut().frame().await {
+        received.extend_from_slice(&frame.unwrap().into_data().unwrap());
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(&received[..6], b"ready\n");
+    assert_eq!(received.len(), 6 + 16 * 16 * 1024);
+    assert!(received[6..].iter().all(|b| *b == 0xa5));
+    reaped(&tasks).await;
+}
+
+#[tokio::test]
+async fn ordinary_http_replenishes_fuel_and_runs_beyond_cli_deadline() {
+    let directory = tempfile::tempdir().unwrap();
+    let lib = load(
+        include_bytes!("../../../../fixtures/pishoo-stream-probe.wasm"),
+        directory.path(),
+    );
+    let tasks = TaskTracker::new();
+    let response = invoke(lib, &tasks)
+        .await
+        .execute(request("/budget?count=20", empty()))
+        .await
+        .unwrap();
+    let bytes = tokio::time::timeout(Duration::from_secs(35), response.into_body().collect())
+        .await
+        .unwrap()
+        .unwrap()
+        .to_bytes();
+    assert_eq!(bytes, format!("ready\n{}", "tick\n".repeat(20)));
+    reaped(&tasks).await;
 }

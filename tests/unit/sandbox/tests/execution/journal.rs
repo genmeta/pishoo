@@ -44,7 +44,7 @@ pub(super) async fn journal_credentials(
 
 // RemoteAuthority has no public constructor: obtain it through the real,
 // certificate- and OCSP-verified TLS handshake, without changing qtls.
-fn journal_remote(
+pub(super) fn journal_remote(
     client: &dhttp::LocalAuthority,
     server: &dhttp::LocalAuthority,
 ) -> dhttp::RemoteAuthority {
@@ -126,8 +126,6 @@ async fn request_identity_is_derived_from_handshake_and_owner_requires_name_and_
     let root = tempfile::tempdir().unwrap();
     let (local, owner, bob) = journal_credentials(root.path()).await;
     let mut state = StoreData {
-        cancelled: tokio_util::sync::CancellationToken::new(),
-        changes: tokio::sync::watch::channel(0).0,
         table: ResourceTable::new(),
         wasi: wasmtime_wasi::WasiCtx::builder().build(),
         http: wasmtime_wasi_http::WasiHttpCtx::new(),

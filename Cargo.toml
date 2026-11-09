@@ -2,7 +2,7 @@
 name = "pishoo"
 description = "modern, secure, QUIC-powered web/proxy engine"
 homepage = "https://www.dhttp.net"
-version = "0.9.1-preview.1"
+version = "0.9.1"
 edition = "2024"
 rust-version = "1.96"
 license = "Apache-2.0"
@@ -38,6 +38,7 @@ sha2 = "0.10"
 scopeguard = "1"
 tower = { version = "0.5", features = ["util"] }
 cap-std = "4"
+blake3 = "1.8"
 getrandom = "0.4"
 rustix = { version = "1", features = ["fs", "process"] }
 toml = "0.9"

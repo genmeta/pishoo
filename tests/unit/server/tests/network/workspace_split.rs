@@ -267,7 +267,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
     )
     .await;
     assert_eq!(
-        rules["bob.dhttp.net"]["/std/message"]["allow"],
+        rules["bob.dhttp.net"]["/std/comm/message"]["allow"],
         json!(["POST"])
     );
     crate::contact::contact_jobs(profile, &alice, access, &contact_db)
@@ -290,7 +290,10 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         Value::Null,
     )
     .await;
-    assert_eq!(incoming["offers"]["/std/message"]["allow"], json!(["POST"]));
+    assert_eq!(
+        incoming["offers"]["/std/comm/message"]["allow"],
+        json!(["POST"])
+    );
     // A later revocation stays authoritative through acceptance and polling.
     assert_eq!(
         call(
@@ -298,7 +301,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
             http::Method::DELETE,
             "alice.dhttp.net",
             "/std/acl/allow/bob.dhttp.net",
-            json!({"api":"/std/message","method":"POST"})
+            json!({"api":"/std/comm/message","method":"POST"})
         )
         .await
         .0,
@@ -342,7 +345,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
     .await;
     assert_eq!(contact["status"], "active");
     assert!(
-        contact["granted_access"]["/std/message"]["allow"]
+        contact["granted_access"]["/std/comm/message"]["allow"]
             .as_array()
             .is_none_or(|methods| !methods.contains(&json!("POST"))),
         "activation must not authorize Message"

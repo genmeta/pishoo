@@ -89,6 +89,7 @@ pub(super) fn initialize_directories(profile: &IdentityProfile) -> Result<()> {
         ".volume/sys/setting",
         ".volume/sys/pkg",
         ".volume/std",
+        "file",
         "lib",
         "lib/std",
         "app",
@@ -231,6 +232,44 @@ pub(super) fn inherit_identity_owner(
 
 // Temporary operation files are removed after commit. They are not installation
 // metadata: recovery compares complete SQLite facts, then finishes or rolls back.
+fn recovery_leaf(
+    resource: &serde_json::Value,
+    key: &str,
+    kind: &str,
+    short: &str,
+) -> Result<String> {
+    let legacy = if kind == "lib" {
+        format!("{short}.wasm")
+    } else {
+        short.to_owned()
+    };
+    let Some(value) = resource.get(key) else {
+        if resource.get("old_leaf").is_some() || resource.get("new_leaf").is_some() {
+            return Err(Error::InvalidConfig("incomplete recovery filenames".into()));
+        }
+        return Ok(legacy);
+    };
+    let leaf = value
+        .as_str()
+        .ok_or_else(|| Error::InvalidConfig("invalid recovery filename".into()))?;
+    let valid = leaf == legacy
+        || kind == "lib"
+            && leaf
+                .strip_prefix(&format!("{short}_"))
+                .and_then(|s| s.strip_suffix(".wasm"))
+                .is_some_and(|version| {
+                    !version.is_empty()
+                        && version.len() <= 128
+                        && version
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
+                });
+    if !valid {
+        return Err(Error::InvalidConfig("invalid recovery filename".into()));
+    }
+    Ok(leaf.to_owned())
+}
+
 fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
     for entry in std::fs::read_dir(profile.path())? {
         let entry = entry?;
@@ -305,6 +344,8 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                 {
                     return Err(Error::InvalidConfig("invalid recovery resource".into()));
                 }
+                recovery_leaf(resource, "old_leaf", kind, short)?;
+                recovery_leaf(resource, "new_leaf", kind, short)?;
             }
             let facts = package["facts"]
                 .as_str()
@@ -347,11 +388,8 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                 {
                     return Err(Error::InvalidConfig("invalid recovery resource".into()));
                 }
-                let leaf = if kind == "lib" {
-                    format!("{short}.wasm")
-                } else {
-                    short.to_owned()
-                };
+                let old_leaf = recovery_leaf(resource, "old_leaf", kind, short)?;
+                let leaf = recovery_leaf(resource, "new_leaf", kind, short)?;
                 let root = profile.join(
                     if kind == "lib"
                         && crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
@@ -390,7 +428,7 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                 if !committed {
                     if backup.try_exists()? {
                         remove(&target)?;
-                        std::fs::rename(&backup, &target)?;
+                        std::fs::rename(&backup, root.join(&old_leaf))?;
                     } else if resource["old"] == false
                         && resource["new"] == true
                         && !candidate.try_exists()?

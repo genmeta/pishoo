@@ -27,7 +27,7 @@ use wasmtime_wasi_http::{
 
 use super::{
     Invocation, Lib, Outgoing, Sandbox, StoreData, WasmRuntime,
-    host::{events, identity, identity_v2},
+    host::{identity, identity_v2},
 };
 use crate::{Body, Error, Result, package::valid_id};
 
@@ -102,9 +102,6 @@ impl WasmRuntime {
             |state| state,
         )
         .map_err(Error::Guest)?;
-        events::pishoo::events::change::add_to_linker::<_, wasmtime::component::HasSelf<StoreData>>(
-            &mut linker, |state| state,
-        ).map_err(Error::Guest)?;
         // The sender lives exactly as long as this runtime. The thread owns
         // only Engine, never Arc<WasmRuntime>, so there is no ownership cycle.
         let (shutdown, stopped) = std::sync::mpsc::channel();
@@ -298,8 +295,6 @@ impl Lib {
             .map_err(Error::Guest)?;
         let filesystem = builder.build().filesystem().clone();
         Ok(Self {
-            id,
-            changes: tokio::sync::watch::channel(0).0,
             stream_retired: tokio_util::sync::CancellationToken::new(),
             openapi,
             component,
@@ -349,6 +344,33 @@ impl Invocation {
         } = &mut outgoing
         {
             check_endpoint(&endpoint, granted)?;
+            // Derive the file capability from this Lib's actual preopen. Do not
+            // reopen a path, or forward a previous caller's directory authority.
+            use wasmtime_wasi::p2::bindings::filesystem::preopens::Host;
+            let mut filesystem = lib.filesystem.clone();
+            let mut table = ResourceTable::new();
+            let preopens = wasmtime_wasi::filesystem::WasiFilesystemCtxView {
+                ctx: &mut filesystem,
+                table: &mut table,
+            }
+            .get_directories()
+            .map_err(Error::Guest)?;
+            let (descriptor, _) = preopens
+                .into_iter()
+                .find(|(_, path)| path == "/db")
+                .ok_or_else(|| Error::InvalidComponent("missing private directory".into()))?;
+            let wasmtime_wasi::filesystem::Descriptor::Dir(directory) =
+                table.get(&descriptor).map_err(|e| Error::Guest(e.into()))?
+            else {
+                return Err(Error::InvalidComponent("invalid private directory".into()));
+            };
+            *api = axum::Router::new()
+                .fallback_service(api.clone().merge(crate::file::router(
+                    cap_std::fs::Dir::from_std_file(directory.dir.try_clone()?),
+                    api.clone(),
+                )))
+                .layer(axum::middleware::from_fn(crate::routes::normalize_method));
+
             let actual = endpoint.local_authority()?;
             let actual = dhttp_home::certificate::extract_dhttp_subject_key_identifier(
                 actual.certificates(),
@@ -393,28 +415,14 @@ impl Invocation {
             tasks,
             outgoing,
         } = self;
-        // Selected by installed identity + exact operation, never request
-        // headers, guest OpenAPI, or a response MIME type.
-        let streaming = stream_operation(&lib.id, request.method(), request.uri().path())
-            && request
-                .headers()
-                .get_all(http::header::ACCEPT)
-                .iter()
-                .filter_map(|v| v.to_str().ok())
-                .any(accepts_events);
-        let cancelled = if streaming {
-            lib.stream_retired.child_token()
-        } else {
-            tokio_util::sync::CancellationToken::new()
-        };
+        // All HTTP invocations share one budget and retire with their Lib version.
+        let cancelled = lib.stream_retired.child_token();
         // Construct before spawning/awaiting; even an unpolled returned Body
         // must cancel. Transfer this guard from execute to its response body.
         let cancel_on_drop = cancelled.clone().drop_guard();
         let mut wasi = WasiCtx::builder().build();
         *wasi.filesystem() = lib.filesystem.clone();
         let store_data = StoreData {
-            cancelled: cancelled.clone(),
-            changes: lib.changes.clone(),
             table: ResourceTable::new(),
             wasi,
             http: WasiHttpCtx::new(),
@@ -433,7 +441,7 @@ impl Invocation {
             let execute = async {
                 let mut store = Store::new(&lib.runtime.engine, store_data);
                 store.limiter(|state| &mut state.memory);
-                configure_execution(&mut store, streaming).map_err(Error::Guest)?;
+                configure_execution(&mut store, true).map_err(Error::Guest)?;
                 let proxy = Proxy::instantiate_async(&mut store, &lib.component, &lib.runtime.linker)
                     .await.map_err(Error::Guest)?;
                 let scheme = match request.uri().scheme_str().expect("dhttp requests have a :scheme") {
@@ -454,16 +462,16 @@ impl Invocation {
             let result = tokio::select! {
                 biased;
                 _ = cancelled.cancelled() => {
-                    // Let cooperative guests leave wait(), finish transactions
-                    // and close SQLite's dotfile locks before dropping Store.
-                    // Misbehaving code remains bounded by fuel and this grace.
+                    // Standard output errors can let guests clean up. A guest
+                    // waiting on I/O or a timer may use the entire grace period.
+                    // Traps do not guarantee guest destructors or database cleanup.
                     tokio::time::timeout(Duration::from_secs(3), &mut execute).await
                         .unwrap_or_else(|_| Err(Error::Guest(wasmtime::Error::msg("invocation cancellation deadline"))))
                 },
                 result = &mut execute => result,
             };
             if let Err(error) = &result {
-                tracing::warn!(%error, streaming, "WASM HTTP execution stopped");
+                tracing::warn!(?error, "WASM HTTP execution stopped");
             }
             result
         });
@@ -506,6 +514,33 @@ impl Invocation {
         } = &mut outgoing
         {
             check_endpoint(&endpoint, granted)?;
+            // Derive the file capability from this Lib's actual preopen. Do not
+            // reopen a path, or forward a previous caller's directory authority.
+            use wasmtime_wasi::p2::bindings::filesystem::preopens::Host;
+            let mut filesystem = lib.filesystem.clone();
+            let mut table = ResourceTable::new();
+            let preopens = wasmtime_wasi::filesystem::WasiFilesystemCtxView {
+                ctx: &mut filesystem,
+                table: &mut table,
+            }
+            .get_directories()
+            .map_err(Error::Guest)?;
+            let (descriptor, _) = preopens
+                .into_iter()
+                .find(|(_, path)| path == "/db")
+                .ok_or_else(|| Error::InvalidComponent("missing private directory".into()))?;
+            let wasmtime_wasi::filesystem::Descriptor::Dir(directory) =
+                table.get(&descriptor).map_err(|e| Error::Guest(e.into()))?
+            else {
+                return Err(Error::InvalidComponent("invalid private directory".into()));
+            };
+            *api = axum::Router::new()
+                .fallback_service(api.clone().merge(crate::file::router(
+                    cap_std::fs::Dir::from_std_file(directory.dir.try_clone()?),
+                    api.clone(),
+                )))
+                .layer(axum::middleware::from_fn(crate::routes::normalize_method));
+
             let authority = local.clone();
             *api = api.clone().layer(axum::middleware::from_fn(
                 move |mut request: Request<axum::body::Body>, next: axum::middleware::Next| {
@@ -531,12 +566,10 @@ impl Invocation {
                 let mut store = Store::new(
                     &lib.runtime.engine,
                     StoreData {
-                        cancelled: tokio_util::sync::CancellationToken::new(),
                         table: ResourceTable::new(),
                         wasi,
                         http: WasiHttpCtx::new(),
                         memory: execution_limits(),
-                        changes: lib.changes.clone(),
                         outgoing,
                         local,
                         remote: None,
@@ -667,6 +700,13 @@ fn check_endpoint(actual: &dhttp::Endpoint, granted: &dhttp::Endpoint) -> Result
 }
 
 impl Sandbox {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "manual CLI invocation contract; no periodic WASM scheduler"
+        )
+    )]
     pub(crate) async fn run(
         sandbox: Arc<std::sync::RwLock<Self>>,
         endpoint: dhttp::Endpoint,
@@ -720,37 +760,6 @@ fn execution_limits() -> wasmtime::StoreLimits {
         .build()
 }
 
-fn stream_operation(id: &str, method: &http::Method, path: &str) -> bool {
-    id.split_once('/').is_some_and(|(author, name)| {
-        crate::package::is_standard_author(author) && name == "message"
-    }) && method == http::Method::GET
-        && path == "/message/list"
-}
-
-fn accepts_events(value: &str) -> bool {
-    value.split(',').any(|range| {
-        let mut parts = range.split(';');
-        if !parts
-            .next()
-            .unwrap_or("")
-            .trim()
-            .eq_ignore_ascii_case("text/event-stream")
-        {
-            return false;
-        }
-        parts.all(|parameter| {
-            let Some((key, value)) = parameter.trim().split_once('=') else {
-                return false;
-            };
-            !key.trim().eq_ignore_ascii_case("q")
-                || value
-                    .trim()
-                    .parse::<f64>()
-                    .is_ok_and(|q| q > 0.0 && q <= 1.0)
-        })
-    })
-}
-
 const BURST_FUEL: u64 = 100_000_000;
 const REFILL_FUEL_PER_SECOND: u64 = 10_000_000;
 
@@ -766,12 +775,12 @@ fn replenished_fuel(remaining: u64, elapsed: Duration) -> u64 {
 
 fn configure_execution<T: Send + 'static>(
     store: &mut Store<T>,
-    streaming: bool,
+    replenish: bool,
 ) -> wasmtime::Result<()> {
     store.set_fuel(BURST_FUEL)?;
     store.fuel_async_yield_interval(Some(10_000))?;
     store.set_epoch_deadline(1);
-    if streaming {
+    if replenish {
         let mut accounted_at = Instant::now();
         store.epoch_deadline_callback(move |mut context| {
             let now = Instant::now();

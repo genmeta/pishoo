@@ -79,7 +79,7 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
     let runtime = crate::WasmRuntime::new().unwrap();
     let mut packages = Vec::new();
     for (publisher, name, path, group) in [
-        ("std.dhttp.net", "message", "/message", "receive"),
+        ("std.dhttp.net", "message", "/comm/message", "receive"),
         ("alice.dhttp.net", "notes", "/entries", "read"),
     ] {
         let method = if name == "message" { "put" } else { "get" };
@@ -112,7 +112,7 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
     assert_eq!(
         original,
         json!({
-            "std.dhttp.net/message · Original":{"/std/message":["PUT"]},
+            "std.dhttp.net/message · Original":{"/std/comm/message":["PUT"]},
             "alice.dhttp.net/notes · Original":{"/notes/entries":["GET"]}
         })
     );
@@ -193,7 +193,7 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
         StatusCode::NO_CONTENT
     );
     assert_eq!(catalog(&router, &local).await, original);
-    let replacement = json!([{"id":"message","title":"Receive","endpoints":[{"method":"PUT","path":"/std/message"}]}]);
+    let replacement = json!([{"id":"message","title":"Receive","endpoints":[{"method":"PUT","path":"/std/comm/message"}]}]);
     for method in ["PUT", "DELETE"] {
         let body = (method == "PUT").then(|| replacement.clone());
         let response = call(
@@ -255,12 +255,12 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
         ),
         (
             "/std/acl/permissions?name=message",
-            json!([{"id":"message","title":"Wrong","endpoints":[{"method":"GET","path":"/std/message"}]}]),
+            json!([{"id":"message","title":"Wrong","endpoints":[{"method":"GET","path":"/std/comm/message"}]}]),
             StatusCode::BAD_REQUEST,
         ),
         (
             "/std/acl/permissions?name=message",
-            json!([{"id":"message","title":"Old method","endpoints":[{"method":"POST","path":"/std/message"}]}]),
+            json!([{"id":"message","title":"Old method","endpoints":[{"method":"POST","path":"/std/comm/message"}]}]),
             StatusCode::BAD_REQUEST,
         ),
         (
@@ -277,7 +277,7 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
     access
         .set_policy(
             access_control::Method::Specified(Method::PUT),
-            "/std/message",
+            "/std/comm/message",
             access_control::Effect::Allow,
             access_control::Grantee::All,
         )
@@ -320,7 +320,7 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
     assert!(changed.get("std.dhttp.net/message · Original").is_none());
     assert_eq!(
         changed["std.dhttp.net/message · Receive"],
-        json!({"/std/message":["PUT"]})
+        json!({"/std/comm/message":["PUT"]})
     );
     assert_eq!(
         changed["alice.dhttp.net/notes · Original"],
@@ -343,7 +343,7 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
     );
     assert_eq!(
         catalog(&router, &local).await["std.dhttp.net/message · 接收消息 / Receive"],
-        json!({"/std/message":["PUT"]})
+        json!({"/std/comm/message":["PUT"]})
     );
     let response = call(
         &router,
@@ -383,7 +383,7 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
         );
         assert_eq!(
             catalog(&router, &local).await["std.dhttp.net/message · 接收消息 / Receive"],
-            json!({"/std/message":["PUT"]})
+            json!({"/std/comm/message":["PUT"]})
         );
     }
     // Reinstallation uses the package's declarations, replacing a manual edit.
@@ -491,7 +491,7 @@ async fn permission_declarations_follow_install_replace_delete_and_uninstall() {
             .auth(
                 Headers {
                     method: Method::PUT,
-                    path: "/std/message".into(),
+                    path: "/std/comm/message".into(),
                     fields: http::HeaderMap::new()
                 },
                 None,

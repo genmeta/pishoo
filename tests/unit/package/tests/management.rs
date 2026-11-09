@@ -52,7 +52,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
         parent_mode
     );
     assert_eq!(
-        std::fs::metadata(profile.join("lib/note.wasm"))
+        std::fs::metadata(profile.join("lib/note_1.0.0.wasm"))
             .unwrap()
             .mode()
             & 0o777,
@@ -61,7 +61,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     let mut sandbox = Sandbox::new(runtime.clone());
     sandbox.load_libs(&profile).unwrap();
     std::fs::write(profile.join(".volume/note/saved.db"), b"keep").unwrap();
-    let before = std::fs::read(profile.join("lib/note.wasm")).unwrap();
+    let before = std::fs::read(profile.join("lib/note_1.0.0.wasm")).unwrap();
     // A manifest-only component passes metadata validation, but has no incoming handler.
     let metadata_only = package_fixture(
         &serde_json::json!({"openapi":"3.1.0","info":{"title":"Test","version":"1.0.0","description":"Test","license":{"name":"MIT"}},"x-pishoo":{"publisher":"alice.dhttp.net","name":"note"},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload","responses":{"200":{"description":"ok"}}}}}}),
@@ -72,7 +72,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     assert!(read_package(&metadata_only).is_ok());
     assert!(install_lib(&profile, "note", &metadata_only, &runtime).is_err());
     assert_eq!(
-        std::fs::read(profile.join("lib/note.wasm")).unwrap(),
+        std::fs::read(profile.join("lib/note_1.0.0.wasm")).unwrap(),
         before
     );
     install_lib(&profile, "note", &component("2"), &runtime).unwrap();
@@ -371,8 +371,8 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
     )
     .unwrap();
     assert_eq!(value["version"], "2.0.0");
-    assert!(value.get("openapi").is_none());
-    assert_eq!(value["endpoints"], serde_json::json!([]));
+    assert_eq!(value["openapi"]["info"]["version"], "1.2.3");
+    assert_eq!(value["endpoints"][0]["path"], "/note/upload");
     database
         .execute("UPDATE package SET version='1.2.3' WHERE name='note'", [])
         .unwrap();
@@ -405,7 +405,11 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
         StatusCode::CONFLICT
     );
     std::fs::write(profile.join(".volume/note/keep.db"), b"keep").unwrap();
-    std::fs::write(profile.join("lib/note.wasm"), b"corrupt runtime payload").unwrap();
+    std::fs::write(
+        profile.join("lib/note_1.2.3.wasm"),
+        b"corrupt runtime payload",
+    )
+    .unwrap();
     let mut removal = request(Method::DELETE, path, AxumBody::empty());
     removal.headers_mut().insert(
         "expected-package-id",
@@ -420,7 +424,7 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
         std::fs::read(profile.join(".volume/note/keep.db")).unwrap(),
         b"keep"
     );
-    assert!(!profile.join("lib/note.wasm").exists());
+    assert!(!profile.join("lib/note_1.2.3.wasm").exists());
     assert_eq!(
         router
             .clone()
@@ -609,7 +613,7 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
             .is_empty()
     );
     assert!(installed_apps(&profile, None).unwrap().is_empty());
-    assert!(!profile.join("lib/note.wasm").exists());
+    assert!(!profile.join("lib/note_1.2.3.wasm").exists());
 }
 
 #[tokio::test]

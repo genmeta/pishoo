@@ -23,14 +23,3 @@ mod bindings_v2 {
 
 /// Current identity API; compare both tuple elements to identify the owner.
 pub use bindings_v2::pishoo::identity::request_identity as identity;
-
-mod event_bindings {
-    wit_bindgen::generate!({
-        path: "pishoo-events",
-        inline: "package pishoo:sdk-events; world pishoo-sdk-events { import pishoo:events/change@0.1.0; }",
-        generate_all,
-    });
-}
-
-/// Ephemeral, Lib-local change notification. Persist first, then notify.
-pub use event_bindings::pishoo::events::change as events;

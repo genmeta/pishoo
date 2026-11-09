@@ -129,5 +129,8 @@ mod streaming;
 #[path = "execution/host_client.rs"]
 mod host_client;
 
-#[path = "execution/message_stream.rs"]
-mod message_stream;
+#[path = "execution/message_chat.rs"]
+mod message_chat;
+
+#[path = "execution/native_files.rs"]
+mod native_files;
