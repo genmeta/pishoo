@@ -28,10 +28,10 @@ Pishoo takes its name from Pixiu (貔貅), an auspicious creature in ancient Chi
 Pishoo 0.9 uses per-identity SQLite configuration, name-based access control,
 and WASM components. See the [Pishoo documentation](https://docs.dhttp.net/en/docs/core-components/pishoo) for configuration and usage.
 
-The current release candidate is **0.9.1**, based on 0.9.0. It adds
+The current stable release is **0.9.1**, based on 0.9.0. It adds
 offline developer-signature verification, local Jade development and the official
 author transition, and preserves identity ACL rules across reinstallation. See
-the [release notes](CHANGELOG.md#091-preview1---2026-11-04) for upgrade limits.
+the [release notes](CHANGELOG.md#091---2026-11-09) for upgrade limits.
 
 ### Local development build
 

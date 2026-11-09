@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.9.1] - Unreleased
+## [0.9.1] - 2026-11-09
 
 - Rename the forwarding entry to `/std/forward/*` and route Message through `/std/comm/message`; remove the old external Message/file routes.
 - Provide internal resumable native files through each Lib’s actual `/db` directory capability. Keep completed attachments in contact/date/original-name directories; save separate personal copies only on explicit request.
