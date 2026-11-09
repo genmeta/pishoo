@@ -257,7 +257,7 @@ fn personal_directory(root: &Dir, path: &str) -> Result<Dir, Failure> {
             )
             .map_err(|e| io(e.into()))?;
             file.sync_all().map_err(io)?;
-            dir.into_std_file().sync_all().map_err(io)?;
+            dir.open(".").map_err(io)?.sync_all().map_err(io)?;
         }
         dir = next;
     }

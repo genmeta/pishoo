@@ -1,6 +1,8 @@
-use super::*;
-use http_body_util::BodyExt;
 use std::io::Write;
+
+use http_body_util::BodyExt;
+
+use super::*;
 
 fn fixture(bytes: &[u8]) -> tempfile::NamedTempFile {
     let mut file = tempfile::NamedTempFile::new().unwrap();

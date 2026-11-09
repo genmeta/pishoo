@@ -118,12 +118,9 @@ fn directory(root: &Dir, value: &str, create: bool) -> Result<Dir, Failure> {
     for part in value.split('/') {
         if create {
             match dir.create_dir(part) {
-                Ok(()) => dir
-                    .try_clone()
-                    .map_err(io)?
-                    .into_std_file()
-                    .sync_all()
-                    .map_err(io)?,
+                // Linux directory capabilities may use O_PATH, which cannot
+                // be synced. Open the same directory for reading first.
+                Ok(()) => dir.open(".").map_err(io)?.sync_all().map_err(io)?,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(io(e)),
             }

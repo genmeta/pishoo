@@ -2,14 +2,16 @@
 //! Each connection owns its registration. No ambient path or guest-provided VFS
 //! name is used; SQLite never receives a path to the host filesystem.
 #![allow(unsafe_op_in_unsafe_fn)]
-use super::{Failure, fail, sql, storage};
-use cap_std::fs::Dir;
-use rusqlite::{Connection, OpenFlags, ffi::*};
 use std::{
     ffi::{CStr, CString, c_char, c_int, c_void},
     os::unix::fs::FileExt,
     sync::Arc,
 };
+
+use cap_std::fs::Dir;
+use rusqlite::{Connection, OpenFlags, ffi::*};
+
+use super::{Failure, fail, sql, storage};
 
 struct Vfs {
     raw: sqlite3_vfs,
@@ -121,12 +123,7 @@ unsafe extern "C" fn open(
     if !file.metadata().is_ok_and(|m| m.is_file()) {
         return SQLITE_CANTOPEN;
     }
-    if flags & SQLITE_OPEN_CREATE != 0
-        && root(vfs)
-            .try_clone()
-            .and_then(|d| d.into_std_file().sync_all())
-            .is_err()
-    {
+    if flags & SQLITE_OPEN_CREATE != 0 && root(vfs).open(".").and_then(|d| d.sync_all()).is_err() {
         return SQLITE_IOERR_FSYNC;
     }
     (out as *mut File).write(File {
@@ -148,12 +145,7 @@ unsafe extern "C" fn delete(vfs: *mut sqlite3_vfs, name: *const c_char, sync: c_
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SQLITE_IOERR_DELETE_NOENT,
         Err(_) => return SQLITE_IOERR_DELETE,
     }
-    if sync != 0
-        && root(vfs)
-            .try_clone()
-            .and_then(|d| d.into_std_file().sync_all())
-            .is_err()
-    {
+    if sync != 0 && root(vfs).open(".").and_then(|d| d.sync_all()).is_err() {
         return SQLITE_IOERR_DIR_FSYNC;
     }
     SQLITE_OK
