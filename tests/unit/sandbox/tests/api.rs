@@ -182,7 +182,11 @@ async fn lib_paths_are_scoped_to_the_registered_publisher_and_name() {
 async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_package() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
-    let standard = load(&sandbox, directory.path(), r#"{"/message":{"post":{}}}"#);
+    let standard = load(
+        &sandbox,
+        directory.path(),
+        r#"{"/comm/message":{"post":{}}}"#,
+    );
     let ordinary = load(
         &sandbox,
         directory.path(),
@@ -195,9 +199,15 @@ async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_pack
         .libs
         .insert("alice.dhttp.net/journal".into(), ordinary);
     let router = api_router(&sandbox, crate::test_support::identity::endpoint("alice"));
+    assert_eq!(
+        status(&router, Method::POST, "/std/comm/message").await,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        status(&router, Method::GET, "/std/comm/message").await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
     for path in [
-        "/std/comm/message",
-        "/std/comm/message/undeclared",
         "/journal/missing",
         "/journal/message",
         "/journal/std/xxxx?value=a%2Fb",
@@ -216,6 +226,7 @@ async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_pack
     for path in [
         "/std/message",
         "/std/message/file",
+        "/std/comm/message/undeclared",
         "/std/comm/voip",
         "/std/comm/group",
         "/std/xxxx",
@@ -234,23 +245,87 @@ async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_pack
 }
 
 #[tokio::test]
-async fn standard_lib_selection_uses_the_name_instead_of_declared_paths() {
+async fn standard_lib_selection_uses_declared_paths_and_methods() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
-    // A Lib's declaration cannot capture a different standard Lib's namespace.
-    let lib = load(&sandbox, directory.path(), r#"{"/message":{"post":{}}}"#);
-    sandbox.libs.insert("std.dhttp.net/profile".into(), lib);
+    let lib = load(
+        &sandbox,
+        directory.path(),
+        r#"{"/comm/group":{"post":{}},"/comm/group/list":{"get":{}}}"#,
+    );
+    sandbox
+        .libs
+        .insert("dev.genmeta.tech.dhttp.net/conversations".into(), lib);
     let router = api_router(&sandbox, crate::test_support::identity::endpoint("alice"));
     assert_eq!(
         status(&router, Method::POST, "/std/comm/message").await,
         StatusCode::NOT_FOUND
     );
-    for path in ["/std/profile", "/std/profile/undeclared?value=a%2Fb"] {
+    for (method, path) in [
+        (Method::POST, "/std/comm/group?value=a%2Fb"),
+        (Method::GET, "/std/comm/group/list"),
+    ] {
         assert_eq!(
-            status(&router, Method::PATCH, path).await,
+            status(&router, method, path).await,
             StatusCode::INTERNAL_SERVER_ERROR
         );
     }
+    assert_eq!(
+        status(&router, Method::PATCH, "/std/comm/group").await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    for path in [
+        "/std/conversations",
+        "/std/conversations/comm/group",
+        "/std/comm/group/undeclared",
+        "/std/comm/group-other",
+    ] {
+        assert_eq!(
+            status(&router, Method::POST, path).await,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn standard_routes_follow_replaced_declarations_without_rebuilding_the_router() {
+    let sandbox = Arc::new(RwLock::new(Sandbox::new(Arc::new(
+        WasmRuntime::new().unwrap(),
+    ))));
+    let endpoint = crate::test_support::identity::endpoint("alice");
+    let router = Sandbox::api_router(
+        sandbox.clone(),
+        endpoint.clone(),
+        Arc::new(access_control::AccessService::new(
+            sea_orm::DatabaseConnection::default(),
+            endpoint.name(),
+        )),
+        Router::new(),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let id = "std.dhttp.net/conversations";
+    for (path, previous) in [("/rooms/old", "/rooms/new"), ("/rooms/new", "/rooms/old")] {
+        let lib = load(
+            &sandbox.read().unwrap(),
+            directory.path(),
+            &format!(r#"{{"{path}":{{"post":{{}}}}}}"#),
+        );
+        sandbox.write().unwrap().libs.insert(id.into(), lib);
+        assert_eq!(
+            status(&router, Method::GET, &format!("/std{path}")).await,
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            status(&router, Method::POST, &format!("/std{previous}")).await,
+            StatusCode::NOT_FOUND
+        );
+    }
+    sandbox.write().unwrap().libs.clear();
+    assert_eq!(
+        status(&router, Method::POST, "/std/rooms/new").await,
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]

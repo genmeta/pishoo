@@ -41,11 +41,7 @@ pub(super) fn read_package_at(bytes: &[u8], at: i64) -> Result<PackageFiles> {
 
 fn validate_contents(files: &PackageFiles) -> Result<Value> {
     let metadata = package_metadata(files)?;
-    if metadata["name"] == "std"
-        || metadata["name"] == "comm"
-            && metadata["has_lib"] == true
-            && crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or(""))
-    {
+    if metadata["name"] == "std" {
         return Err(invalid(
             "package name conflicts with the native std namespace",
         ));
@@ -99,23 +95,6 @@ fn validate_contents(files: &PackageFiles) -> Result<Value> {
             })
         {
             return Err(invalid("standard Lib conflicts with a reserved API path"));
-        }
-        if crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or("")) {
-            let prefix = if metadata["name"] == "message" {
-                "/comm/message".to_owned()
-            } else {
-                format!("/{}", metadata["name"].as_str().unwrap())
-            };
-            if api.paths.as_ref().unwrap().keys().any(|path| {
-                path != &prefix
-                    && !path
-                        .strip_prefix(&prefix)
-                        .is_some_and(|tail| tail.starts_with('/'))
-            }) {
-                return Err(invalid(
-                    "standard Lib paths must stay under its package name",
-                ));
-            }
         }
         let document: Value =
             serde_json::from_slice(raw).map_err(|_| invalid("invalid OpenAPI JSON"))?;

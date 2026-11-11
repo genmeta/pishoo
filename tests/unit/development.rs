@@ -26,16 +26,23 @@ fn environment_named(name: &str) -> (tempfile::TempDir, IdentityProfile, Arc<RwL
 }
 fn app(profile: &IdentityProfile, sandbox: &Arc<RwLock<Sandbox>>) -> Router {
     let endpoint = crate::test_support::identity::endpoint(profile.name());
+    let access = Arc::new(access_control::AccessService::new(
+        sea_orm::DatabaseConnection::default(),
+        profile.name(),
+    ));
+    let fallback = Sandbox::api_router(
+        sandbox.clone(),
+        endpoint.clone(),
+        access.clone(),
+        Router::new(),
+    );
     router(
         profile.clone(),
         sandbox.clone(),
         endpoint,
-        Arc::new(access_control::AccessService::new(
-            sea_orm::DatabaseConnection::default(),
-            profile.name(),
-        )),
+        access,
         Router::new(),
-        Router::new(),
+        fallback,
     )
 }
 fn request(path: &str, owner: bool) -> Request<Body> {
@@ -73,6 +80,10 @@ async fn text(response: Response) -> Vec<u8> {
         .to_vec()
 }
 fn wasm(version: &str) -> Vec<u8> {
+    wasm_with_path(version, "/read")
+}
+
+fn wasm_with_path(version: &str, path: &str) -> Vec<u8> {
     fn leb(mut value: usize, output: &mut Vec<u8>) {
         loop {
             let byte = (value & 127) as u8;
@@ -83,7 +94,7 @@ fn wasm(version: &str) -> Vec<u8> {
             }
         }
     }
-    let document=serde_json::to_vec(&serde_json::json!({"openapi":"3.1.0","info":{"title":"Development","version":version},"paths":{"/read":{"post":{"operationId":"read","summary":"Read request","responses":{"201":{"description":"Created"}}}}}})).unwrap();
+    let document=serde_json::to_vec(&serde_json::json!({"openapi":"3.1.0","info":{"title":"Development","version":version},"paths":{path:{"post":{"operationId":"read","summary":"Read request","responses":{"201":{"description":"Created"}}}}}})).unwrap();
     let mut section = Vec::new();
     leb(b"pishoo:openapi".len(), &mut section);
     section.extend_from_slice(b"pishoo:openapi");
@@ -98,6 +109,22 @@ fn replace(path: &std::path::Path, bytes: &[u8]) {
     let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
     file.write_all(bytes).unwrap();
     file.persist(path).unwrap();
+}
+
+fn standard_files(profile: &IdentityProfile, name: &str, path: &str) -> std::path::PathBuf {
+    let directory = profile.join("dev").join(name);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("manifest.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "package": {"author": "dev.genmeta.tech.dhttp.net", "name": name}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let file = directory.join("lib.wasm");
+    replace(&file, &wasm_with_path("1.0.0", path));
+    file
 }
 
 #[tokio::test]
@@ -538,7 +565,15 @@ async fn standard_local_library_uses_normal_namespace_and_private_volume() {
             .status(),
         StatusCode::NOT_FOUND
     );
-    let mut call = request("/std/hello/read?example=1", true);
+    assert_eq!(
+        app(&profile, &sandbox)
+            .oneshot(request("/std/hello/read", true))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let mut call = request("/std/read?example=1", true);
     *call.method_mut() = http::Method::POST;
     let mut trailers = http::HeaderMap::new();
     trailers.append("x-request-trailer", "preserved".parse().unwrap());
@@ -558,6 +593,7 @@ async fn standard_local_library_uses_normal_namespace_and_private_volume() {
 #[tokio::test]
 async fn installed_dependency_and_native_routes_remain_available_with_local_files() {
     let (_temp, profile, sandbox) = environment();
+    standard_files(&profile, "conversations", "/comm/group");
     let endpoint = crate::test_support::identity::endpoint("dev.test.sky.lee.dhttp.net");
     let routes = router(
         profile,
@@ -583,4 +619,162 @@ async fn installed_dependency_and_native_routes_remain_available_with_local_file
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(text(response).await, expected.as_bytes());
     }
+}
+
+async fn status(routes: &Router, path: &str, owner: bool) -> StatusCode {
+    routes
+        .clone()
+        .oneshot(request(path, owner))
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn standard_declarations_select_arbitrary_package_names_and_require_owner() {
+    let (_temp, profile, sandbox) = environment();
+    standard_files(&profile, "comm", "/rooms/send");
+    let routes = app(&profile, &sandbox);
+    assert_eq!(
+        status(&routes, "/std/rooms/send", false).await,
+        StatusCode::FORBIDDEN
+    );
+    let mut call = request("/std/rooms/send?value=a%2Fb", true);
+    *call.method_mut() = http::Method::POST;
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert("x-request-trailer", "preserved".parse().unwrap());
+    *call.body_mut() = Body::new(http_body_util::StreamBody::new(futures::stream::iter([
+        Ok::<_, std::io::Error>(http_body::Frame::data(bytes::Bytes::from_static(
+            b"hello-hello-hello-hello-hello-hello-hello-hello",
+        ))),
+        Ok(http_body::Frame::trailers(trailers)),
+    ])));
+    let response = routes.clone().oneshot(call).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(text(response).await, b"world-world-".repeat(64));
+    assert!(profile.join(".volume/std/comm").is_dir());
+    assert_eq!(
+        status(&routes, "/std/rooms/send", true).await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    for path in [
+        "/std/comm/rooms/send",
+        "/std/rooms/send/extra",
+        "/comm/rooms/send",
+    ] {
+        assert_eq!(
+            status(&routes, path, true).await,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn standard_preview_path_changes_retire_code_and_removal_restores_installed_routes() {
+    let (_temp, profile, sandbox) = environment();
+    let file = standard_files(&profile, "conversations", "/comm/group");
+    let id = "dev.genmeta.tech.dhttp.net/conversations";
+    let data = tempfile::tempdir().unwrap();
+    let installed = Arc::new(
+        Lib::load(
+            sandbox.read().unwrap().runtime.clone(),
+            id.to_owned(),
+            &wasm_with_path("0.9.0", "/comm/installed"),
+            data.path(),
+        )
+        .unwrap(),
+    );
+    sandbox.write().unwrap().libs.insert(id.into(), installed);
+    let routes = app(&profile, &sandbox);
+    assert_eq!(
+        status(&routes, "/std/comm/group", true).await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    let first = sandbox.read().unwrap().dev_libs[id].1.clone();
+    assert_eq!(
+        status(&routes, "/std/comm/installed", true).await,
+        StatusCode::NOT_FOUND
+    );
+    replace(&file, &wasm_with_path("1.0.1", "/rooms/read"));
+    assert_eq!(
+        status(&routes, "/std/comm/group", true).await,
+        StatusCode::NOT_FOUND
+    );
+    assert!(first.stream_retired.is_cancelled());
+    assert_eq!(
+        status(&routes, "/std/rooms/read", true).await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    let second = sandbox.read().unwrap().dev_libs[id].1.clone();
+    assert!(!Arc::ptr_eq(&first, &second));
+    std::fs::remove_file(file).unwrap();
+    assert_eq!(
+        status(&routes, "/std/comm/installed", true).await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    assert!(second.stream_retired.is_cancelled());
+    assert!(sandbox.read().unwrap().dev_libs.is_empty());
+    assert_eq!(
+        status(&routes, "/std/rooms/read", true).await,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn standard_preview_rejects_duplicate_providers_and_keeps_native_precedence() {
+    let (_temp, profile, sandbox) = environment();
+    standard_files(&profile, "one", "/comm/group");
+    standard_files(&profile, "two", "/comm/group");
+    assert_eq!(
+        app(&profile, &sandbox)
+            .oneshot(request("/std/comm/group", true))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    std::fs::remove_dir_all(profile.join("dev/two")).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let installed = Arc::new(
+        Lib::load(
+            sandbox.read().unwrap().runtime.clone(),
+            "std.dhttp.net/another".into(),
+            &wasm_with_path("1.0.0", "/comm/group"),
+            data.path(),
+        )
+        .unwrap(),
+    );
+    sandbox
+        .write()
+        .unwrap()
+        .libs
+        .insert("std.dhttp.net/another".into(), installed);
+    assert_eq!(
+        app(&profile, &sandbox)
+            .oneshot(request("/std/comm/group", true))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    standard_files(&profile, "one", "/sys/listen");
+    let endpoint = crate::test_support::identity::endpoint(profile.name());
+    let routes = router(
+        profile,
+        sandbox,
+        endpoint,
+        Arc::new(access_control::AccessService::new(
+            sea_orm::DatabaseConnection::default(),
+            "dev.test.sky.lee.dhttp.net",
+        )),
+        Router::new(),
+        Router::new().route("/std/sys/listen", axum::routing::get(|| async { "native" })),
+    );
+    let response = routes
+        .oneshot(request("/std/sys/listen", true))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(text(response).await, b"native");
 }

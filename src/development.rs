@@ -1,5 +1,6 @@
 //! Owner-only development routes backed directly by local files.
 use std::{
+    collections::HashSet,
     fs::{File, Metadata},
     io::Read,
     os::unix::fs::MetadataExt,
@@ -45,16 +46,26 @@ pub(crate) fn router(
                 } else {
                     (false, false, path.trim_start_matches('/'))
                 };
-                let lookup = if standard {
-                    tail.strip_prefix("comm/")
-                        .filter(|s| *s == "message" || s.starts_with("message/"))
-                        .unwrap_or(tail)
-                } else {
-                    tail
-                };
-                let (name, suffix) = lookup
+                if standard {
+                    if !matches!(
+                        tail.split('/').next().unwrap_or(""),
+                        "sys" | "acl" | "contact" | "forward" | "file" | "pishoo" | "contacts"
+                    ) {
+                        let profile = profile.clone();
+                        let sandbox = sandbox.clone();
+                        tokio::task::spawn_blocking(move || {
+                            load_standard_libraries(&profile, &sandbox)
+                        })
+                        .await??;
+                    }
+                    return Ok(fallback
+                        .oneshot(request)
+                        .await
+                        .expect("Router is infallible"));
+                }
+                let (name, suffix) = tail
                     .split_once('/')
-                    .map_or((lookup, ""), |(name, _)| (name, &lookup[name.len()..]));
+                    .map_or((tail, ""), |(name, _)| (name, &tail[name.len()..]));
                 // Local files require the real owner, independently of identity spelling.
                 // Native services retain precedence over local projects.
                 let local_exists = package::valid_id(name).is_ok()
@@ -68,15 +79,7 @@ pub(crate) fn router(
                         keep
                     });
                 }
-                if package::valid_id(name).is_err()
-                    || (!frontend
-                        && (name == "app"
-                            || standard
-                                && (matches!(
-                                    name,
-                                    "sys" | "acl" | "contact" | "forward" | "file" | "comm"
-                                ) || name == "message" && lookup == tail)))
-                    || !local_exists
+                if package::valid_id(name).is_err() || (!frontend && name == "app") || !local_exists
                 {
                     return Ok(fallback
                         .oneshot(request)
@@ -84,13 +87,9 @@ pub(crate) fn router(
                         .expect("Router is infallible"));
                 }
                 let name = name.to_owned();
-                let suffix = if standard {
-                    format!("/{tail}")
-                } else {
-                    suffix.to_owned()
-                };
+                let suffix = suffix.to_owned();
                 let author = author(&profile, &name)?;
-                if !frontend && (crate::package::is_standard_author(&author)) != standard {
+                if !frontend && package::is_standard_author(&author) {
                     return Ok(fallback
                         .oneshot(request)
                         .await
@@ -259,6 +258,53 @@ fn same_file(left: &Metadata, right: &Metadata) -> bool {
         && left.mtime_nsec() == right.mtime_nsec()
         && left.ctime() == right.ctime()
         && left.ctime_nsec() == right.ctime_nsec()
+}
+
+// Refresh local standard Libs, then let the common API router select declarations.
+fn load_standard_libraries(
+    profile: &IdentityProfile,
+    sandbox: &Arc<RwLock<Sandbox>>,
+) -> Result<()> {
+    let directory = match root(profile) {
+        Ok(root) => Some(cap_std::fs::Dir::from_std_file(root)),
+        Err(Error::RouteNotFound) => None,
+        Err(error) => return Err(error),
+    };
+    let mut present = HashSet::new();
+    if let Some(directory) = directory {
+        for entry in directory.entries()? {
+            let Ok(name) = entry?.file_name().into_string() else {
+                continue;
+            };
+            if package::valid_id(&name).is_err() {
+                continue;
+            }
+            let author = match author(profile, &name) {
+                Ok(author) => author,
+                Err(Error::RouteNotFound) => continue,
+                Err(error) => return Err(error),
+            };
+            if !package::is_standard_author(&author) {
+                continue;
+            }
+            match load(profile, sandbox, &author, &name) {
+                Ok(_) => {
+                    present.insert(format!("{author}/{name}"));
+                }
+                Err(Error::RouteNotFound) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    sandbox.write().unwrap().dev_libs.retain(|id, (_, lib)| {
+        let keep = !package::is_standard_author(id.split('/').next().unwrap_or(""))
+            || present.contains(id);
+        if !keep {
+            lib.stream_retired.cancel();
+        }
+        keep
+    });
+    Ok(())
 }
 
 fn load(

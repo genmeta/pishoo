@@ -1002,20 +1002,27 @@ async fn legacy_capability_prefixes_are_projected_then_migrated_without_changing
 }
 
 #[test]
-fn standard_lib_declarations_stay_in_the_filename_namespace() {
+fn standard_lib_declarations_define_paths_independently_of_the_package_name() {
     let authority = publisher("std.dhttp.net", 'a');
     let backend = include_bytes!("../../../fixtures/wasi-http-read-request-then-respond.wasm");
-    for (path, accepted) in [
-        ("/profile", true),
-        ("/profile/", true),
-        ("/profile/nickname", true),
-        ("/profile-other", false),
-        ("/comm/message", false),
+    for (name, path, accepted) in [
+        ("profile", "/profile", true),
+        ("profile", "/profile/", true),
+        ("profile", "/profile/nickname", true),
+        ("profile", "/profile-other", true),
+        ("profile", "/comm/message", true),
+        ("group", "/comm/group", true),
+        ("comm", "/rooms/send", true),
+        ("profile", "/sys/listen", false),
+        ("profile", "/contact/list", false),
+        ("profile", "/forward/example", false),
+        ("profile", "/file", false),
+        ("profile", "/std/comm/group", false),
     ] {
         let document = json!({
             "openapi":"3.1.0",
             "info":{"title":"Profile","version":"1.0.0","description":"test","license":{"name":"MIT"}},
-            "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":"profile","dependencies":[]},
+            "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":name,"dependencies":[]},
             "paths":{path:{"get":{"operationId":"read","summary":"Read","responses":{"200":{"description":"ok"}}}}}
         });
         let bytes = package_fixture(
@@ -1029,7 +1036,10 @@ fn standard_lib_declarations_stay_in_the_filename_namespace() {
             result.unwrap();
         } else {
             assert!(
-                result.unwrap_err().to_string().contains("package name"),
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("reserved API path"),
                 "{path}"
             );
         }
@@ -1405,7 +1415,9 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
             &make_lib("other", "1.0.0", "/comm/message", "get", "Other"),
             &runtime
         )
-        .is_err()
+        .unwrap_err()
+        .to_string()
+        .contains("route /std/comm/message conflicts")
     );
     assert!(!profile.join("lib/other_1.0.0.wasm").exists());
     // Native services cannot become WASM capabilities.
@@ -1415,7 +1427,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
         "/sys/package/lib",
         "/pishoo/settings",
         "/file/test",
-        "/dhttp/test",
+        "/forward/test",
     ] {
         assert!(read_package(&make_lib("other", "1.0.0", path, "post", "Other")).is_err());
     }
@@ -1473,12 +1485,12 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
         (
             Method::DELETE,
             "/std/comm/message",
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::METHOD_NOT_ALLOWED,
         ),
         (
             Method::GET,
             "/std/comm/message/missing",
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::NOT_FOUND,
         ),
     ] {
         assert_eq!(

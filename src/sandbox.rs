@@ -224,35 +224,56 @@ impl Sandbox {
                             Some(tail) => (true, tail),
                             None => (false, path.strip_prefix('/').unwrap_or(path)),
                         };
-                        let name = if standard {
-                            match tail.strip_prefix("comm/message") {
-                                Some(suffix) if suffix.is_empty() || suffix.starts_with('/') => {
-                                    "message"
-                                }
-                                _ if tail == "message" || tail.starts_with("message/") => {
-                                    return Err(Error::RouteNotFound);
-                                }
-                                _ => tail.split('/').next().unwrap_or(""),
+                        let name = tail.split('/').next().unwrap_or("");
+                        let standard_path = path.strip_prefix("/std").unwrap_or(path);
+                        let lib = if standard {
+                            let mut matches = sandbox
+                                .libs
+                                .iter()
+                                .filter(|(id, _)| !sandbox.dev_libs.contains_key(*id))
+                                .chain(sandbox.dev_libs.iter().map(|(id, (_, lib))| (id, lib)))
+                                .filter(|(id, lib)| {
+                                    crate::package::is_standard_author(
+                                        id.split('/').next().unwrap_or(""),
+                                    ) && lib
+                                        .openapi
+                                        .paths
+                                        .as_ref()
+                                        .is_some_and(|paths| paths.contains_key(standard_path))
+                                });
+                            let (id, lib) = matches.next().ok_or(Error::RouteNotFound)?;
+                            if matches.next().is_some() {
+                                return Err(Error::PackagePolicy {
+                                    code: "route_conflict",
+                                    status: http::StatusCode::CONFLICT,
+                                });
                             }
+                            if sandbox.dev_libs.contains_key(id) {
+                                crate::package::require_owner(&endpoint, &request)?;
+                            }
+                            lib.clone()
                         } else {
-                            tail.split('/').next().unwrap_or("")
+                            sandbox
+                                .libs
+                                .iter()
+                                .find(|(id, _)| {
+                                    !crate::package::is_standard_author(
+                                        id.split('/').next().unwrap_or(""),
+                                    ) && id.rsplit('/').next() == Some(name)
+                                })
+                                .map(|(_, lib)| lib.clone())
+                                .ok_or(Error::RouteNotFound)?
                         };
-                        let lib = sandbox
-                            .libs
-                            .iter()
-                            .find(|(id, _)| {
-                                crate::package::is_standard_author(
-                                    id.split('/').next().unwrap_or(""),
-                                ) == standard
-                                    && id.rsplit('/').next() == Some(name)
-                            })
-                            .map(|(_, lib)| lib.clone())
-                            .ok_or(Error::RouteNotFound)?;
-                        // Directory placement selects the Lib, never OpenAPI.
-                        // Standard guests keep /<name>/... after removing /std;
-                        // ordinary guests receive the suffix after /<name>.
                         let path = if standard {
-                            format!("/{tail}")
+                            let item = &lib.openapi.paths.as_ref().unwrap()[standard_path];
+                            if !item
+                                .methods()
+                                .into_iter()
+                                .any(|(method, _)| method.as_str() == request.method().as_str())
+                            {
+                                return Err(Error::MethodNotAllowed);
+                            }
+                            standard_path.to_owned()
                         } else {
                             match tail.strip_prefix(name).unwrap() {
                                 "" => "/".to_owned(),

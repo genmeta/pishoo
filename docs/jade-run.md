@@ -22,7 +22,7 @@ another daemon, and leaves the user's default identity unchanged.
 jade run
 jade run --id dev.zero.ai
 # App: https://dev.zero.ai.dhttp.net/app/<name>/
-# Standard API: https://dev.zero.ai.dhttp.net/std/<name>/...
+# Standard API: https://dev.zero.ai.dhttp.net/std<declared-path>
 # Ordinary API: https://dev.zero.ai.dhttp.net/<name>/...
 ```
 
@@ -63,11 +63,21 @@ uploads it. Formal store installation continues to require a signed release.
 
 Pishoo selects local development files independently of the identity name.
 Normal application URLs select these files on the chosen identity; there is no `/dev` URL alias. Standard guests
-receive `/<name>/...` after `/std` is removed; ordinary guests receive the suffix
-after their name. Native services retain precedence. Installed dependencies keep
+declare their business paths in the embedded OpenAPI. Pishoo selects the matching
+standard Lib by its exact declared path and method, then removes `/std` before
+execution. Package names identify artifacts and data directories independently of
+these paths. Ordinary guests receive the suffix after their name. Native services
+retain precedence. Installed dependencies keep
 their normal URLs and authorization. Local files require the authenticated real
 owner, even when ACL rules allow visitors. Jade selects a development child with its own
 native databases and business data, separate from the base identity.
+
+Standard previews refresh local Libs through the existing loader and its
+file-metadata cache, then use the same API router as installed standard packages.
+Source replacement retires the cached Lib, and removing
+the local WASM restores the installed package. A preview overrides the same full
+author/name identity. Different packages claiming the same path return 409.
+Undeclared standard paths return 404 and unsupported methods return 405.
 
 Jade builds all local projects before publishing. Each successful project is
 atomically swapped into `dev/<name>` under a directory lock. Builds are serial;
