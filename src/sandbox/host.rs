@@ -2,6 +2,7 @@
 
 use super::StoreData;
 
+pub(super) mod execution;
 mod http;
 
 // Existing identity WIT bindings and capability-checked host operations.

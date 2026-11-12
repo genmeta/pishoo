@@ -27,7 +27,7 @@ use wasmtime_wasi_http::{
 
 use super::{
     Invocation, Lib, Outgoing, Sandbox, StoreData, WasmRuntime,
-    host::{identity, identity_v2},
+    host::{execution, identity, identity_v2},
 };
 use crate::{Body, Error, Result, package::valid_id};
 
@@ -55,6 +55,11 @@ impl WasmRuntime {
         }
         let engine = Engine::new(&config).map_err(Error::Guest)?;
         let mut linker = Linker::new(&engine);
+        execution::bindings::pishoo::execution::runtime::add_to_linker::<
+            _,
+            wasmtime::component::HasSelf<_>,
+        >(&mut linker, |state| state)
+        .map_err(Error::Guest)?;
         wasmtime_wasi_http::p2::add_to_linker_async(&mut linker).map_err(Error::Guest)?;
         // Rust's HashMap seed imports are outside the HTTP proxy world.
         // Use the invocation's existing WasiCtx random resources.
@@ -150,12 +155,32 @@ impl Lib {
         // Installation already authenticated the component. Borrow its embedded
         // metadata directly; no container serialization, copy, or retained archive.
         let mut document = None;
+        let mut commands = std::collections::HashMap::new();
         let mut depth = 0;
         for payload in wasmparser::Parser::new(0).parse_all(bytes) {
             match payload.map_err(|error| Error::InvalidComponent(error.to_string()))? {
                 wasmparser::Payload::ModuleSection { .. }
                 | wasmparser::Payload::ComponentSection { .. } => depth += 1,
                 wasmparser::Payload::End(_) if depth > 0 => depth -= 1,
+                wasmparser::Payload::CustomSection(section)
+                    if section.name().starts_with("pishoo:command/") =>
+                {
+                    let name = &section.name()["pishoo:command/".len()..];
+                    if depth != 0 || !execution::valid_name(name) || commands.contains_key(name) {
+                        return Err(Error::InvalidComponent(
+                            "invalid or duplicate command section".into(),
+                        ));
+                    }
+                    let command = Component::from_binary(&runtime.engine, section.data())
+                        .map_err(Error::Guest)?;
+                    let mut linker = Linker::<StoreData>::new(&runtime.engine);
+                    wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(Error::Guest)?;
+                    wasmtime_wasi::p2::bindings::CommandPre::new(
+                        linker.instantiate_pre(&command).map_err(Error::Guest)?,
+                    )
+                    .map_err(Error::Guest)?;
+                    commands.insert(name.to_owned(), command);
+                }
                 wasmparser::Payload::CustomSection(section)
                     if section.name() == "pishoo:openapi" =>
                 {
@@ -295,6 +320,7 @@ impl Lib {
             .map_err(Error::Guest)?;
         let filesystem = builder.build().filesystem().clone();
         Ok(Self {
+            commands: Arc::new(commands),
             stream_retired: tokio_util::sync::CancellationToken::new(),
             openapi,
             component,
@@ -423,6 +449,7 @@ impl Invocation {
         let mut wasi = WasiCtx::builder().build();
         *wasi.filesystem() = lib.filesystem.clone();
         let store_data = StoreData {
+            commands: lib.commands.clone(),
             table: ResourceTable::new(),
             wasi,
             http: WasiHttpCtx::new(),
@@ -566,6 +593,7 @@ impl Invocation {
                 let mut store = Store::new(
                     &lib.runtime.engine,
                     StoreData {
+                        commands: lib.commands.clone(),
                         table: ResourceTable::new(),
                         wasi,
                         http: WasiHttpCtx::new(),
@@ -610,7 +638,7 @@ impl Invocation {
 
 // Use the actual preopened directory, including on cancellation, rather than
 // retaining a second path or identity in Lib or StoreData.
-fn repair_guest_ownership(
+pub(super) fn repair_guest_ownership(
     mut filesystem: wasmtime_wasi::filesystem::WasiFilesystemCtx,
 ) -> Result<()> {
     if !rustix::process::geteuid().is_root() {
@@ -629,6 +657,9 @@ fn repair_guest_ownership(
             .get(&descriptor)
             .map_err(|error| Error::Guest(error.into()))?
         {
+            if directory.perms.write_not_permitted() {
+                continue;
+            }
             let directory = cap_std::fs::Dir::from_std_file(directory.dir.try_clone()?);
             let owner = directory.try_clone()?.into_std_file().metadata()?;
             repair_guest_directory(&directory, &owner)?;
@@ -750,7 +781,7 @@ impl Sandbox {
 
 // Conservative starting limits, not process-wide memory accounting. Two
 // memories accommodate adapted components; each is bounded independently.
-fn execution_limits() -> wasmtime::StoreLimits {
+pub(super) fn execution_limits() -> wasmtime::StoreLimits {
     StoreLimitsBuilder::new()
         .memory_size(128 * 1024 * 1024)
         .memories(2)

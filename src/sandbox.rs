@@ -38,6 +38,7 @@ pub struct WasmRuntime {
 }
 
 pub(crate) struct Lib {
+    commands: Arc<HashMap<String, Component>>,
     pub(crate) stream_retired: tokio_util::sync::CancellationToken,
     pub(crate) openapi: oas3::OpenApiV3Spec,
     component: Component,
@@ -46,6 +47,7 @@ pub(crate) struct Lib {
 }
 
 struct StoreData {
+    commands: Arc<HashMap<String, Component>>,
     table: ResourceTable,
     wasi: WasiCtx,
     http: WasiHttpCtx,
@@ -64,10 +66,6 @@ pub(crate) struct Invocation {
 }
 
 pub(crate) enum Outgoing {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "frozen outgoing policy used by isolation tests")
-    )]
     Denied,
     Granted {
         endpoint: dhttp::Endpoint,

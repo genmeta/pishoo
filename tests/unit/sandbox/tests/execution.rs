@@ -134,3 +134,9 @@ mod message_chat;
 
 #[path = "execution/native_files.rs"]
 mod native_files;
+
+#[path = "execution/command.rs"]
+mod command;
+
+#[path = "execution/python_lib.rs"]
+mod python_lib;
