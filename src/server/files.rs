@@ -323,12 +323,14 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                 .as_str()
                 .ok_or_else(|| Error::InvalidConfig("missing recovery identity".into()))?;
             crate::package::valid_id(id)?;
-            let short = id.rsplit('/').next().unwrap();
+            let full_name = id.split_once('/').map_or(id, |(_, name)| name);
+            let encoded_name = full_name.replace('/', "%2F");
+            let short = encoded_name.as_str();
             let directory = package
                 .get("directory")
                 .map_or(Some(""), |v| v.as_str())
                 .ok_or_else(|| Error::InvalidConfig("invalid recovery directory".into()))?;
-            if !names.insert(short)
+            if !names.insert(full_name)
                 || !(directory == short || directory.is_empty() && packages.len() == 1)
             {
                 return Err(Error::InvalidConfig("invalid recovery directory".into()));
@@ -356,7 +358,7 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                 } else {
                     include_str!("../package/sql/compat/v3/registration_facts.sql")
                 },
-                [short],
+                [full_name],
                 |r| r.get(0),
             )?;
             // Match old journals after a schema upgrade without discarding any
@@ -366,7 +368,7 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                     && facts
                         == tx.query_row(
                             include_str!("../package/sql/compat/v3/registration_facts.sql"),
-                            [short],
+                            [full_name],
                             |r| r.get::<_, String>(0),
                         )?;
         }
@@ -375,7 +377,9 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                 break;
             }
             let id = package["id"].as_str().unwrap();
-            let short = id.rsplit('/').next().unwrap();
+            let full_name = id.split_once('/').map_or(id, |(_, name)| name);
+            let encoded_name = full_name.replace('/', "%2F");
+            let short = encoded_name.as_str();
             let package_stage = stage.join(package["directory"].as_str().unwrap_or(""));
             if !package_stage.symlink_metadata()?.file_type().is_dir() {
                 return Err(Error::InvalidConfig("invalid recovery directory".into()));

@@ -36,8 +36,7 @@ pub(crate) const STORE_OWNER: &str = match option_env!("PISHOO_REGISTRY_OWNER_HA
 // Resolve only through the authenticated, pinned store, then verify the canonical release normally.
 async fn resolve_author(endpoint: &dhttp::Endpoint, name: &str, version: &str) -> Result<String> {
     super::valid_id(name)?;
-    if name.contains('/')
-        || version.split('.').count() != 3
+    if version.split('.').count() != 3
         || version.split('.').any(|part| {
             part.is_empty()
                 || !part.bytes().all(|b| b.is_ascii_digit())
@@ -52,7 +51,10 @@ async fn resolve_author(endpoint: &dhttp::Endpoint, name: &str, version: &str) -
     let metadata: Value = serde_json::from_slice(
         &store_get(
             endpoint,
-            &format!("/store/v1/packages/{name}/versions/{version}"),
+            &format!(
+                "/store/v1/packages/{}/versions/{version}",
+                name.replace('/', "%2F")
+            ),
             8 * 1024 * 1024,
         )
         .await?,
@@ -94,7 +96,10 @@ async fn download_release(
             "version must be MAJOR.MINOR.PATCH".into(),
         ));
     }
-    let path = format!("/store/v1/packages/{publisher}/{name}/versions/{version}");
+    let path = format!(
+        "/store/v1/packages/{publisher}/{}/versions/{version}",
+        name.replace('/', "%2F")
+    );
     let metadata: Value =
         serde_json::from_slice(&store_get(endpoint, &path, 8 * 1024 * 1024).await?)
             .map_err(|_| Error::InvalidComponent("invalid store metadata".into()))?;
@@ -159,10 +164,14 @@ pub(crate) async fn install_store_package(
                 "installation exceeds 100 packages".into(),
             ));
         }
-        if resources
-            .iter()
-            .any(|(other, _, _)| other != &id && other.rsplit('/').next() == Some(name.as_str()))
-        {
+        if resources.iter().any(|(other, _, _)| {
+            other != &id
+                && other
+                    .split_once('/')
+                    .map(|(_, name)| name)
+                    .or(Some(&other[..]))
+                    == Some(name.as_str())
+        }) {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "conflicting package authors",
@@ -265,7 +274,8 @@ fn order_packages(
             )?)?;
             if doc["dependencies"].as_array().unwrap().iter().all(|dep| {
                 ordered.iter().any(|(id, _, _)| {
-                    id.rsplit('/').next() == dep["name"].as_str()
+                    id.split_once('/').map(|(_, name)| name).or(Some(&id[..]))
+                        == dep["name"].as_str()
                         && dep["publisher"].as_str().is_none_or(|author| {
                             id.split_once('/')
                                 .is_some_and(|(publisher, _)| publisher == author)

@@ -778,3 +778,50 @@ async fn standard_preview_rejects_duplicate_providers_and_keeps_native_precedenc
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(text(response).await, b"native");
 }
+
+#[tokio::test]
+async fn hierarchical_standard_preview_uses_complete_identity_and_isolated_volume() {
+    let (_temp, profile, sandbox) = environment();
+    let name = "comm/group";
+    let directory = profile.join("dev/comm%2Fgroup");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("manifest.json"),
+        serde_json::to_vec(
+            &serde_json::json!({"package":{"author":"dev.genmeta.tech.dhttp.net","name":name}}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("lib.wasm"),
+        wasm_with_path("1.0.0", "/comm/group"),
+    )
+    .unwrap();
+    load_standard_libraries(&profile, &sandbox).unwrap();
+    let routes = app(&profile, &sandbox);
+    let mut input = request("/std/comm/group?probe=ok", true);
+    *input.method_mut() = http::Method::POST;
+    let mut trailers = http::HeaderMap::new();
+    trailers.append("x-request-trailer", "preserved".parse().unwrap());
+    *input.body_mut() = Body::new(http_body_util::StreamBody::new(futures::stream::iter(
+        vec![
+            Ok::<_, std::io::Error>(http_body::Frame::data(bytes::Bytes::from_static(
+                b"hello-hello-hello-hello-hello-hello-hello-hello",
+            ))),
+            Ok(http_body::Frame::trailers(trailers)),
+        ],
+    )));
+    let response = routes.oneshot(input).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    text(response).await;
+    assert!(
+        sandbox
+            .read()
+            .unwrap()
+            .dev_libs
+            .contains_key("dev.genmeta.tech.dhttp.net/comm/group")
+    );
+    assert!(profile.join(".volume/std/comm%2Fgroup").is_dir());
+    assert!(!profile.join(".volume/std/comm/group").exists());
+}

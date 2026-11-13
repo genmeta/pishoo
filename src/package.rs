@@ -75,7 +75,12 @@ fn lib_metadata(package: &PackageFiles, id: Option<&str>) -> serde_json::Value {
         {
             "/std".to_owned()
         } else {
-            format!("/{}", identity.rsplit('/').next().unwrap())
+            format!(
+                "/{}",
+                identity
+                    .split_once('/')
+                    .map_or(&identity[..], |(_, name)| name)
+            )
         };
         let openapi: oas3::OpenApiV3Spec = match package_openapi(package).and_then(|bytes| {
             serde_json::from_slice(bytes)
@@ -249,7 +254,11 @@ async fn pkg_management_request(
     }
     if let Some(id) = &id {
         valid_id(id)?;
-        if id.contains('/') {
+        if id
+            .split('/')
+            .next()
+            .is_some_and(|author| dhttp_home::normalize_name(author).as_deref() == Some(author))
+        {
             return Err(Error::BadRequest(
                 "name must be a local package short name".into(),
             ));
@@ -326,7 +335,11 @@ async fn pkg_management_request(
         };
         let name = text("name")?;
         valid_id(name)?;
-        if name.contains('/') {
+        if name
+            .split('/')
+            .next()
+            .is_some_and(|part| dhttp_home::normalize_name(part).as_deref() == Some(part))
+        {
             return Err(Error::BadRequest(
                 "name must be a package short name".into(),
             ));
@@ -385,7 +398,7 @@ async fn pkg_management_request(
                     if crate::package::is_standard_author(id.split('/').next().unwrap_or("")) {
                         "/std".to_owned()
                     } else {
-                        format!("/{}", id.rsplit('/').next().unwrap())
+                        format!("/{}", id.split_once('/').map_or(&id[..], |(_, name)| name))
                     };
                 let mut endpoints = Vec::new();
                 if let Some(paths) = &lib.openapi.paths {
@@ -449,7 +462,7 @@ async fn pkg_management_request(
             return Ok(());
         };
         valid_id(&registered)?;
-        if registered.rsplit('/').next() != Some(name) {
+        if registered.split_once('/').map(|(_, name)| name).or(Some(&registered[..])) != Some(name) {
             return Err(Error::InvalidConfig(
                 "invalid installed package name".into(),
             ));

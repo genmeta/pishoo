@@ -1707,3 +1707,73 @@ mod offline_support;
 pub(crate) use offline_support::{
     release_proof, release_proof_at, revocation_list, sign_publication,
 };
+
+#[test]
+fn hierarchical_package_names_keep_complete_identity_and_isolated_files() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
+    std::fs::create_dir_all(profile.join("lib")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let runtime = WasmRuntime::new().unwrap();
+    let authority = publisher("std.dhttp.net", 'a');
+    let make = |name: &str, path: &str| {
+        let document = json!({"openapi":"3.1.0","info":{"title":name,"version":"1.0.0","description":"Hierarchical package regression","license":{"name":"MIT"}},
+            "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":name,"dependencies":[]},
+            "paths":{path:{"post":{"operationId":"send","summary":"Send","responses":{"200":{"description":"ok"}}}}}});
+        package_fixture(
+            &document,
+            include_bytes!("../../../fixtures/wasi-http-read-request-then-respond.wasm"),
+            BTreeMap::new(),
+            &authority,
+        )
+    };
+    for (name, path, disk) in [
+        ("message", "/comm/message", "message"),
+        ("group", "/group", "group"),
+        ("comm/group", "/comm/group", "comm%2Fgroup"),
+    ] {
+        let id = format!("std.dhttp.net/{name}");
+        let bytes = make(name, path);
+        install_lib(&profile, &id, &bytes, &runtime).unwrap();
+        assert!(profile.join(format!("lib/std/{disk}_1.0.0.wasm")).is_file());
+        let installed = installed_packages(&profile, Some(&id)).unwrap();
+        assert_eq!(installed["name"], name);
+        assert_eq!(installed["id"], id);
+    }
+    let app = json!({"openapi":"3.1.0","info":{"title":"Dashboard","version":"1.0.0","description":"Dependency regression","license":{"name":"MIT"}},
+        "x-pishoo":{"kind":"app","publisher":"std.dhttp.net","name":"live/dashboard","dependencies":[{"name":"comm/group","version":"1.0.0"},{"publisher":"std.dhttp.net","name":"group","version":"1.0.0"}]},"paths":{}});
+    let app_bytes = package_fixture(
+        &app,
+        &[],
+        BTreeMap::from([("index.html".into(), b"dashboard".to_vec())]),
+        &authority,
+    );
+    install_app(&profile, "std.dhttp.net/live/dashboard", &app_bytes).unwrap();
+    let app = installed_packages(&profile, Some("std.dhttp.net/live/dashboard")).unwrap();
+    let names = app["dependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|dependency| dependency["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["comm/group", "group"]);
+    assert!(profile.join("app/live%2Fdashboard/index.html").is_file());
+    remove_app(&profile, "std.dhttp.net/live/dashboard").unwrap();
+    assert!(read_package(&make("comm/other", "/comm/group")).is_err());
+    remove_lib(&profile, "std.dhttp.net/comm/group").unwrap();
+    assert!(profile.join("lib/std/group_1.0.0.wasm").is_file());
+    assert!(profile.join("lib/std/message_1.0.0.wasm").is_file());
+    assert!(!profile.join("lib/std/comm%2Fgroup_1.0.0.wasm").exists());
+    for bad in [
+        "comm//group",
+        "/comm/group",
+        "comm/group/",
+        "comm/../group",
+        "comm%2Fgroup",
+        "Comm/group",
+        "comm/Group",
+        "comm\\group",
+    ] {
+        assert!(valid_id(&format!("std.dhttp.net/{bad}")).is_err(), "{bad}");
+    }
+}

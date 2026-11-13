@@ -96,6 +96,22 @@ fn validate_contents(files: &PackageFiles) -> Result<Value> {
         {
             return Err(invalid("standard Lib conflicts with a reserved API path"));
         }
+        let name = metadata["name"].as_str().unwrap();
+        if crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or(""))
+            && name.contains('/')
+        {
+            let prefix = format!("/{name}");
+            if api.paths.as_ref().unwrap().keys().any(|path| {
+                path != &prefix
+                    && !path
+                        .strip_prefix(&prefix)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            }) {
+                return Err(invalid(
+                    "standard Lib paths must belong to its full package name",
+                ));
+            }
+        }
         let document: Value =
             serde_json::from_slice(raw).map_err(|_| invalid("invalid OpenAPI JSON"))?;
         if document["info"]["version"] != metadata["version"] {

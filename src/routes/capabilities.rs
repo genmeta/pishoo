@@ -137,7 +137,7 @@ async fn write_request(profile: IdentityProfile, request: Request<Body>) -> Resu
     let query = form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes())
         .into_owned()
         .collect::<Vec<_>>();
-    if query.len() != 1 || query[0].0 != "name" || query[0].1.contains('/') {
+    if query.len() != 1 || query[0].0 != "name" {
         return Err(Error::BadRequest("exactly one Lib name is required".into()));
     }
     let name = query[0].1.clone();
@@ -224,7 +224,10 @@ fn write_declarations(
             format!("/{name}")
         };
         if installed.as_ref().is_some_and(|(_, has_app)| *has_app) {
-            available.insert(("GET".to_owned(), format!("/app/{name}")));
+            available.insert((
+                "GET".to_owned(),
+                format!("/app/{}", name.replace('/', "%2F")),
+            ));
         }
         let id = installed
             .as_ref()

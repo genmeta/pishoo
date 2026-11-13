@@ -34,7 +34,7 @@ pub(crate) fn install_package(
 ) -> Result<serde_json::Value> {
     use rustix::fs::{FlockOperation, Mode, flock, mkdirat};
     valid_id(id)?;
-    if id.rsplit('/').next() == Some("std") {
+    if package_name(id) == "std" {
         return Err(Error::BadRequest("std is reserved".into()));
     }
     let parent = initialized_profile(profile)?;

@@ -209,11 +209,13 @@ impl Lib {
             .find(|p| p.file_name().is_some_and(|n| n == ".volume"));
         if let Some(volume) = volume {
             let identity = volume.parent().unwrap();
-            let short = id.rsplit('/').next().unwrap();
+            let short = data_dir
+                .file_name()
+                .ok_or_else(|| Error::InvalidComponent("Lib data has no name".into()))?;
             if !data_dir.try_exists()? {
-                let mut legacy = vec![identity.join("db").join(short)];
+                let mut legacy = vec![identity.join("db").join(&short)];
                 if let Some((author, _)) = id.split_once('/') {
-                    legacy.push(identity.join("db").join(author).join(short));
+                    legacy.push(identity.join("db").join(author).join(&short));
                 }
                 let existing = legacy
                     .into_iter()

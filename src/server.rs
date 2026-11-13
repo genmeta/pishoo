@@ -82,14 +82,29 @@ fn native_router(server: &Server) -> Router {
                     .split('/')
                     .next()
                     .unwrap_or("");
-                let local = crate::package::valid_id(name).is_ok()
-                    && profile.join("dev").join(name).exists();
+                let tail = path.trim_start_matches('/');
+                let local = (percent_encoding::percent_decode_str(name)
+                    .decode_utf8()
+                    .ok()
+                    .is_some_and(|name| crate::package::valid_id(&name).is_ok())
+                    && profile.join("dev").join(name).exists())
+                    || tail
+                        .match_indices('/')
+                        .map(|(end, _)| &tail[..end])
+                        .chain(std::iter::once(tail))
+                        .any(|name| {
+                            crate::package::valid_id(name).is_ok()
+                                && profile.join("dev").join(name.replace('/', "%2F")).is_dir()
+                        });
                 if !local
                     && !path.starts_with("/std/")
                     && !sandbox.read().unwrap().libs.keys().any(|id| {
                         !crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
                             && path
-                                .strip_prefix(&format!("/{}", id.rsplit('/').next().unwrap()))
+                                .strip_prefix(&format!(
+                                    "/{}",
+                                    id.split_once('/').map_or(&id[..], |(_, name)| name)
+                                ))
                                 .is_some_and(|tail| tail.is_empty() || tail.starts_with('/'))
                     })
                 {
@@ -151,13 +166,6 @@ fn current_router(server: &Server) -> Router {
         move |request: Request<AxumBody>| {
             let api = api.clone();
             let proxies = proxies.clone();
-            let name = request
-                .uri()
-                .path()
-                .trim_start_matches('/')
-                .split('/')
-                .next()
-                .unwrap_or("");
             let installed = {
                 let sandbox = sandbox.read().unwrap();
                 request
@@ -166,14 +174,23 @@ fn current_router(server: &Server) -> Router {
                     .strip_prefix("/app/")
                     .is_some_and(|tail| {
                         let app_name = tail.split('/').next().unwrap_or("");
-                        sandbox
-                            .apps
-                            .keys()
-                            .any(|id| id.rsplit('/').next() == Some(app_name))
+                        sandbox.apps.keys().any(|id| {
+                            id.split_once('/')
+                                .map_or(&id[..], |(_, name)| name)
+                                .replace('/', "%2F")
+                                == app_name
+                        })
                     })
                     || sandbox.libs.keys().any(|id| {
                         !crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
-                            && id.rsplit('/').next() == Some(name)
+                            && request
+                                .uri()
+                                .path()
+                                .strip_prefix(&format!(
+                                    "/{}",
+                                    id.split_once('/').map_or(&id[..], |(_, name)| name)
+                                ))
+                                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
                     })
             };
             async move {

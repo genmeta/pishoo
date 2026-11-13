@@ -63,23 +63,48 @@ pub(crate) fn router(
                         .await
                         .expect("Router is infallible"));
                 }
-                let (name, suffix) = tail
-                    .split_once('/')
-                    .map_or((tail, ""), |(name, _)| (name, &tail[name.len()..]));
+                let (name, suffix) = if frontend {
+                    let (encoded, suffix) = tail
+                        .split_once('/')
+                        .map_or((tail, ""), |(name, _)| (name, &tail[name.len()..]));
+                    let name = percent_encoding::percent_decode_str(encoded)
+                        .decode_utf8()
+                        .map_err(|_| Error::RouteNotFound)?
+                        .into_owned();
+                    (name, suffix)
+                } else {
+                    let name = tail
+                        .match_indices('/')
+                        .map(|(end, _)| &tail[..end])
+                        .chain(std::iter::once(tail))
+                        .filter(|name| {
+                            package::valid_id(&name).is_ok()
+                                && profile.join("dev").join(name.replace('/', "%2F")).is_dir()
+                        })
+                        .last()
+                        .unwrap_or_else(|| tail.split('/').next().unwrap_or(""));
+                    (name.to_owned(), &tail[name.len()..])
+                };
                 // Local files require the real owner, independently of identity spelling.
                 // Native services retain precedence over local projects.
-                let local_exists = package::valid_id(name).is_ok()
-                    && profile.join("dev").join(name).try_exists()?;
+                let local_exists = package::valid_id(&name).is_ok()
+                    && profile
+                        .join("dev")
+                        .join(name.replace('/', "%2F"))
+                        .try_exists()?;
                 if !local_exists {
                     sandbox.write().unwrap().dev_libs.retain(|id, (_, lib)| {
-                        let keep = id.rsplit('/').next() != Some(name);
+                        let keep = id.split_once('/').map(|(_, name)| name).or(Some(&id[..]))
+                            != Some(&name[..]);
                         if !keep {
                             lib.stream_retired.cancel();
                         }
                         keep
                     });
                 }
-                if package::valid_id(name).is_err() || (!frontend && name == "app") || !local_exists
+                if package::valid_id(&name).is_err()
+                    || (!frontend && name == "app")
+                    || !local_exists
                 {
                     return Ok(fallback
                         .oneshot(request)
@@ -99,7 +124,7 @@ pub(crate) fn router(
                 if frontend {
                     let mut response = tokio::task::spawn_blocking(move || {
                         let root = root(&profile)?;
-                        let directory = child(&root, &name, true)?;
+                        let directory = child(&root, &name.replace('/', "%2F"), true)?;
                         let app = child(&directory, "app", true)?;
                         crate::sandbox::app_response(&app, &suffix, &request)
                     })
@@ -227,7 +252,7 @@ fn child(parent: &File, name: &str, directory: bool) -> Result<File> {
 
 fn author(profile: &IdentityProfile, name: &str) -> Result<String> {
     let root = root(profile)?;
-    let directory = child(&root, name, true)?;
+    let directory = child(&root, &name.replace('/', "%2F"), true)?;
     author_from_directory(&directory, name)
 }
 
@@ -276,6 +301,10 @@ fn load_standard_libraries(
             let Ok(name) = entry?.file_name().into_string() else {
                 continue;
             };
+            let name = percent_encoding::percent_decode_str(&name)
+                .decode_utf8()
+                .map_err(|_| Error::Denied)?
+                .into_owned();
             if package::valid_id(&name).is_err() {
                 continue;
             }
@@ -315,7 +344,7 @@ fn load(
 ) -> Result<Arc<Lib>> {
     let opened = (|| {
         let root = root(profile)?;
-        let directory = child(&root, name, true)?;
+        let directory = child(&root, &name.replace('/', "%2F"), true)?;
         let file = child(&directory, "lib.wasm", false)?;
         let author = author_from_directory(&directory, name)?;
         if author != expected_author {
@@ -327,7 +356,8 @@ fn load(
         Ok(opened) => opened,
         Err(error) => {
             sandbox.write().unwrap().dev_libs.retain(|id, (_, lib)| {
-                let keep = id.rsplit('/').next() != Some(name);
+                let keep =
+                    id.split_once('/').map(|(_, name)| name).or(Some(&id[..])) != Some(&name[..]);
                 if !keep {
                     lib.stream_retired.cancel();
                 }
@@ -349,7 +379,7 @@ fn load(
     }
     // Changed or removed files never fall back to stale executable code.
     state.dev_libs.retain(|id, (_, lib)| {
-        let keep = id.rsplit('/').next() != Some(name);
+        let keep = id.split_once('/').map(|(_, name)| name).or(Some(&id[..])) != Some(&name[..]);
         if !keep {
             lib.stream_retired.cancel();
         }
@@ -399,9 +429,16 @@ fn load(
         id.clone(),
         &bytes,
         &data_root.join(if crate::package::is_standard_author(&author) {
-            format!("std/{name}")
+            format!(
+                "std/{}",
+                if name == "comm/message" {
+                    "message".to_owned()
+                } else {
+                    name.replace('/', "%2F")
+                }
+            )
         } else {
-            name.to_owned()
+            name.replace('/', "%2F")
         }),
     )?);
     state.dev_libs.insert(id, (metadata, lib.clone()));

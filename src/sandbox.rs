@@ -174,9 +174,18 @@ impl Sandbox {
                             if crate::package::is_standard_author(
                                 id.split('/').next().unwrap_or(""),
                             ) {
-                                format!("std/{}", id.rsplit('/').next().unwrap())
+                                format!(
+                                    "std/{}",
+                                    if package_name(id) == "comm/message" {
+                                        "message".to_owned()
+                                    } else {
+                                        package_name(id).replace('/', "%2F")
+                                    }
+                                )
                             } else {
-                                id.rsplit('/').next().unwrap().to_owned()
+                                id.split_once('/')
+                                    .map_or(&id[..], |(_, name)| name)
+                                    .replace('/', "%2F")
                             },
                         ),
                     )?;
@@ -222,7 +231,7 @@ impl Sandbox {
                             Some(tail) => (true, tail),
                             None => (false, path.strip_prefix('/').unwrap_or(path)),
                         };
-                        let name = tail.split('/').next().unwrap_or("");
+                        let mut name = tail.split('/').next().unwrap_or("");
                         let standard_path = path.strip_prefix("/std").unwrap_or(path);
                         let lib = if standard {
                             let mut matches = sandbox
@@ -254,12 +263,18 @@ impl Sandbox {
                             sandbox
                                 .libs
                                 .iter()
-                                .find(|(id, _)| {
+                                .filter(|(id, _)| {
                                     !crate::package::is_standard_author(
                                         id.split('/').next().unwrap_or(""),
-                                    ) && id.rsplit('/').next() == Some(name)
+                                    ) && tail.strip_prefix(package_name(id)).is_some_and(|suffix| {
+                                        suffix.is_empty() || suffix.starts_with('/')
+                                    })
                                 })
-                                .map(|(_, lib)| lib.clone())
+                                .max_by_key(|(id, _)| package_name(id).len())
+                                .map(|(id, lib)| {
+                                    name = package_name(id);
+                                    lib.clone()
+                                })
                                 .ok_or(Error::RouteNotFound)?
                         };
                         let path = if standard {
@@ -338,7 +353,7 @@ impl Sandbox {
                         let (_, directory) = sandbox
                             .apps
                             .iter()
-                            .find(|(id, _)| id.rsplit('/').next() == Some(name))
+                            .find(|(id, _)| package_name(id).replace('/', "%2F") == name)
                             .map(|(_, app)| app)
                             .ok_or(Error::RouteNotFound)?;
                         app_response(directory, tail.strip_prefix(name).unwrap(), &request)
@@ -460,3 +475,9 @@ fn reject_api(error: Error) -> axum::response::Response {
 #[cfg(test)]
 #[path = "../tests/unit/sandbox/tests.rs"]
 pub(crate) mod tests;
+
+fn package_name(id: &str) -> &str {
+    id.split_once('/')
+        .filter(|(author, _)| dhttp_home::normalize_name(author).as_deref() == Some(*author))
+        .map_or(id, |(_, name)| name)
+}

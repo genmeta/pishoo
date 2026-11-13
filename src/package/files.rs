@@ -119,21 +119,29 @@ pub(crate) fn lib_root(profile: &IdentityProfile) -> Result<std::fs::File> {
     child_dir(&profile_dir(profile)?, std::ffi::OsStr::new("lib"))
 }
 
+fn package_name(id: &str) -> &str {
+    id.split_once('/')
+        .filter(|(author, _)| dhttp_home::normalize_name(author).as_deref() == Some(*author))
+        .map_or(id, |(_, name)| name)
+}
+
+fn resource_name(id: &str) -> String {
+    package_name(id).replace('/', "%2F")
+}
+
 pub(crate) fn valid_id(id: &str) -> Result<()> {
-    let name = match id.split_once('/') {
-        Some((publisher, name))
-            if dhttp_home::normalize_name(publisher).as_deref() == Some(publisher) =>
-        {
-            name
-        }
-        Some(_) => return Err(Error::BadRequest("invalid Lib publisher".into())),
-        None => id,
-    };
+    let name = package_name(id);
     if name.len() > 63
-        || !name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
-        || !name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        || !name.split('/').all(|segment| {
+            segment.len() <= 63
+                && segment
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_lowercase)
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
     {
         return Err(Error::BadRequest("invalid Lib id".into()));
     }
@@ -283,10 +291,10 @@ fn registered_packages(
         })? {
             let (id, name, version) = row?;
             valid_id(&id)?;
-            if id.rsplit('/').next() != Some(name.as_str())
-                || records.iter().any(|(other, _): &(String, String)| {
-                    other.rsplit('/').next() == Some(name.as_str())
-                })
+            if package_name(&id) != name
+                || records
+                    .iter()
+                    .any(|(other, _): &(String, String)| package_name(other) == name)
             {
                 return Err(Error::InvalidConfig(
                     "invalid or conflicting installed package name".into(),
@@ -312,7 +320,7 @@ fn check_name(conn: &rusqlite::Connection, id: &str, kind: &str) -> Result<()> {
     let other: Option<String> = conn
         .query_row(
             &format!("SELECT {identity} FROM {table} WHERE name=?1 AND ({identity})<>?2"),
-            rusqlite::params![id.rsplit('/').next().unwrap(), id],
+            rusqlite::params![package_name(id), id],
             |row| row.get(0),
         )
         .optional()?;
@@ -384,7 +392,7 @@ fn package_routes(
         {
             "/std".to_owned()
         } else {
-            format!("/{}", id.rsplit('/').next().unwrap())
+            format!("/{}", package_name(id))
         };
         let api = super::validate_openapi(super::package_openapi(package)?)?;
         for (path, item) in api.paths.as_ref().unwrap() {
@@ -407,13 +415,13 @@ fn package_routes(
                 path.to_owned()
             };
             routes.insert(
-                format!("/app/{}/{}", id.rsplit('/').next().unwrap(), suffix),
+                format!("/app/{}/{}", resource_name(id), suffix),
                 vec!["GET".into(), "HEAD".into()],
             );
         }
         // The canonical root's redirect is also an actual static operation.
         routes.insert(
-            format!("/app/{}", id.rsplit('/').next().unwrap()),
+            format!("/app/{}", resource_name(id)),
             vec!["GET".into(), "HEAD".into()],
         );
     }
@@ -429,9 +437,9 @@ fn check_routes(
 ) -> Result<()> {
     if kind == "app" || !crate::package::is_standard_author(id.split('/').next().unwrap_or("")) {
         let mount = if kind == "app" {
-            format!("/app/{}", id.rsplit('/').next().unwrap())
+            format!("/app/{}", resource_name(id))
         } else {
-            format!("/{}", id.rsplit('/').next().unwrap())
+            format!("/{}", package_name(id))
         };
         let locations = conn
             .prepare("SELECT location FROM proxy_location")?
@@ -493,7 +501,7 @@ fn installed_routes(
             kind,
         );
     }
-    let directory = child_dir(root, std::ffi::OsStr::new(id.rsplit('/').next().unwrap()))?;
+    let directory = child_dir(root, std::ffi::OsStr::new(&resource_name(id)))?;
     let device = directory.metadata()?.dev();
     let mut files = std::collections::BTreeMap::new();
     let mut pending = vec![(directory, String::new(), 0)];
@@ -544,7 +552,7 @@ fn save_registration(
     package: &super::PackageFiles,
 ) -> Result<()> {
     check_name(conn, id, "pkg")?;
-    let name = id.rsplit('/').next().unwrap();
+    let name = package_name(id);
     let author = id.split_once('/').map(|(author, _)| author);
     let previous_owner: Option<Option<String>> = conn
         .query_row(
@@ -586,6 +594,7 @@ fn save_registration(
     for (dependency, version) in declared_dependencies(api) {
         let (dependency_author, dependency_name) = dependency
             .split_once('/')
+            .filter(|(author, _)| dhttp_home::normalize_name(author).as_deref() == Some(*author))
             .map_or((None, dependency.as_str()), |(author, name)| {
                 (Some(author), name)
             });
@@ -640,7 +649,7 @@ fn save_registration(
                         "app capability requires this package's public resources".into(),
                     ));
                 }
-                endpoints.push(("GET".into(), format!("/app/{name}")));
+                endpoints.push(("GET".into(), format!("/app/{}", name.replace('/', "%2F"))));
             }
         }
     }
@@ -666,8 +675,8 @@ fn declared_dependencies(api: &serde_json::Value) -> Vec<(String, String)> {
 }
 
 fn check_dependency_cycle(conn: &rusqlite::Connection, id: &str, dependency: &str) -> Result<()> {
-    let name = id.rsplit('/').next().unwrap();
-    let mut pending = vec![dependency.rsplit('/').next().unwrap().to_owned()];
+    let name = package_name(id);
+    let mut pending = vec![package_name(dependency).to_owned()];
     let mut seen = std::collections::HashSet::new();
     while let Some(current) = pending.pop() {
         if current == name {
@@ -732,7 +741,7 @@ fn versioned_wasm_name(id: &str, metadata: &serde_json::Value) -> Result<String>
     {
         return Err(expanded_error());
     }
-    Ok(format!("{}_{version}.wasm", id.rsplit('/').next().unwrap()))
+    Ok(format!("{}_{version}.wasm", resource_name(id)))
 }
 
 // Only a missing exact version may fall back to the previous unversioned layout.
@@ -744,7 +753,7 @@ fn installed_wasm_name(
     let leaf = versioned_wasm_name(id, metadata)?;
     match rustix::fs::statat(parent, &leaf, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
         Ok(_) => Ok(leaf),
-        Err(rustix::io::Errno::NOENT) => Ok(format!("{}.wasm", id.rsplit('/').next().unwrap())),
+        Err(rustix::io::Errno::NOENT) => Ok(format!("{}.wasm", resource_name(id))),
         Err(error) => Err(layout_error(error)),
     }
 }
@@ -844,7 +853,7 @@ fn registered_metadata(
             "installed_at":r.get::<_,Option<i64>>(7)?,"upgraded_at":r.get::<_,Option<i64>>(8)?,"has_lib":r.get::<_,bool>(9)?,"has_app":r.get::<_,bool>(10)?,"author_owner_hash":r.get::<_,Option<String>>(11)?,"package_sha256":r.get::<_,Option<String>>(12)?,"signer_leaf_fingerprint_sha256":r.get::<_,Option<String>>(13)?,"endpoints":[]}))
     }).optional()?.ok_or(Error::RouteNotFound)?;
     let dependencies = conn.prepare("SELECT p.author,p.name,d.version FROM package_dependency d JOIN package p ON p.name=d.dependency_name WHERE d.package_name=?1 ORDER BY p.author,p.name")?
-        .query_map([id.rsplit('/').next().unwrap()], |r| Ok(serde_json::json!({"publisher":r.get::<_,Option<String>>(0)?,"name":r.get::<_,String>(1)?,"version":r.get::<_,String>(2)?})))?
+        .query_map([package_name(id)], |r| Ok(serde_json::json!({"publisher":r.get::<_,Option<String>>(0)?,"name":r.get::<_,String>(1)?,"version":r.get::<_,String>(2)?})))?
         .collect::<std::result::Result<Vec<_>,_>>()?;
     value["dependencies"] = dependencies.into();
     if value["has_app"] == true {
@@ -937,7 +946,7 @@ pub(super) fn install_packages(
     let mut changed = Vec::new();
     for (index, (id, bytes, proof)) in packages.iter().enumerate() {
         valid_id(id)?;
-        let short = id.rsplit('/').next().unwrap();
+        let short = package_name(id);
         if short == "std" || !names.insert(short) {
             return Err(Error::BadRequest(
                 "reserved or duplicate package name".into(),
@@ -1055,7 +1064,7 @@ pub(super) fn install_packages(
     for (id, _, _, _) in &changed {
         tx.execute(
             "DELETE FROM package_dependency WHERE package_name=?1",
-            [id.rsplit('/').next().unwrap()],
+            [package_name(id)],
         )?;
     }
     for (id, _, package, metadata) in &changed {
@@ -1074,9 +1083,9 @@ pub(super) fn install_packages(
     let mut libs = std::collections::HashMap::new();
     let mut apps = std::collections::HashMap::new();
     for (id, _, package, metadata) in &changed {
-        let short = id.rsplit('/').next().unwrap();
-        mkdirat(&stage, short, Mode::from_raw_mode(0o700)).map_err(layout_error)?;
-        let package_stage = child_dir(&stage, std::ffi::OsStr::new(short))?;
+        let short = resource_name(id);
+        mkdirat(&stage, short.as_str(), Mode::from_raw_mode(0o700)).map_err(layout_error)?;
+        let package_stage = child_dir(&stage, std::ffi::OsStr::new(&short))?;
         inherit_owner(&package_stage, &parent)?;
         for kind in ["lib", "app"] {
             if metadata[format!("has_{kind}")] != true {
@@ -1101,9 +1110,16 @@ pub(super) fn install_packages(
                 let wasm = read_runtime_wasm(payload)?;
                 let data = profile.join(".volume").join(
                     if crate::package::is_standard_author(id.split('/').next().unwrap_or("")) {
-                        format!("std/{short}")
+                        format!(
+                            "std/{}",
+                            if package_name(id) == "comm/message" {
+                                "message".to_owned()
+                            } else {
+                                resource_name(id)
+                            }
+                        )
                     } else {
-                        short.to_owned()
+                        resource_name(id)
                     },
                 );
                 libs.insert(
@@ -1134,7 +1150,7 @@ pub(super) fn install_packages(
     let entries = changed
         .iter()
         .zip(&stages)
-        .map(|((id, _, _, _), dir)| (id.as_str(), id.rsplit('/').next().unwrap(), dir))
+        .map(|((id, _, _, _), dir)| (id.as_str(), package_name(id), dir))
         .collect::<Vec<_>>();
     // Recheck cached evidence locally after compilation; never perform network I/O under transaction locks.
     for (_, bytes, proof) in packages {
@@ -1210,7 +1226,7 @@ fn commit_packages_files(
     let mut targets = Vec::new();
     let mut packages = Vec::new();
     for &(id, directory, package_stage) in entries {
-        let short = id.rsplit('/').next().unwrap();
+        let short = resource_name(id);
         let mut resources = Vec::new();
         for kind in ["lib", "app"] {
             match mkdirat(parent, kind, Mode::from_raw_mode(0o700)) {
@@ -1278,12 +1294,13 @@ fn commit_packages_files(
             resources.push(serde_json::json!({"kind":kind,"old":old,"new":new,"old_leaf":old_leaf,"new_leaf":leaf}));
             targets.push((package_stage, kind, target, old_leaf, leaf, old, new));
         }
-        let facts: String =
-            tx.query_row(include_str!("sql/registration_facts.sql"), [short], |r| {
-                r.get(0)
-            })?;
+        let facts: String = tx.query_row(
+            include_str!("sql/registration_facts.sql"),
+            [package_name(id)],
+            |r| r.get(0),
+        )?;
         packages.push(
-            serde_json::json!({"id":id,"directory":directory,"resources":resources,"facts":facts}),
+            serde_json::json!({"id":id,"directory":resource_name(directory),"resources":resources,"facts":facts}),
         );
     }
     let journal = serde_json::to_vec(&serde_json::json!({"packages":packages}))
@@ -1401,7 +1418,7 @@ pub(crate) fn remove_package(profile: &IdentityProfile, id: &str) -> Result<()> 
     ) {
         return Ok(());
     }
-    let short = id.rsplit('/').next().unwrap();
+    let short = package_name(id);
     let name = temporary_name()?;
     mkdirat(&parent, &name, Mode::from_raw_mode(0o700)).map_err(layout_error)?;
     let stage = child_dir(&parent, std::ffi::OsStr::new(&name))?;
@@ -1456,7 +1473,7 @@ pub(crate) fn installed_apps(
             .as_str()
             .ok_or_else(expanded_error)?
             .to_owned();
-        let directory = child_dir(&root, std::ffi::OsStr::new(id.rsplit('/').next().unwrap()))?;
+        let directory = child_dir(&root, std::ffi::OsStr::new(&resource_name(&id)))?;
         if directory.metadata()?.dev() != root.metadata()?.dev() {
             return Err(expanded_error());
         }
