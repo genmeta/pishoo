@@ -38,11 +38,17 @@ impl WasiHttpHooks for Outgoing {
                 endpoint,
                 access,
                 api,
-            } => Some((endpoint.clone(), access.clone(), api.clone())),
+                source,
+            } => Some((
+                endpoint.clone(),
+                access.clone(),
+                api.clone(),
+                source.clone(),
+            )),
             Self::Denied => None,
         };
         Box::new(async move {
-            let (endpoint, access, api) = resources.ok_or(HttpError::HttpRequestDenied)?;
+            let (endpoint, access, api, source) = resources.ok_or(HttpError::HttpRequestDenied)?;
             let config = options.unwrap_or_default();
             if request.uri().scheme_str() != Some("https") {
                 return Err(HttpError::HttpRequestDenied);
@@ -95,6 +101,11 @@ impl WasiHttpHooks for Outgoing {
             }
             clean_headers(request.headers_mut());
             request.extensions_mut().clear();
+            if target == endpoint.name()
+                && let Some(source) = source
+            {
+                request.extensions_mut().insert(source);
+            }
             let waiting = request
                 .headers()
                 .get("if-reviewed")

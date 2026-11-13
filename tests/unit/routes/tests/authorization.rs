@@ -719,3 +719,53 @@ async fn waiting_timeout_cleans_up_without_granting_acl() {
         .unwrap();
     assert_eq!(row.try_get::<i64>("", "n").unwrap(), 0);
 }
+
+#[tokio::test]
+async fn hierarchical_app_pages_and_head_use_the_complete_registered_root_permission() {
+    use tower::ServiceExt;
+    let (access, _) = authorization_app(access_control::Effect::Deny).await;
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            "/app/live/dashboard",
+            access_control::Effect::Allow,
+            access_control::Grantee::All,
+        )
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut sandbox = crate::sandbox::Sandbox::new(Arc::new(crate::WasmRuntime::new().unwrap()));
+    sandbox.apps.insert(
+        "alice.dhttp.net/live/dashboard".into(),
+        (
+            "1.0.0".into(),
+            Arc::new(std::fs::File::open(root.path()).unwrap()),
+        ),
+    );
+    let app = Router::new()
+        .fallback(axum::routing::any(|| async { StatusCode::NO_CONTENT }))
+        .layer(axum::middleware::from_fn_with_state(access, authorize))
+        .layer(axum::Extension(Arc::new(std::sync::RwLock::new(sandbox))));
+    for method in [Method::GET, Method::HEAD] {
+        for path in [
+            "/app/live/dashboard",
+            "/app/live/dashboard/assets/app.js",
+            "/app/live/dashboard/settings/account",
+        ] {
+            let mut request = anonymous_request();
+            *request.uri_mut() = path.parse().unwrap();
+            *request.method_mut() = method.clone();
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::NO_CONTENT,
+                "{method} {path}"
+            );
+        }
+    }
+    let mut request = anonymous_request();
+    *request.uri_mut() = "/app/live/other/".parse().unwrap();
+    assert_eq!(
+        app.oneshot(request).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+}

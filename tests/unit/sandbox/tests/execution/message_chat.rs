@@ -471,6 +471,7 @@ async fn verify_message_delivery(large_image: bool, cancel_early: bool) {
     );
     let tasks = TaskTracker::new();
     let outgoing = || Outgoing::Granted {
+        source: None,
         endpoint: endpoint.clone(),
         access: access.clone(),
         api: api.clone(),

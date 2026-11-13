@@ -1,110 +1,190 @@
-# WAZ v1 package format
+# WAZ package format
 
-Dependencies contain only an exact `name` and `version`; local Jade declarations
-may also set `path`, which is omitted from the release. The store resolves each
-package name to its unique author. A name stays reserved after withdrawal.
-Cross-author name claims return `409 package_name_conflict`; every repeated
-version upload, including identical bytes, returns `409 package_version_conflict`.
-Historical signed dependencies with authors remain readable without rewriting packages.
+## WAZ v2
 
-A `.waz` release is a standard ZIP archive with MIME `application/zip`. It can be
-listed and extracted with ordinary ZIP tools. Publication and installation accept
-this format only; previous WEBC release files must be rebuilt from source.
-
-The host operates directly on ZIP entries after verification. There is no internal
-conversion to a second archive format, no legacy archive/proof reconstruction,
-and no compatibility reader for previous installed package layouts. Runtime Libs
-read the installed WASM and its embedded OpenAPI; Apps read their installed files.
-
-## Files
+New Jade builds use `format = "waz/2"` in a UTF-8 `manifest.toml` inside a standard
+ZIP archive. The MIME type is `application/zip`.
 
 ```text
-manifest.json       Required package metadata
-signature.json      Required publisher signature and certificate chain
-backend.wasm        Optional WASI HTTP Component, with embedded OpenAPI
-public/index.html   Required when a frontend is present
-public/...          Frontend files
-README.md           Optional documentation
-CHANGELOG.md        Optional documentation
+manifest.toml
+wasm/<full-package-name>.wasm
+web/index.html
+web/...
+docs/manual.md
+docs/...
 ```
 
-At least a backend or frontend must be present. Jade automatically includes the
-project root's `README.md` and `CHANGELOG.md` when they are regular files. Missing
-documents are skipped, and `jade.toml` needs no document declarations. Documents
-are part of the signed release, but are not frontend resources or an OpenAPI
-source. The existing `release-notes` setting remains a short release summary.
+A package contains a backend, a frontend, or both. A backend named `std/comm/message`
+uses `wasm/std/comm/message.wasm`. Frontend resources use `web/`. Markdown documents
+use `docs/` and are collected recursively from the source project's `docs/`
+directory, respecting project ignore rules. The main manual entry is `docs/manual.md`.
 
-## Manifest
+## Release manifest
 
-`manifest.json` is UTF-8 JSON. It is the release metadata authority:
+```toml
+format = "waz/2"
+backend = "wasm/std/comm/example.wasm"
+frontend = "web"
+dependencies = []
 
-```json
-{
-  "format": "waz/1",
-  "package": {
-    "author": "alice.smith.dhttp.net",
-    "name": "hello",
-    "version": "0.1.0",
-    "title": "Hello",
-    "description": "Hello application",
-    "license": "Apache-2.0",
-    "release-notes": "Initial release"
-  },
-  "dependencies": [],
-  "backend": "backend.wasm",
-  "frontend": "public"
-}
+[package]
+author = "dev.genmeta.tech.dhttp.net"
+name = "std/comm/example"
+version = "0.1.0"
+title = "Example"
+description = "Example package"
+license = "Apache-2.0"
+release-notes = "Initial release"
+repository = "https://example.com/source"
+
+[docs]
+manual = "docs/manual.md"
+readme = "https://example.com/readme"
+changelog = "https://example.com/changelog"
+
+[signature]
+version = 1
+certificates = ["<Base64 DER leaf>", "<Base64 DER issuer>"]
+value = "<Base64 signature>"
 ```
 
-All shown package fields are required; `repository` is an optional HTTPS URL.
-Author is a canonical DHTTP identity, name is a package short name, and version is
-`MAJOR.MINOR.PATCH`. Dependencies use exact `{ "name", "version" }`
-objects, with at most 100 entries. The optional `backend` and `frontend` fields
-must match the actual runtime files and use the fixed paths shown above. Unknown
-manifest and package fields are rejected.
+`format` identifies the release layout and signing rules. `package.version`
+identifies the software release. The package author remains the authenticated
+publisher identity. Package names support slash-separated segments and retain
+the existing 63-byte total limit and segment validation.
+
+Package fields shown above are required except `repository`. `backend` and
+`frontend` are optional individually and must exactly match the runtime files.
+Unknown manifest, package, and document fields are rejected.
+
+`dependencies` is an explicit array of exact name/version objects, with at most
+100 entries. A nonempty TOML dependency list may use tables.
+
+```toml
+[[dependencies]]
+name = "std/profile"
+version = "0.3.1"
+```
+
+Local dependency `path` values belong to `jade.toml` and are omitted from releases.
+Historical author-qualified dependencies retain their exact identity checks.
+Package-name ownership and repeated-version publication follow the existing
+store contract.
+
+Standard Libs and combined frontend/backend packages use complete names beginning
+with `std/`. Pure frontend Apps such as `workspace` and `introduction` retain
+their App names. New `std/` names require a standard publisher. The host maps the
+complete namespace once in runtime and data paths. Historical standard package
+names continue using their original implicit namespace. Business API paths are
+declared independently in the embedded OpenAPI document.
+
+`docs` is optional. `manual`, when declared, is exactly `docs/manual.md` and must
+exist in the archive. `readme` and `changelog` are optional HTTPS URLs with hosts
+and without credentials. Source `jade.toml` accepts the same `[docs]` declaration.
+Jade also declares `docs.manual` automatically when `docs/manual.md` exists.
+Root README and CHANGELOG files remain project documentation. Their release
+entry points are the URLs in `[docs]`.
+
+## Manuals
+
+Manuals use English UTF-8 CommonMark Markdown and conventional man-style headings.
+Use NAME, SYNOPSIS, DESCRIPTION, API or OPERATIONS, PERMISSIONS, EXAMPLES, ERRORS,
+FILES, COMPATIBILITY, and SEE ALSO as applicable. Describe actual request shapes,
+identity checks, failure behavior, lifecycle, and persistent files. Additional
+Markdown topics may be linked relative to the main manual.
+
+The backend embeds its OpenAPI document. The manual explains operation semantics
+and workflows and accompanies the corresponding package version.
+
+## Signature boundary
+
+A signed v2 release ends its manifest with a literal, unindented `[signature]`
+table header on its own line. The table has exactly `version`, `certificates`,
+and `value`. Signature envelope version 1 retains the existing developer
+certificate and cryptographic verification policy. This envelope version and
+the WAZ format version describe separate objects.
+
+The entire `signature` table is excluded from the payload digest. For the
+manifest entry, the signed content is the original UTF-8 bytes from byte zero
+to the first byte of the final `[signature]` header. This includes all preceding
+comments, whitespace, and newlines. A change to those bytes changes the payload.
+
+Readers locate the actual signature table using the TOML parser's source span.
+They parse the complete document and independently parse its prefix and suffix. The prefix must equal the complete document with `signature` removed.
+The suffix must contain only that same signature table. This verifies the byte
+boundary and the last-field rule, including quoted strings and multiline values.
+Duplicate TOML keys, ambiguous header positions, and content outside the signature
+table in the suffix are rejected.
+
+An unsigned build omits the signature table and ends its manifest with a newline.
+`jade publish` signs that exact existing snapshot and appends the signature table.
+An already signed snapshot is verified and uploaded with its existing bytes.
+
+## Digests
+
+`payload_sha256` hashes the uncompressed release entries. Initialize SHA-256 with
+the ASCII bytes `pishoo-waz-payload-v2` followed by NUL. Visit all regular files in
+UTF-8 path-byte order. For each entry append the following bytes.
+
+1. Path length as an unsigned 32-bit little-endian integer.
+2. The UTF-8 path without a leading slash.
+3. Content length as an unsigned 64-bit little-endian integer.
+4. The 32 raw SHA-256 bytes of the content.
+
+For `manifest.toml`, content and content length use the prefix defined above.
+Every WASM, frontend resource, and manual participates with its original bytes.
+
+The publisher signs the ASCII bytes `pishoo-waz-signature-v2` followed by NUL and
+the 32 raw payload-digest bytes. `signature.value` is the Base64 signature.
+Certificate chain and identity validation use the existing developer trust rules.
+
+`package_sha256` hashes the complete final ZIP bytes, including the full manifest
+and its signature. Store receipts and download checks bind that exact archive.
 
 ## ZIP profile and limits
 
-Jade writes Deflate compression at level 6, sorted file names, a fixed ZIP
-timestamp and regular-file permissions. Readers accept Stored or Deflate entries.
-Only regular file entries are used; directory structure is inferred from paths.
-Encryption, symlinks, device files, duplicate paths, traversal segments, absolute
-paths, ZIP64, multi-disk archives, data descriptors, self-extracting prefixes and
-archive comments/trailing data are rejected. Local headers must agree with the
-central directory, and all archive bytes must belong to indexed ZIP structures.
+Jade uses Deflate level 6, sorted entry names, a fixed ZIP timestamp, and regular
+file permissions. Readers accept Stored and Deflate compression. Directories
+are inferred from file paths.
 
-The compressed archive and total decompressed file bytes are each limited to
-64 MiB. The manifest is limited to 1 MiB and signature envelope to 64 KiB. A
-frontend or document file is limited to 16 MiB. Runtime content and documents share
-the existing 4096-entry and 32-directory-depth budgets; paths are at most 1024
-UTF-8 bytes. Limits are checked before and during decompression.
+The compressed archive and total decompressed contents each have a 64 MiB limit.
+The complete manifest has a 1 MiB limit and its signature suffix has a 64 KiB
+limit. A backend has the package-wide limit. Each frontend resource or manual has
+a 16 MiB limit. The archive has at most 4096 file entries and 32 directory levels.
+Paths have at most 1024 UTF-8 bytes.
 
-## Signature and digests
+Readers reject encrypted entries, symlinks, special files, duplicate paths,
+file/directory conflicts, traversal and absolute paths, ZIP64, multi-disk archives,
+data descriptors, self-extracting prefixes, archive comments, and trailing bytes.
+Local headers agree with the central directory. All archive bytes belong to
+indexed structures. CRC checks accompany the publisher signature checks.
 
-`package_sha256` is SHA-256 of the complete ZIP bytes. `payload_sha256` identifies
-the uncompressed signed files, independent of ZIP compression and timestamps.
+## Historical WAZ v1
 
-To compute the payload digest, initialize SHA-256 with the ASCII bytes
-`pishoo-waz-payload-v1` followed by NUL. Visit every regular file except
-`signature.json`, sorted by its UTF-8 path bytes, and append:
+Readers continue accepting `format: "waz/1"` in `manifest.json`, a separate
+`signature.json`, `backend.wasm`, `public/` resources, and optional root `README.md`
+and `CHANGELOG.md`. V1 files retain the original payload and signature domain
+strings ending in `v1`, the JSON signature envelope's `signature` value key, and
+their original signed bytes.
 
-1. Path byte length as an unsigned 32-bit little-endian integer.
-2. The path bytes, without a leading slash.
-3. Uncompressed content length as an unsigned 64-bit little-endian integer.
-4. The 32 raw SHA-256 bytes of the file content.
+Each archive has exactly one release manifest. V1 and v2 runtime/document layouts
+are validated against the selected format. Old published archives and their
+receipts continue identifying their original content.
 
-The raw contents of `manifest.json`, including its JSON formatting, participate
-like every other file. There are no excluded runtime or document files.
+Jade and the store may project validated releases into their existing internal
+resource representation. The host installs the runtime files from the verified
+release. Internal resource projections retain their existing API responsibilities.
 
-The publisher signs `pishoo-waz-signature-v1` followed by NUL and the 32 raw payload
-digest bytes. The signature envelope is JSON with exactly `version: 1`,
-`certificates` (a nonempty array of base64 DER certificates), and `signature`
-(base64 signature bytes). Identity binding and supported signature algorithms
-retain the existing DHTTP certificate verification rules. ZIP CRC checks do not
-replace signature verification.
+## Installed manual access
 
-The host may project verified ZIP contents into its existing internal resource
-container for installation and execution. That internal representation is not a
-release file and is never accepted as a substitute for a ZIP at publication or
-installation boundaries. Store and host readers must be updated before deploying
-new ZIP releases; no automatic conversion or re-signing of old releases occurs.
+For v2 installations, Pishoo retains the verified original archive in its local
+`.volume/sys/pkg/releases/<package_sha256>.waz` cache. Archive publication is
+atomic and occurs before the installation transaction commits. Package detail
+reads check the retained bytes against the installed digest before returning
+`docs` locations and the English manual text through the existing package detail
+response. Historical installations without a retained archive remain readable.
+The cache may retain earlier downloaded releases.
+
+The store returns `docs` locations and the manual text on exact release details.
+Workspace exposes the README and CHANGELOG links in its existing package views.
+The bundled manual is available through package contents and backend detail reads.

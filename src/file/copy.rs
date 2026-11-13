@@ -77,7 +77,6 @@ async fn copy(
     if !valid_directory(destination) {
         return Err(fail(400, "invalid relative directory"));
     }
-    let root = Arc::new(blocking(move || directory(&root, ".file", false)).await?);
     let (name, size, digest, body) = if let Some(id) = q.get("id") {
         if !valid_id(id) || q.len() != 2 {
             return Err(fail(400, "invalid file copy parameters"));
@@ -109,7 +108,12 @@ async fn copy(
             let (parent, leaf) = source
                 .rsplit_once('/')
                 .ok_or_else(|| fail(400, "invalid copy source"))?;
-            let file = open(&directory(&root, parent, false)?, leaf, false, false)?;
+            let file = open(
+                &directory(&directory(&root, ".file", false)?, parent, false)?,
+                leaf,
+                false,
+                false,
+            )?;
             if file.metadata().map_err(io)?.len() != size {
                 return Err(fail(409, "source size changed"));
             }

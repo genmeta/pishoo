@@ -31,6 +31,52 @@ use super::{
 };
 use crate::{Body, Error, Result, package::valid_id};
 
+// Create namespace levels through no-follow handles, with the identity's owner.
+fn ensure_data_parent(volume: &Path, parent: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::NOFOLLOW
+        | rustix::fs::OFlags::CLOEXEC;
+    let mut directory = std::fs::File::from(
+        rustix::fs::open(volume, flags, rustix::fs::Mode::empty()).map_err(std::io::Error::from)?,
+    );
+    let owner = directory.metadata()?;
+    for part in parent
+        .strip_prefix(volume)
+        .map_err(|_| Error::InvalidComponent("invalid Lib volume path".into()))?
+        .components()
+    {
+        let std::path::Component::Normal(part) = part else {
+            return Err(Error::InvalidComponent("invalid Lib volume path".into()));
+        };
+        match rustix::fs::mkdirat(&directory, part, rustix::fs::Mode::from_raw_mode(0o700)) {
+            Ok(()) => directory.sync_all()?,
+            Err(rustix::io::Errno::EXIST) => {}
+            Err(error) => return Err(std::io::Error::from(error).into()),
+        }
+        let child = std::fs::File::from(
+            rustix::fs::openat(&directory, part, flags, rustix::fs::Mode::empty())
+                .map_err(std::io::Error::from)?,
+        );
+        if child.metadata()?.dev() != owner.dev() {
+            return Err(Error::InvalidComponent(
+                "Lib volume crosses filesystems".into(),
+            ));
+        }
+        if rustix::process::geteuid().is_root() {
+            rustix::fs::fchown(
+                &child,
+                Some(rustix::fs::Uid::from_raw(owner.uid())),
+                Some(rustix::fs::Gid::from_raw(owner.gid())),
+            )
+            .map_err(std::io::Error::from)?;
+        }
+        directory = child;
+    }
+    Ok(())
+}
+
 // Component compilation, per-version filesystem grants, and Store limits.
 
 impl WasmRuntime {
@@ -199,6 +245,7 @@ impl Lib {
                 .ok_or_else(|| Error::InvalidComponent("missing pishoo:openapi section".into()))?,
         )
         .map_err(|error| Error::InvalidComponent(error.to_string()))?;
+        let component = runtime.compile(bytes)?;
         // Each Lib gets one private volume; the signed publisher selects std/.
         // Move legacy data only when its new destination does not exist.
         let parent = data_dir
@@ -207,15 +254,48 @@ impl Lib {
         let volume = data_dir
             .ancestors()
             .find(|p| p.file_name().is_some_and(|n| n == ".volume"));
-        if let Some(volume) = volume {
+        let _volume_lock = if let Some(volume) = volume {
+            let locked = std::fs::File::from(
+                rustix::fs::open(
+                    volume,
+                    rustix::fs::OFlags::RDONLY
+                        | rustix::fs::OFlags::DIRECTORY
+                        | rustix::fs::OFlags::NOFOLLOW,
+                    rustix::fs::Mode::empty(),
+                )
+                .map_err(std::io::Error::from)?,
+            );
+            rustix::fs::flock(&locked, rustix::fs::FlockOperation::LockExclusive)
+                .map_err(std::io::Error::from)?;
             let identity = volume.parent().unwrap();
-            let short = data_dir
-                .file_name()
-                .ok_or_else(|| Error::InvalidComponent("Lib data has no name".into()))?;
+            // Preserve existing data while changing encoded names to directory levels.
+            let name = super::package_name(&id);
+            let standard = id
+                .split_once('/')
+                .is_some_and(|(author, _)| crate::package::is_standard_author(author));
+            let legacy_name = if standard {
+                name.strip_prefix("std/").unwrap_or(name)
+            } else {
+                name
+            };
+            let encoded = legacy_name.replace('/', "%2F");
+            let legacy_root = if standard {
+                volume.join("std")
+            } else {
+                volume.to_path_buf()
+            };
+            ensure_data_parent(volume, parent)?;
             if !data_dir.try_exists()? {
-                let mut legacy = vec![identity.join("db").join(&short)];
+                let mut legacy = vec![identity.join("db").join(&encoded)];
                 if let Some((author, _)) = id.split_once('/') {
-                    legacy.push(identity.join("db").join(author).join(&short));
+                    legacy.push(identity.join("db").join(author).join(&encoded));
+                }
+                let previous = legacy_root.join(&encoded);
+                if previous != data_dir {
+                    legacy.push(previous);
+                }
+                if standard && legacy_name == "comm/message" {
+                    legacy.push(volume.join("std/message"));
                 }
                 let existing = legacy
                     .into_iter()
@@ -226,7 +306,6 @@ impl Lib {
                         "multiple legacy Lib data directories require reconciliation".into(),
                     ));
                 }
-                std::fs::create_dir_all(parent)?;
                 if let Some(source) = existing.first() {
                     if !source.symlink_metadata()?.file_type().is_dir() {
                         return Err(Error::InvalidConfig(
@@ -234,10 +313,14 @@ impl Lib {
                         ));
                     }
                     std::fs::rename(source, data_dir)?;
+                    std::fs::File::open(source.parent().unwrap())?.sync_all()?;
                     std::fs::File::open(parent)?.sync_all()?;
                 }
             }
-        }
+            Some(locked)
+        } else {
+            None
+        };
         for directory in [parent, data_dir] {
             match directory.symlink_metadata() {
                 Ok(metadata) if metadata.file_type().is_dir() => {}
@@ -251,7 +334,6 @@ impl Lib {
             }
         }
         let database_root = parent;
-        let component = runtime.compile(bytes)?;
         let owner = database_root.symlink_metadata().map_err(Error::Io)?;
         if !owner.is_dir() {
             return Err(Error::InvalidComponent(
@@ -268,7 +350,6 @@ impl Lib {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 use std::os::unix::fs::DirBuilderExt;
                 std::fs::DirBuilder::new()
-                    .recursive(true)
                     .mode(0o700)
                     .create(data_dir)
                     .map_err(Error::Io)?;
@@ -322,6 +403,8 @@ impl Lib {
             .map_err(Error::Guest)?;
         let filesystem = builder.build().filesystem().clone();
         Ok(Self {
+            id,
+            dependencies: std::collections::HashMap::new(),
             commands: Arc::new(commands),
             stream_retired: tokio_util::sync::CancellationToken::new(),
             openapi,
@@ -367,11 +450,13 @@ impl Invocation {
         }
         if let Outgoing::Granted {
             endpoint: granted,
+            source,
             api,
             ..
         } = &mut outgoing
         {
             check_endpoint(&endpoint, granted)?;
+            *source = Some(Arc::clone(&lib));
             // Derive the file capability from this Lib's actual preopen. Do not
             // reopen a path, or forward a previous caller's directory authority.
             use wasmtime_wasi::p2::bindings::filesystem::preopens::Host;
@@ -538,11 +623,13 @@ impl Invocation {
         let local = endpoint.local_authority()?.clone();
         if let Outgoing::Granted {
             endpoint: granted,
+            source,
             api,
             ..
         } = &mut outgoing
         {
             check_endpoint(&endpoint, granted)?;
+            *source = Some(Arc::clone(&lib));
             // Derive the file capability from this Lib's actual preopen. Do not
             // reopen a path, or forward a previous caller's directory authority.
             use wasmtime_wasi::p2::bindings::filesystem::preopens::Host;
@@ -772,7 +859,7 @@ impl Sandbox {
             let tasks = tasks.clone();
             async move {
                 if tasks.is_closed() { return; }
-                let outgoing = Outgoing::Granted { endpoint: endpoint.clone(), access, api };
+                let outgoing = Outgoing::Granted { source: None, endpoint: endpoint.clone(), access, api };
                 if let Err(error) = Invocation::run(lib, endpoint.clone(), tasks, outgoing).await {
                     tracing::warn!(identity=endpoint.name(),lib=%id,%error,"background WASI run failed");
                 }

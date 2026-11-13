@@ -718,7 +718,7 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
             &package("first", "2.0.0", json!([])),
             &runtime
         )
-        .is_err()
+        .is_ok()
     );
     let mut sandbox = Sandbox::new(runtime.clone());
     sandbox.load_libs(&profile).unwrap();
@@ -737,7 +737,7 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
     )
     .unwrap();
     remove_lib(&profile, "alice.dhttp.net/parent").unwrap();
-    assert!(profile.join("lib/first_1.0.0.wasm").is_file());
+    assert!(profile.join("lib/first.wasm.1.0.0").is_file());
     assert_eq!(
         std::fs::read(profile.join(".volume/first/keep.db")).unwrap(),
         b"keep"
@@ -764,12 +764,12 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
     .unwrap();
     // Startup does not repeat dependency-cycle validation after installation.
     db.execute(
-        "INSERT INTO package_dependency VALUES('second','first','1.0.0')",
+        "INSERT INTO package_dependency VALUES('second','1.0.0','first','1.0.0',NULL)",
         [],
     )
     .unwrap();
-    // Startup trusts installation; it does not audit out-of-band DB edits.
-    sandbox.load_libs(&profile).unwrap();
+    // A cyclic graph cannot produce an immutable execution snapshot.
+    assert!(sandbox.load_libs(&profile).is_err());
     db.execute(
         "DELETE FROM package_dependency WHERE package_name='second'",
         [],
@@ -930,7 +930,11 @@ async fn legacy_capability_prefixes_are_projected_then_migrated_without_changing
     db.execute_batch("DROP TABLE lib_capability_operation")
         .unwrap();
     db.execute_batch(
-        &include_str!("../../../../src/package/sql/compat/v3/schema.sql").replace(
+        &include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/package/v3/schema.sql"
+        ))
+        .replace(
             "substr(path, 1, 1) = '/' AND length(path) > 1",
             "substr(path, 1, 5) = '/std/'",
         ),
@@ -1419,7 +1423,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
         .to_string()
         .contains("route /std/comm/message conflicts")
     );
-    assert!(!profile.join("lib/other_1.0.0.wasm").exists());
+    assert!(!profile.join("lib/other.wasm.1.0.0").exists());
     // Native services cannot become WASM capabilities.
     for path in [
         "/acl/capabilities",
@@ -1535,9 +1539,10 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     )
     .await
     .unwrap();
-    db.execute_batch(include_str!(
-        "../../../../src/package/sql/compat/v3/schema.sql"
-    ))
+    db.execute_batch(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/package/v3/schema.sql"
+    )))
     .unwrap();
     let grantee = access_control::Grantee::Named;
     access
@@ -1730,16 +1735,35 @@ fn hierarchical_package_names_keep_complete_identity_and_isolated_files() {
     for (name, path, disk) in [
         ("message", "/comm/message", "message"),
         ("group", "/group", "group"),
-        ("comm/group", "/comm/group", "comm%2Fgroup"),
+        ("comm/group", "/comm/group", "comm/group"),
     ] {
         let id = format!("std.dhttp.net/{name}");
         let bytes = make(name, path);
         install_lib(&profile, &id, &bytes, &runtime).unwrap();
-        assert!(profile.join(format!("lib/std/{disk}_1.0.0.wasm")).is_file());
+        assert!(profile.join(format!("lib/std/{disk}.wasm.1.0.0")).is_file());
         let installed = installed_packages(&profile, Some(&id)).unwrap();
         assert_eq!(installed["name"], name);
         assert_eq!(installed["id"], id);
     }
+    // Previously encoded installations remain readable and update into the new layout.
+    std::fs::rename(
+        profile.join("lib/std/comm/group.wasm.1.0.0"),
+        profile.join("lib/std/comm%2Fgroup.wasm.1.0.0"),
+    )
+    .unwrap();
+    let old = make("comm/group", "/comm/group");
+    assert_eq!(
+        disk_bytes(
+            &profile,
+            &lib_root(&profile).unwrap(),
+            "std.dhttp.net/comm/group"
+        )
+        .unwrap(),
+        read_package(&old).unwrap()["backend.wasm"]
+    );
+    install_lib(&profile, "std.dhttp.net/comm/group", &old, &runtime).unwrap();
+    assert!(profile.join("lib/std/comm/group.wasm.1.0.0").is_file());
+    assert!(!profile.join("lib/std/comm%2Fgroup.wasm.1.0.0").exists());
     let app = json!({"openapi":"3.1.0","info":{"title":"Dashboard","version":"1.0.0","description":"Dependency regression","license":{"name":"MIT"}},
         "x-pishoo":{"kind":"app","publisher":"std.dhttp.net","name":"live/dashboard","dependencies":[{"name":"comm/group","version":"1.0.0"},{"publisher":"std.dhttp.net","name":"group","version":"1.0.0"}]},"paths":{}});
     let app_bytes = package_fixture(
@@ -1757,13 +1781,29 @@ fn hierarchical_package_names_keep_complete_identity_and_isolated_files() {
         .map(|dependency| dependency["name"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(names, ["comm/group", "group"]);
-    assert!(profile.join("app/live%2Fdashboard/index.html").is_file());
+    assert!(profile.join("app/live/dashboard/index.html").is_file());
+    std::fs::rename(
+        profile.join("app/live/dashboard"),
+        profile.join("app/live%2Fdashboard"),
+    )
+    .unwrap();
+    assert!(
+        installed_apps(&profile, None)
+            .unwrap()
+            .contains_key("std.dhttp.net/live/dashboard")
+    );
+    install_app(&profile, "std.dhttp.net/live/dashboard", &app_bytes).unwrap();
+    assert!(profile.join("app/live/dashboard/index.html").is_file());
+    assert!(!profile.join("app/live%2Fdashboard").exists());
+
     remove_app(&profile, "std.dhttp.net/live/dashboard").unwrap();
-    assert!(read_package(&make("comm/other", "/comm/group")).is_err());
+    let conflicting = make("comm/other", "/comm/group");
+    assert!(read_package(&conflicting).is_ok());
+    assert!(install_lib(&profile, "std.dhttp.net/comm/other", &conflicting, &runtime).is_err());
     remove_lib(&profile, "std.dhttp.net/comm/group").unwrap();
-    assert!(profile.join("lib/std/group_1.0.0.wasm").is_file());
-    assert!(profile.join("lib/std/message_1.0.0.wasm").is_file());
-    assert!(!profile.join("lib/std/comm%2Fgroup_1.0.0.wasm").exists());
+    assert!(profile.join("lib/std/group.wasm.1.0.0").is_file());
+    assert!(profile.join("lib/std/message.wasm.1.0.0").is_file());
+    assert!(!profile.join("lib/std/comm/group.wasm.1.0.0").exists());
     for bad in [
         "comm//group",
         "/comm/group",

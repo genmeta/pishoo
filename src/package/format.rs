@@ -54,7 +54,7 @@ fn validate_contents(files: &PackageFiles) -> Result<Value> {
             "ordinary Lib name conflicts with the frontend app namespace",
         ));
     }
-    if let Some(backend) = files.get("backend.wasm") {
+    if let Some(backend) = waz_backend(files) {
         if backend.get(..8) != Some(b"\0asm\x0d\0\x01\0") {
             return Err(invalid("backend must be a WASM component"));
         }
@@ -70,7 +70,7 @@ fn validate_contents(files: &PackageFiles) -> Result<Value> {
         }
     }
 
-    if files.contains_key("backend.wasm") {
+    if waz_backend(files).is_some() {
         let raw = package_openapi(files)?;
         let api = super::validate_openapi(raw)?;
         if crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or(""))
@@ -96,22 +96,6 @@ fn validate_contents(files: &PackageFiles) -> Result<Value> {
         {
             return Err(invalid("standard Lib conflicts with a reserved API path"));
         }
-        let name = metadata["name"].as_str().unwrap();
-        if crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or(""))
-            && name.contains('/')
-        {
-            let prefix = format!("/{name}");
-            if api.paths.as_ref().unwrap().keys().any(|path| {
-                path != &prefix
-                    && !path
-                        .strip_prefix(&prefix)
-                        .is_some_and(|suffix| suffix.starts_with('/'))
-            }) {
-                return Err(invalid(
-                    "standard Lib paths must belong to its full package name",
-                ));
-            }
-        }
         let document: Value =
             serde_json::from_slice(raw).map_err(|_| invalid("invalid OpenAPI JSON"))?;
         if document["info"]["version"] != metadata["version"] {
@@ -135,9 +119,7 @@ fn validate_contents(files: &PackageFiles) -> Result<Value> {
 }
 
 pub(crate) fn package_openapi(files: &PackageFiles) -> Result<&[u8]> {
-    let backend = files
-        .get("backend.wasm")
-        .ok_or_else(|| invalid("package has no backend"))?;
+    let backend = waz_backend(files).ok_or_else(|| invalid("package has no backend"))?;
     let mut document = None;
     let mut depth = 0;
     for item in wasmparser::Parser::new(0).parse_all(backend) {
@@ -160,12 +142,7 @@ pub(crate) fn package_openapi(files: &PackageFiles) -> Result<&[u8]> {
 }
 
 fn verify_signature(files: &PackageFiles, document: &Value) -> Result<()> {
-    let data = files
-        .get("signature.json")
-        .filter(|data| data.len() <= 64 * 1024)
-        .ok_or_else(|| invalid("missing or oversized publisher signature"))?;
-    let envelope: Value =
-        serde_json::from_slice(data).map_err(|_| invalid("invalid signature envelope"))?;
+    let envelope = waz_signature(files).map_err(|error| invalid(&error.to_string()))?;
     if envelope.as_object().is_none_or(|o| o.len() != 3)
         || envelope["version"].as_u64() != Some(1)
         || envelope["certificates"]
@@ -216,8 +193,13 @@ fn verify_signature(files: &PackageFiles, document: &Value) -> Result<()> {
             matches!(name, x509_parser::extensions::GeneralName::DNSName(name) if *name == publisher))) {
         return Err(invalid("signer certificate and publisher disagree"));
     }
-    let payload = waz_payload(files);
-    let mut input = b"pishoo-waz-signature-v1\0".to_vec();
+    let payload = waz_payload(files).map_err(|error| invalid(&error.to_string()))?;
+    let mut input = if files.contains_key("manifest.toml") {
+        b"pishoo-waz-signature-v2\0"
+    } else {
+        b"pishoo-waz-signature-v1\0"
+    }
+    .to_vec();
     for i in (0..payload.len()).step_by(2) {
         input.push(u8::from_str_radix(&payload[i..i + 2], 16).unwrap());
     }
@@ -232,26 +214,10 @@ fn verify_signature(files: &PackageFiles, document: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Derive package metadata only from the signed JSON manifest.
+/// Derive package metadata from the authenticated release manifest.
 pub(crate) fn package_metadata(files: &PackageFiles) -> Result<Value> {
-    let manifest: Value = serde_json::from_slice(
-        files
-            .get("manifest.json")
-            .ok_or_else(|| invalid("missing manifest.json"))?,
-    )
-    .map_err(|_| invalid("invalid package manifest"))?;
-    if manifest["format"] != "waz/1"
-        || manifest.as_object().is_none_or(|v| {
-            v.keys().any(|key| {
-                !matches!(
-                    key.as_str(),
-                    "format" | "package" | "dependencies" | "backend" | "frontend"
-                )
-            })
-        })
-    {
-        return Err(invalid("unsupported WAZ manifest format or field"));
-    }
+    let manifest = waz_manifest(files).map_err(|error| invalid(&error.to_string()))?;
+    waz_layout(files, &manifest).map_err(|error| invalid(&error.to_string()))?;
     let package = &manifest["package"];
     if package.as_object().is_none_or(|v| {
         v.keys().any(|key| {
@@ -317,20 +283,12 @@ pub(crate) fn package_metadata(files: &PackageFiles) -> Result<Value> {
     }
     let has_lib = manifest.get("backend").is_some();
     let has_app = manifest.get("frontend").is_some();
-    if (has_lib && manifest["backend"] != "backend.wasm")
-        || (has_app && manifest["frontend"] != "public")
-        || has_lib != files.contains_key("backend.wasm")
-        || has_app != files.keys().any(|name| name.starts_with("public/"))
-        || (has_app && !files.contains_key("public/index.html"))
-        || (!has_lib && !has_app)
-    {
-        return Err(invalid(
-            "WAZ manifest runtime paths disagree with package files",
-        ));
-    }
     let mut value = serde_json::json!({"id":id,"publisher":publisher,"name":name,"version":version,
         "title":text(package,"title")?,"description":text(package,"description")?,"license":text(package,"license")?,
         "changelog":text(package,"release-notes")?,"dependencies":dependencies_out,"has_lib":has_lib,"has_app":has_app});
+    if let Some(docs) = manifest.get("docs") {
+        value["docs"] = docs.clone();
+    }
     if has_app {
         value["entry"] = "/".into();
     }
@@ -534,8 +492,7 @@ fn validate_declarations(document: &Value) -> Result<()> {
     Ok(())
 }
 
-// WAZ v1 boundary codec, kept in sync with Jade archive.rs.
-
+// WAZ v1/v2 boundary codec, mirrored in Jade and the store.
 type WazResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const WAZ_LIMIT: usize = 64 * 1024 * 1024;
 
@@ -553,10 +510,14 @@ fn waz_path(path: &str) -> bool {
         && (matches!(
             path,
             "manifest.json" | "signature.json" | "backend.wasm" | "README.md" | "CHANGELOG.md"
-        ) || path.starts_with("public/"))
+        ) || path == "manifest.toml"
+            || path.starts_with("public/")
+            || path.starts_with("wasm/")
+            || path.starts_with("web/")
+            || path.starts_with("docs/"))
 }
 
-fn waz_read(bytes: &[u8]) -> WazResult<std::collections::BTreeMap<String, Vec<u8>>> {
+pub(super) fn waz_read(bytes: &[u8]) -> WazResult<std::collections::BTreeMap<String, Vec<u8>>> {
     use std::io::Read;
 
     if bytes.len() > WAZ_LIMIT || !waz_is_zip(bytes) || bytes.len() < 22 {
@@ -609,9 +570,10 @@ fn waz_read(bytes: &[u8]) -> WazResult<std::collections::BTreeMap<String, Vec<u8
             return Err(format!("invalid, duplicate or unsupported ZIP entry: {name}").into());
         }
         let limit = match name.as_str() {
-            "manifest.json" => 1024 * 1024,
+            "manifest.json" | "manifest.toml" => 1024 * 1024,
             "signature.json" => 64 * 1024,
             "backend.wasm" => WAZ_LIMIT,
+            _ if name.starts_with("wasm/") => WAZ_LIMIT,
             _ => 16 * 1024 * 1024,
         }
         .min(remaining);
@@ -696,40 +658,245 @@ fn waz_read(bytes: &[u8]) -> WazResult<std::collections::BTreeMap<String, Vec<u8
     if cursor != end {
         return Err("unindexed ZIP directory data".into());
     }
-    let mut directories = HashSet::new();
     for name in files.keys() {
         let mut ancestor = name.as_str();
         while let Some((parent, _)) = ancestor.rsplit_once('/') {
             if files.contains_key(parent) {
                 return Err("ZIP file conflicts with a directory".into());
             }
-            directories.insert(parent);
-            if directories.len() + files.len() > 10000 {
-                return Err("ZIP expanded directory entry budget exceeded".into());
-            }
             ancestor = parent;
         }
     }
-    if !files.contains_key("manifest.json") {
-        return Err("ZIP package requires manifest.json".into());
+    if files.contains_key("manifest.json") == files.contains_key("manifest.toml") {
+        return Err("ZIP package requires exactly one manifest.json or manifest.toml".into());
+    }
+    if let Some(manifest) = files.get("manifest.toml") {
+        waz_toml(manifest)?;
     }
     Ok(files)
 }
 
-fn waz_payload(files: &std::collections::BTreeMap<String, Vec<u8>>) -> String {
+fn waz_payload(files: &std::collections::BTreeMap<String, Vec<u8>>) -> WazResult<String> {
     use sha2::{Digest, Sha256};
+    let modern = files.contains_key("manifest.toml");
     let mut digest = Sha256::new();
-    digest.update(b"pishoo-waz-payload-v1\0");
+    digest.update(if modern {
+        b"pishoo-waz-payload-v2\0"
+    } else {
+        b"pishoo-waz-payload-v1\0"
+    });
     for (name, bytes) in files
         .iter()
-        .filter(|(name, _)| name.as_str() != "signature.json")
+        .filter(|(name, _)| modern || name.as_str() != "signature.json")
     {
+        let content = if name == "manifest.toml" {
+            &bytes[..waz_toml(bytes)?.1]
+        } else {
+            bytes.as_slice()
+        };
         digest.update((name.len() as u32).to_le_bytes());
         digest.update(name.as_bytes());
-        digest.update((bytes.len() as u64).to_le_bytes());
-        digest.update(Sha256::digest(bytes));
+        digest.update((content.len() as u64).to_le_bytes());
+        digest.update(Sha256::digest(content));
     }
-    format!("{:x}", digest.finalize())
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+// These stateless boundary helpers are mirrored in Jade, Pishoo and the store.
+fn waz_toml(bytes: &[u8]) -> WazResult<(serde_json::Value, usize)> {
+    use serde_json::Value;
+    let source = std::str::from_utf8(bytes)?;
+    let document: Value = toml::from_str(source)?;
+    if document.get("signature").is_none() {
+        return Ok((document, bytes.len()));
+    }
+    let positions: std::collections::BTreeMap<String, toml::Spanned<Value>> =
+        toml::from_str(source)?;
+    let span = positions
+        .get("signature")
+        .ok_or("missing signature table")?
+        .span();
+    let boundary = span.start;
+    let after_header = &source[span.end..];
+    if source.get(span) != Some("[signature]")
+        || (boundary != 0 && bytes[boundary - 1] != b'\n')
+        || !(after_header.is_empty()
+            || after_header.starts_with('\n')
+            || after_header.starts_with("\r\n"))
+    {
+        return Err("signature must use a final [signature] table on its own line".into());
+    }
+    if bytes.len() - boundary > 64 * 1024 {
+        return Err("publisher signature exceeds 64 KiB".into());
+    }
+    let unsigned: Value = toml::from_str(&source[..boundary])?;
+    let suffix: Value = toml::from_str(&source[boundary..])?;
+    let mut expected = document.clone();
+    expected
+        .as_object_mut()
+        .ok_or("manifest must be a table")?
+        .remove("signature");
+    if unsigned != expected
+        || suffix.as_object().is_none_or(|fields| fields.len() != 1)
+        || suffix["signature"] != document["signature"]
+    {
+        return Err("signature must be last and contain only its own fields".into());
+    }
+    Ok((document, boundary))
+}
+
+pub(super) fn waz_manifest(
+    files: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> WazResult<serde_json::Value> {
+    if let Some(bytes) = files.get("manifest.toml") {
+        Ok(waz_toml(bytes)?.0)
+    } else {
+        Ok(serde_json::from_slice(
+            files
+                .get("manifest.json")
+                .ok_or("missing package manifest")?,
+        )?)
+    }
+}
+
+pub(super) fn waz_signature(
+    files: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> WazResult<serde_json::Value> {
+    if files.contains_key("manifest.toml") {
+        let mut signature = waz_manifest(files)?["signature"].clone();
+        let fields = signature
+            .as_object_mut()
+            .ok_or("missing publisher signature")?;
+        if fields.len() != 3
+            || !fields.contains_key("version")
+            || !fields.contains_key("certificates")
+        {
+            return Err("unsupported signature envelope".into());
+        }
+        let value = fields.remove("value").ok_or("missing signature value")?;
+        fields.insert("signature".into(), value);
+        Ok(signature)
+    } else {
+        Ok(serde_json::from_slice(
+            files
+                .get("signature.json")
+                .ok_or("missing publisher signature")?,
+        )?)
+    }
+}
+
+pub(super) fn waz_backend(files: &std::collections::BTreeMap<String, Vec<u8>>) -> Option<&Vec<u8>> {
+    files.get("backend.wasm").or_else(|| {
+        files
+            .iter()
+            .find(|(name, _)| name.starts_with("wasm/"))
+            .map(|(_, bytes)| bytes)
+    })
+}
+
+fn waz_layout(
+    files: &std::collections::BTreeMap<String, Vec<u8>>,
+    document: &serde_json::Value,
+) -> WazResult<()> {
+    let modern = files.contains_key("manifest.toml");
+    let format = if modern { "waz/2" } else { "waz/1" };
+    if document["format"] != format
+        || document.as_object().is_none_or(|fields| {
+            fields.keys().any(|key| {
+                !(matches!(
+                    key.as_str(),
+                    "format" | "package" | "dependencies" | "backend" | "frontend"
+                ) || modern && matches!(key.as_str(), "docs" | "signature"))
+            })
+        })
+    {
+        return Err("unsupported WAZ manifest format or field".into());
+    }
+    if modern
+        && document["package"]["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("std/"))
+        && !matches!(
+            document["package"]["author"].as_str(),
+            Some("std.dhttp.net" | "dev.genmeta.tech.dhttp.net")
+        )
+    {
+        return Err("std/ package names require a standard publisher".into());
+    }
+    let backend = if modern {
+        format!(
+            "wasm/{}.wasm",
+            document["package"]["name"]
+                .as_str()
+                .ok_or("missing package name")?
+        )
+    } else {
+        "backend.wasm".to_owned()
+    };
+    let frontend = if modern { "web" } else { "public" };
+    let prefix = format!("{frontend}/");
+    let has_frontend = document.get("frontend").is_some();
+    let has_backend = document.get("backend").is_some();
+    if (has_backend && document["backend"] != backend)
+        || (has_frontend && document["frontend"] != frontend)
+        || has_backend != files.contains_key(&backend)
+        || has_frontend != files.keys().any(|name| name.starts_with(&prefix))
+        || (has_frontend && !files.contains_key(&format!("{prefix}index.html")))
+        || (!has_backend && !has_frontend)
+        || files
+            .keys()
+            .any(|name| name.starts_with("wasm/") && name != &backend)
+    {
+        return Err("WAZ manifest runtime paths disagree with package files".into());
+    }
+    if modern {
+        if files.keys().any(|name| {
+            matches!(
+                name.as_str(),
+                "manifest.json" | "signature.json" | "backend.wasm" | "README.md" | "CHANGELOG.md"
+            ) || name.starts_with("public/")
+        }) {
+            return Err("WAZ v2 contains legacy package entries".into());
+        }
+        if let Some(docs) = document.get("docs") {
+            let fields = docs.as_object().ok_or("docs must be a table")?;
+            for (key, value) in fields {
+                let path = value.as_str().ok_or("document locations must be strings")?;
+                match key.as_str() {
+                    "manual" if path == "docs/manual.md" && files.contains_key(path) => {}
+                    "readme" | "changelog" => {
+                        let url = url::Url::parse(path)?;
+                        if url.scheme() != "https"
+                            || url.host_str().is_none()
+                            || !url.username().is_empty()
+                            || url.password().is_some()
+                            || path.chars().any(char::is_whitespace)
+                        {
+                            return Err(
+                                "external document links require HTTPS URLs without credentials"
+                                    .into(),
+                            );
+                        }
+                    }
+                    _ => return Err("unknown document field or missing docs/manual.md".into()),
+                }
+            }
+        }
+        for (name, bytes) in files.iter().filter(|(name, _)| name.starts_with("docs/")) {
+            if !name.ends_with(".md") {
+                return Err("package manuals must be Markdown files".into());
+            }
+            std::str::from_utf8(bytes)?;
+        }
+    } else if files.keys().any(|name| {
+        name == "manifest.toml"
+            || name.starts_with("wasm/")
+            || name.starts_with("web/")
+            || name.starts_with("docs/")
+    }) {
+        return Err("WAZ v1 contains unsupported package entries".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -740,4 +907,4 @@ mod tests;
 #[path = "../../tests/common/package_format.rs"]
 mod test_support;
 #[cfg(test)]
-pub(crate) use test_support::{runtime_fixture, waz_write};
+pub(crate) use test_support::{runtime_fixture, test_payload_digest, waz_write};

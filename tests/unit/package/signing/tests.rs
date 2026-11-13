@@ -281,11 +281,12 @@ fn legacy_registry_migration_keeps_evidence_unknown_and_preserves_rows() {
     crate::setup::load_server_config(&profile).unwrap();
     let db =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    db.execute_batch("DROP TABLE package_dependency; DROP TABLE package;")
+    db.execute_batch("DROP TABLE package_operation; DROP TABLE package_capability; DROP TABLE package_root; DROP TABLE package_active; DROP TABLE package_transaction; DROP TABLE package_dependency; DROP TABLE package;")
         .unwrap();
-    db.execute_batch(include_str!(
-        "../../../../src/package/sql/compat/v3/schema.sql"
-    ))
+    db.execute_batch(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/package/v3/schema.sql"
+    )))
     .unwrap();
     db.execute("INSERT INTO package(name,author,version,has_lib,has_app) VALUES('legacy','alice.dhttp.net','1.0.0',0,1)",[]).unwrap();
     drop(db);

@@ -965,13 +965,7 @@ fn interrupted_package_updates_recover_both_resources_at_the_database_commit_bou
                 crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
                     .unwrap();
             db.execute("INSERT INTO package(name,author,version,has_lib,has_app) VALUES('notes',?1,'2.0.0',1,1)", [author]).unwrap();
-            let facts: String = db
-                .query_row(
-                    include_str!("../../../../src/package/sql/compat/v3/registration_facts.sql"),
-                    ["notes"],
-                    |r| r.get(0),
-                )
-                .unwrap();
+            let facts: String = crate::package::registration_snapshot(&db, "notes", false).unwrap();
             if !committed {
                 db.execute("UPDATE package SET version='1.0.0' WHERE name='notes'", [])
                     .unwrap();
@@ -1046,13 +1040,7 @@ fn interrupted_dependency_update_recovers_the_entire_batch_even_when_one_package
         // Visit the same-version member first: its matching facts alone must
         // never be mistaken for a successful transaction.
         for name in ["workspace", "profile"] {
-            let facts: String = db
-                .query_row(
-                    include_str!("../../../../src/package/sql/compat/v3/registration_facts.sql"),
-                    [name],
-                    |r| r.get(0),
-                )
-                .unwrap();
+            let facts: String = crate::package::registration_snapshot(&db, name, false).unwrap();
             std::fs::create_dir_all(stage.join(name)).unwrap();
             entries.push(serde_json::json!({"id":format!("alice.dhttp.net/{name}"),"directory":name,"facts":facts,"resources":[
                 {"kind":"lib","old":name=="profile","new":name=="profile"},

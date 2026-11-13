@@ -60,7 +60,7 @@ pub(crate) fn capabilities_router(profile: IdentityProfile) -> Router {
                         return Err(Error::InvalidConfig("capability registration missing; install/reinstall Libs using normal installation".into()));
                     }
                     let author: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('lib') WHERE name='author')",
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('installed_lib') WHERE name='author')",
                         [], |row| row.get(0),
                     )?;
                     let (key, lib_key) = if author { ("lib_name", "name") } else { ("lib_id", "id") };
@@ -71,7 +71,7 @@ pub(crate) fn capabilities_router(profile: IdentityProfile) -> Router {
                     let mut permissions = BTreeMap::<String, BTreeMap<String, BTreeSet<String>>>::new();
                     let mut titles = BTreeMap::<String, Value>::new();
                     let mut statement = tx.prepare(&format!(
-                        "SELECT ({package}),c.title,CASE WHEN coalesce({standard},0)=0 AND substr(o.path,1,5)='/std/' THEN '/'||l.name||substr(o.path,5) ELSE o.path END,o.method FROM lib_capability c JOIN lib l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operation o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
+                        "SELECT ({package}),c.title,CASE WHEN coalesce({standard},0)=0 AND substr(o.path,1,5)='/std/' THEN '/'||l.name||substr(o.path,5) ELSE o.path END,o.method FROM lib_capability c JOIN installed_lib l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operation o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
                     ))?;
                     for row in statement.query_map([], |row| Ok((
                         row.get::<_, String>(0)?, row.get::<_, String>(1)?,
@@ -197,7 +197,10 @@ fn write_declarations(
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let installed: Option<(Option<String>, bool)> = tx
         .query_row(
-            "SELECT author,has_app FROM package WHERE name=?1 AND has_lib=1",
+            r#"
+SELECT p.author,EXISTS(SELECT 1 FROM pkg_registry.package a WHERE a.name=p.name AND a.has_app=1)
+FROM pkg_registry.package p WHERE p.name=?1 AND p.has_lib=1 LIMIT 1
+"#,
             [name],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -224,20 +227,28 @@ fn write_declarations(
             format!("/{name}")
         };
         if installed.as_ref().is_some_and(|(_, has_app)| *has_app) {
-            available.insert((
-                "GET".to_owned(),
-                format!("/app/{}", name.replace('/', "%2F")),
-            ));
+            available.insert(("GET".to_owned(), format!("/app/{}", name.to_owned())));
         }
         let id = installed
             .as_ref()
             .and_then(|(author, _)| author.as_deref())
             .map_or_else(|| name.to_owned(), |author| format!("{author}/{name}"));
-        let bytes = crate::package::disk_bytes(profile, &crate::package::lib_root(profile)?, &id)?;
-        let openapi = crate::package::validate_lib(&bytes)?;
-        for (path, item) in openapi.paths.as_ref().unwrap() {
-            for (method, _) in item.methods() {
-                available.insert((method.as_str().to_owned(), format!("{prefix}{path}")));
+        let root = crate::package::lib_root(profile)?;
+        for version in crate::package::installed_package_versions(profile, Some(&id))? {
+            if version["has_lib"] != true {
+                continue;
+            }
+            let bytes = crate::package::disk_version_bytes(
+                profile,
+                &root,
+                &id,
+                version["version"].as_str(),
+            )?;
+            let openapi = crate::package::validate_lib(&bytes)?;
+            for (path, item) in openapi.paths.as_ref().unwrap() {
+                for (method, _) in item.methods() {
+                    available.insert((method.as_str().to_owned(), format!("{prefix}{path}")));
+                }
             }
         }
     }

@@ -235,6 +235,7 @@ async fn root_guest_error_and_cancellation_repair_actual_preopened_directory() {
             );
             tokio::time::pause();
             Outgoing::Granted {
+                source: None,
                 endpoint: endpoint.clone(),
                 access,
                 api,

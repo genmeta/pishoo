@@ -5,7 +5,7 @@ use tower::ServiceExt;
 
 use super::*;
 
-fn load(sandbox: &Sandbox, directory: &Path, paths: &str) -> Arc<Lib> {
+pub(super) fn load(sandbox: &Sandbox, directory: &Path, paths: &str) -> Arc<Lib> {
     fn leb(mut n: usize, output: &mut Vec<u8>) {
         loop {
             let byte = (n & 127) as u8;
@@ -633,4 +633,68 @@ async fn app_static_files_are_read_on_demand_and_open_responses_survive_replacem
         status(&router, Method::GET, "/app/hello/assets/app.js").await,
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn hierarchical_app_routes_keep_the_full_name_for_pages_assets_and_redirects() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("assets")).unwrap();
+    std::fs::write(root.path().join("index.html"), b"dashboard").unwrap();
+    std::fs::write(root.path().join("assets/app.js"), b"script").unwrap();
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    sandbox.apps.insert(
+        "alice.dhttp.net/live/dashboard".into(),
+        (
+            "1.0.0".into(),
+            Arc::new(std::fs::File::open(root.path()).unwrap()),
+        ),
+    );
+    let router = api_router(
+        &sandbox,
+        crate::test_support::identity::endpoint("alice.dhttp.net"),
+    );
+    let redirect = router
+        .clone()
+        .oneshot(request(Method::GET, "/app/live/dashboard?tab=1"))
+        .await
+        .unwrap();
+    assert_eq!(redirect.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(redirect.headers()["location"], "/app/live/dashboard/?tab=1");
+    for (path, expected) in [
+        ("/app/live/dashboard/", &b"dashboard"[..]),
+        ("/app/live/dashboard/settings/profile", &b"dashboard"[..]),
+        ("/app/live/dashboard/assets/app.js", &b"script"[..]),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request(Method::GET, path))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
+            expected
+        );
+    }
+    for path in [
+        "/app/live/",
+        "/app/live/dashboard-other/",
+        "/app/dashboard/",
+    ] {
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(Method::GET, path))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
 }

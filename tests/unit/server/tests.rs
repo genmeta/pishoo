@@ -1401,9 +1401,10 @@ async fn permission_catalog_qualifies_group_titles_and_preserves_legacy_registra
                 INSERT INTO lib_capability VALUES ('dev.dhttp.net/message', 'read', 'read message'), ('dev.dhttp.net/message', 'details', 'read message'), ('dev.dhttp.net/message', 'empty', 'empty');
                 INSERT INTO lib_capability_operation VALUES ('dev.dhttp.net/message', 'read', '/std/message', 'GET'), ('dev.dhttp.net/message', 'read', '/std/message', 'HEAD'), ('dev.dhttp.net/message', 'details', '/std/message', 'GET'), ('dev.dhttp.net/message', 'details', '/std/message/history', 'GET');").unwrap();
         } else {
-            db.execute_batch(include_str!(
-                "../../../src/package/sql/compat/v3/schema.sql"
-            ))
+            db.execute_batch(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/package/v3/schema.sql"
+            )))
             .unwrap();
             db.execute_batch("INSERT INTO package (has_lib,has_app,name, author, version) VALUES (1,0,'message', 'dev.dhttp.net', '1.0.0');
                 INSERT INTO lib_capability VALUES ('message', 'read', 'read message'), ('message', 'details', 'read message'), ('message', 'empty', 'empty');

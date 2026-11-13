@@ -10,6 +10,7 @@ pub enum Error {
         code: &'static str,
         status: StatusCode,
     },
+    PackageInUse(Vec<(String, String)>),
     SigningStatusUnavailable,
     IdentityMismatch,
     MissingHandshake,
@@ -33,6 +34,7 @@ impl Error {
     pub(crate) fn status(&self) -> StatusCode {
         match self {
             Self::PackagePolicy { status, .. } => *status,
+            Self::PackageInUse(_) => StatusCode::CONFLICT,
             Self::SigningStatusUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::IdentityMismatch => StatusCode::MISDIRECTED_REQUEST,
@@ -53,6 +55,10 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PackagePolicy { code, .. } => f.write_str(code),
+            Self::PackageInUse(dependents) => write!(
+                f,
+                "package is required by installed versions: {dependents:?}"
+            ),
             Self::SigningStatusUnavailable => f.write_str("signing_status_unavailable"),
             Self::BadRequest(s)
             | Self::InvalidConfig(s)

@@ -102,6 +102,7 @@ async fn native_files_real_wasm_scope_and_message_authorization() {
             },
             tasks.clone(),
             Outgoing::Granted {
+                source: None,
                 endpoint: endpoint.clone(),
                 access: access.clone(),
                 api: api.clone(),
@@ -511,6 +512,7 @@ async fn native_files_real_wasm_scope_and_message_authorization() {
                         &handshake,
                         tasks.clone(),
                         Outgoing::Granted {
+                            source: None,
                             endpoint: endpoint.clone(),
                             access: access.clone(),
                             api: api.clone(),
@@ -704,6 +706,15 @@ async fn native_files_real_wasm_scope_and_message_authorization() {
             .unwrap(),
         0
     );
+    assert!(
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM native_files WHERE id=?1)",
+            [id],
+            |row| row.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
+    assert!(!root.path().join("message/.file/database").exists());
     // Pre-native completed attachments stay readable through the new business
     // POST without rewriting stored messages or moving their historical bytes.
     let legacy = json!({"version":1,"name":"historical.txt","type":"text/plain","size":3,"blake3":blake3::hash(b"old").to_hex().to_string(),"day":"2026-11-01"});
@@ -870,6 +881,7 @@ async fn native_files_explicit_pull_review_range_expiry_and_offline_copy() {
             },
             tasks.clone(),
             Outgoing::Granted {
+                source: None,
                 endpoint: endpoint.clone(),
                 access: access.clone(),
                 api: api.clone(),
@@ -916,9 +928,17 @@ async fn native_files_explicit_pull_review_range_expiry_and_offline_copy() {
     assert_eq!(status, 502);
     // No guest/native operation is active here; mutate only this isolated test index.
     {
-        let db = rusqlite::Connection::open(directory.join(".file/database")).unwrap();
-        db.execute("UPDATE files SET created_at=1 WHERE id=?1", [&first_id])
-            .unwrap();
+        let db = rusqlite::Connection::open_with_flags_and_vfs(
+            directory.join("database"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+            "unix-dotfile",
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE native_files SET created_at=1 WHERE id=?1",
+            [&first_id],
+        )
+        .unwrap();
     }
     mode.store(1, Ordering::SeqCst);
     let (status, result) = pull().await;

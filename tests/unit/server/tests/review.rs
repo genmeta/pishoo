@@ -141,9 +141,10 @@ async fn package_recovery_rolls_back_partial_updates_and_cleans_committed_update
         if !signing_evidence {
             db.execute_batch("DROP TABLE package_dependency; DROP TABLE package;")
                 .unwrap();
-            db.execute_batch(include_str!(
-                "../../../../src/package/sql/compat/v3/schema.sql"
-            ))
+            db.execute_batch(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/package/v3/schema.sql"
+            )))
             .unwrap();
             db.execute_batch("PRAGMA pkg_registry.user_version=3;")
                 .unwrap();
@@ -168,13 +169,7 @@ async fn package_recovery_rolls_back_partial_updates_and_cleans_committed_update
         }
         let db = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
-        let facts: String = db
-            .query_row(
-                include_str!("../../../../src/package/sql/compat/v3/registration_facts.sql"),
-                ["hello"],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let facts: String = crate::package::registration_snapshot(&db, "hello", false).unwrap();
         std::fs::write(stage.join(".transaction.json"),json!({"id":"alice.dhttp.net/hello","facts":if committed{facts}else{"uncommitted".into()},"resources":[{"kind":"lib","old":true,"new":true},{"kind":"app","old":true,"new":true}]}).to_string()).unwrap();
         initialize_directories(&profile).unwrap();
         assert_eq!(
@@ -204,14 +199,8 @@ async fn package_recovery_matches_v4_signing_facts_for_installs_and_updates() {
                 db.execute("INSERT INTO package(name,author,version,has_lib,has_app,author_owner_hash,package_sha256,signer_leaf_fingerprint_sha256) VALUES('hello','alice.dhttp.net','2.0.0',1,1,'owner','old-digest','old-signer')", []).unwrap();
             }
             let tx = db.transaction().unwrap();
-            tx.execute("INSERT INTO package(name,author,version,has_lib,has_app,author_owner_hash,package_sha256,signer_leaf_fingerprint_sha256) VALUES('hello','alice.dhttp.net','2.0.0',1,1,'owner','new-digest','new-signer') ON CONFLICT(name) DO UPDATE SET package_sha256=excluded.package_sha256,signer_leaf_fingerprint_sha256=excluded.signer_leaf_fingerprint_sha256", []).unwrap();
-            let facts: String = tx
-                .query_row(
-                    include_str!("../../../../src/package/sql/registration_facts.sql"),
-                    ["hello"],
-                    |r| r.get(0),
-                )
-                .unwrap();
+            tx.execute("INSERT INTO package(name,author,version,has_lib,has_app,author_owner_hash,package_sha256,signer_leaf_fingerprint_sha256) VALUES('hello','alice.dhttp.net','2.0.0',1,1,'owner','new-digest','new-signer') ON CONFLICT(name,version) DO UPDATE SET package_sha256=excluded.package_sha256,signer_leaf_fingerprint_sha256=excluded.signer_leaf_fingerprint_sha256", []).unwrap();
+            let facts: String = crate::package::registration_snapshot(&tx, "hello", true).unwrap();
             if committed {
                 tx.commit().unwrap();
             } else {
@@ -291,13 +280,7 @@ async fn package_recovery_restores_uncommitted_removal_and_finishes_committed_re
         std::fs::write(stage.join("old-app/index.html"), b"app").unwrap();
         let db = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
-        let facts: String = db
-            .query_row(
-                include_str!("../../../../src/package/sql/compat/v3/registration_facts.sql"),
-                ["hello"],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let facts: String = crate::package::registration_snapshot(&db, "hello", false).unwrap();
         std::fs::write(stage.join(".transaction.json"),json!({"id":"alice.dhttp.net/hello","facts":if committed{facts}else{"uncommitted".into()},"resources":[{"kind":"lib","old":true,"new":false},{"kind":"app","old":true,"new":false}]}).to_string()).unwrap();
         initialize_directories(&profile).unwrap();
         assert_eq!(profile.join("lib/hello.wasm").exists(), !committed);
@@ -308,29 +291,31 @@ async fn package_recovery_restores_uncommitted_removal_and_finishes_committed_re
 
 #[tokio::test]
 async fn package_recovery_restores_versioned_and_legacy_filenames_after_interruption() {
-    for old_leaf in ["hello.wasm", "hello_1.0.0.wasm"] {
+    for (name, old_leaf) in [
+        ("hello", "hello.wasm"),
+        ("hello", "hello.wasm.1.0.0"),
+        ("comm/group", "comm%2Fgroup.wasm.1.0.0"),
+        ("comm/group", "comm/group.wasm.1.0.0"),
+    ] {
         for phase in 0..=3 {
             let root = tempfile::tempdir().unwrap();
             let profile = identity(root.path()).await;
             let stage = profile.join(".pishoo-versioned-test");
             std::fs::create_dir_all(stage.join("new-lib")).unwrap();
-            let new_leaf = "hello_2.0.0.wasm";
+            let new_leaf = format!("{name}.wasm.2.0.0");
             let old = profile.join(format!("lib/{old_leaf}"));
             let new = profile.join(format!("lib/{new_leaf}"));
-            let candidate = stage.join("new-lib").join(new_leaf);
+            let candidate = stage.join("new-lib").join(&new_leaf);
+            std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
             std::fs::write(&old, b"old-lib").unwrap();
             std::fs::write(&candidate, b"new-lib").unwrap();
             let db =
                 crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
                     .unwrap();
-            db.execute("INSERT INTO package(name,author,version,has_lib,has_app) VALUES('hello','alice.dhttp.net',?1,1,0)", [if phase == 3 { "2.0.0" } else { "1.0.0" }]).unwrap();
-            let facts: String = db
-                .query_row(
-                    include_str!("../../../../src/package/sql/registration_facts.sql"),
-                    ["hello"],
-                    |r| r.get(0),
-                )
-                .unwrap();
+            db.execute("INSERT INTO package(name,author,version,has_lib,has_app) VALUES(?1,'alice.dhttp.net',?2,1,0)", [name, if phase == 3 { "2.0.0" } else { "1.0.0" }]).unwrap();
+            let facts: String = crate::package::registration_snapshot(&db, name, true).unwrap();
             drop(db);
             if phase >= 1 {
                 std::fs::rename(&old, stage.join("old-lib")).unwrap();
@@ -338,9 +323,9 @@ async fn package_recovery_restores_versioned_and_legacy_filenames_after_interrup
             if phase >= 2 {
                 std::fs::rename(&candidate, &new).unwrap();
             }
-            let journal = json!({"id":"alice.dhttp.net/hello","facts":if phase == 3 {facts} else {"uncommitted".into()},"resources":[
+            let journal = json!({"id":format!("alice.dhttp.net/{name}"),"facts":if phase == 3 {facts} else {"uncommitted".into()},"resources":[
                 {"kind":"lib","old":true,"new":true,"old_leaf":old_leaf,"new_leaf":new_leaf},
-                {"kind":"app","old":false,"new":false,"old_leaf":"hello","new_leaf":"hello"}
+                {"kind":"app","old":false,"new":false,"old_leaf":name.replace('/', "%2F"),"new_leaf":name.replace('/', "%2F")}
             ]});
             std::fs::write(stage.join(".transaction.json"), journal.to_string()).unwrap();
             initialize_directories(&profile).unwrap();

@@ -16,8 +16,10 @@ mod signing;
 mod store;
 
 pub(crate) use files::{
-    app_file, disk_bytes, installed_apps, installed_packages, lib_root, migrate_legacy_packages,
-    remove_package, valid_id,
+    app_file, disk_bytes, disk_version_bytes, has_signing_evidence, installed_apps,
+    installed_package_versions, installed_packages, installed_version, lib_root,
+    migrate_legacy_packages, recover_version_publication, registration_snapshot, remove_package,
+    remove_package_version, valid_id,
 };
 #[cfg(test)]
 pub(crate) use files::{
@@ -69,7 +71,7 @@ fn lib_metadata(package: &PackageFiles, id: Option<&str>) -> serde_json::Value {
         Err(error) => return serde_json::json!({"id":id,"error":error.to_string()}),
     };
     let mut endpoints = Vec::new();
-    if package.get("backend.wasm").is_some() {
+    if format::waz_backend(package).is_some() {
         let identity = id.unwrap_or_else(|| value["id"].as_str().unwrap());
         let prefix = if crate::package::is_standard_author(identity.split('/').next().unwrap_or(""))
         {
@@ -77,9 +79,7 @@ fn lib_metadata(package: &PackageFiles, id: Option<&str>) -> serde_json::Value {
         } else {
             format!(
                 "/{}",
-                identity
-                    .split_once('/')
-                    .map_or(&identity[..], |(_, name)| name)
+                identity.split_once('/').map_or(identity, |(_, name)| name)
             )
         };
         let openapi: oas3::OpenApiV3Spec = match package_openapi(package).and_then(|bytes| {
@@ -116,11 +116,23 @@ fn lib_metadata(package: &PackageFiles, id: Option<&str>) -> serde_json::Value {
 // Installation metadata belongs to config.db. Neither payload availability nor
 // the loaded version affects the installed catalog.
 fn installed_catalog(profile: &IdentityProfile, name: Option<&str>) -> Result<serde_json::Value> {
+    installed_catalog_version(profile, name, None)
+}
+
+fn installed_catalog_version(
+    profile: &IdentityProfile,
+    name: Option<&str>,
+    version: Option<&str>,
+) -> Result<serde_json::Value> {
     use rusqlite::OptionalExtension;
     let mut value = if let Some(name) = name {
         let conn = crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let id: String = conn.query_row("SELECT CASE WHEN author IS NULL THEN name ELSE author||'/'||name END FROM package WHERE name=?1",[name],|r|r.get(0)).optional()?.ok_or(Error::RouteNotFound)?;
-        installed_packages(profile, Some(&id))?
+        let id: String = conn.query_row("SELECT CASE WHEN author IS NULL THEN name ELSE author||'/'||name END FROM package_current WHERE name=?1",[name],|r|r.get(0)).optional()?.ok_or(Error::RouteNotFound)?;
+        if let Some(version) = version {
+            installed_version(profile, &id, version)?
+        } else {
+            installed_packages(profile, Some(&id))?
+        }
     } else {
         installed_packages(profile, None)?
     };
@@ -155,6 +167,10 @@ pub(crate) fn pkg_management_router(
             let mut response = pkg_management_request(profile, endpoint, sandbox, request)
                 .await
                 .unwrap_or_else(|error| {
+                    if let Error::PackageInUse(dependents) = &error {
+                        let dependents = dependents.iter().map(|(name, version)| serde_json::json!({"name":name,"version":version})).collect::<Vec<_>>();
+                        return (http::StatusCode::CONFLICT, axum::Json(serde_json::json!({"error":{"code":"package_in_use","dependents":dependents}}))).into_response();
+                    }
                     if let Error::PackagePolicy { code, status } = &error {
                         return (*status, axum::Json(serde_json::json!({"error":{"code":code,"retryable":false}}))).into_response();
                     }
@@ -238,18 +254,28 @@ async fn pkg_management_request(
         ));
     }
     let mut id = None;
+    let mut version = None;
     if let Some(query) = request.uri().query() {
         for item in query.split('&') {
             let (key, value) = item
                 .split_once('=')
-                .ok_or_else(|| Error::BadRequest("expected name query parameter".into()))?;
-            if key != "name" || id.is_some() || listing {
-                return Err(Error::BadRequest("unsupported query parameters".into()));
-            }
-            let name = percent_encoding::percent_decode_str(value)
+                .ok_or_else(|| Error::BadRequest("expected query parameter".into()))?;
+            let value = percent_encoding::percent_decode_str(value)
                 .decode_utf8()
-                .map_err(|_| Error::BadRequest("invalid package name encoding".into()))?;
-            id = Some(name.into_owned());
+                .map_err(|_| Error::BadRequest("invalid query encoding".into()))?
+                .into_owned();
+            match key {
+                "name" if id.is_none() && !listing => id = Some(value),
+                "version" if version.is_none() && !listing => {
+                    let check = http::Request::builder()
+                        .header("pishoo-package-version", &value)
+                        .body(axum::body::Body::empty())
+                        .map_err(|_| Error::BadRequest("invalid package version".into()))?;
+                    crate::sandbox::requested_version(&check)?;
+                    version = Some(value);
+                }
+                _ => return Err(Error::BadRequest("unsupported query parameters".into())),
+            }
         }
     }
     if let Some(id) = &id {
@@ -377,16 +403,31 @@ async fn pkg_management_request(
     }
     if method == Method::GET {
         let detail = id.is_some();
-        let mut value =
-            tokio::task::spawn_blocking(move || installed_catalog(&profile, id.as_deref()))
-                .await??;
+        let requested_version = version.clone();
+        let mut value = tokio::task::spawn_blocking(move || match version.as_deref() {
+            Some(version) => installed_catalog_version(&profile, id.as_deref(), Some(version)),
+            None => installed_catalog(&profile, id.as_deref()),
+        })
+        .await??;
         if detail {
-            let loaded = sandbox
-                .read()
-                .unwrap()
-                .libs
-                .get(value["id"].as_str().unwrap())
-                .cloned();
+            let loaded = {
+                let sandbox = sandbox.read().unwrap();
+                let id = value["id"].as_str().unwrap();
+                sandbox
+                    .dev_libs
+                    .get(id)
+                    .map(|(_, lib)| lib)
+                    .filter(|lib| {
+                        requested_version
+                            .as_deref()
+                            .is_none_or(|version| version == lib.openapi.info.version)
+                    })
+                    .or_else(|| match requested_version.as_deref() {
+                        Some(version) => sandbox.versions.get(&(id.to_owned(), version.to_owned())),
+                        None => sandbox.libs.get(id),
+                    })
+                    .cloned()
+            };
             // Installation facts and the current runtime are distinct. Local
             // preview code can differ from the registered release; its APIs
             // must still be discoverable under this exact installed identity.
@@ -398,7 +439,7 @@ async fn pkg_management_request(
                     if crate::package::is_standard_author(id.split('/').next().unwrap_or("")) {
                         "/std".to_owned()
                     } else {
-                        format!("/{}", id.split_once('/').map_or(&id[..], |(_, name)| name))
+                        format!("/{}", id.split_once('/').map_or(id, |(_, name)| name))
                     };
                 let mut endpoints = Vec::new();
                 if let Some(paths) = &lib.openapi.paths {
@@ -445,7 +486,7 @@ async fn pkg_management_request(
         }
         let conn = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(Duration::from_secs(3))?;
-        let registered: Option<String> = conn.query_row("SELECT CASE WHEN author IS NULL THEN name ELSE author||'/'||name END FROM package WHERE name=?1",[name],|r|r.get(0)).optional()?;
+        let registered: Option<String> = conn.query_row("SELECT CASE WHEN author IS NULL THEN name ELSE author||'/'||name END FROM package_current WHERE name=?1",[name],|r|r.get(0)).optional()?;
         if let Some(expected) = &expected_id
             && registered.as_deref().map(str::as_bytes) != Some(expected.as_bytes())
         {
@@ -467,9 +508,18 @@ async fn pkg_management_request(
                 "invalid installed package name".into(),
             ));
         }
-        remove_package(&profile, &registered)?;
-        sandbox.apps.remove(&registered);
-        if let Some(old) = sandbox.libs.remove(&registered) { old.stream_retired.cancel(); }
+        if let Some(version) = version.as_deref() {
+            remove_package_version(&profile, &registered, Some(version))?;
+        } else { remove_package(&profile, &registered)?; }
+        sandbox.versions.retain(|(id, candidate_version), lib| {
+            let keep = id != &registered || version.as_deref().is_some_and(|version| version != candidate_version);
+            if !keep { lib.stream_retired.cancel(); }
+            keep
+        });
+        if version.is_none() {
+            sandbox.apps.remove(&registered);
+            if let Some(old) = sandbox.libs.remove(&registered) { old.stream_retired.cancel(); }
+        }
         Ok(())
     })
     .await??;

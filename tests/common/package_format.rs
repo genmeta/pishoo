@@ -21,3 +21,7 @@ pub(crate) fn waz_write(files: &std::collections::BTreeMap<String, Vec<u8>>) -> 
 pub(crate) fn runtime_fixture(bytes: &[u8]) -> Vec<u8> {
     waz_read(bytes).unwrap().remove("backend.wasm").unwrap()
 }
+
+pub(crate) fn test_payload_digest(files: &PackageFiles) -> String {
+    waz_payload(files).unwrap()
+}

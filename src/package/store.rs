@@ -51,10 +51,7 @@ async fn resolve_author(endpoint: &dhttp::Endpoint, name: &str, version: &str) -
     let metadata: Value = serde_json::from_slice(
         &store_get(
             endpoint,
-            &format!(
-                "/store/v1/packages/{}/versions/{version}",
-                name.replace('/', "%2F")
-            ),
+            &format!("/store/v1/packages/{}/versions/{version}", name.to_owned()),
             8 * 1024 * 1024,
         )
         .await?,
@@ -98,7 +95,7 @@ async fn download_release(
     }
     let path = format!(
         "/store/v1/packages/{publisher}/{}/versions/{version}",
-        name.replace('/', "%2F")
+        name.to_owned()
     );
     let metadata: Value =
         serde_json::from_slice(&store_get(endpoint, &path, 8 * 1024 * 1024).await?)
@@ -137,6 +134,30 @@ pub(crate) async fn install_store_package(
     version: &str,
     sandbox: &Arc<RwLock<Sandbox>>,
 ) -> Result<Value> {
+    if let Some(installed) = super::files::installed_package_versions(profile, None)?
+        .iter()
+        .find(|installed| {
+            installed["name"] == name
+                && installed["version"] == version
+                && installed["author"].is_string()
+                && (publisher.is_empty() || installed["author"] == publisher)
+        })
+    {
+        let id = installed["id"]
+            .as_str()
+            .ok_or_else(|| Error::InvalidConfig("missing installed identity".into()))?
+            .to_owned();
+        let activated = tokio::task::block_in_place(|| {
+            let mut sandbox = sandbox.write().unwrap();
+            if sandbox.tasks.is_closed() {
+                return Err(Error::Denied);
+            }
+            super::files::activate_installed_version(profile, &id, version, &mut sandbox)
+        })?;
+        if let Some(activated) = activated {
+            return Ok(activated);
+        }
+    }
     let publisher = if publisher.is_empty() {
         resolve_author(endpoint, name, version).await?
     } else {
@@ -150,13 +171,10 @@ pub(crate) async fn install_store_package(
     let mut resources: Vec<(String, Vec<u8>, Value)> = Vec::new();
     while let Some((publisher, name, version)) = pending.pop() {
         let id = format!("{publisher}/{name}");
-        if let Some((_, _, proof)) = resources.iter().find(|(key, _, _)| key == &id) {
-            if proof["version"] != version {
-                return Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("conflicting dependency versions for {id}"),
-                )));
-            }
+        if resources
+            .iter()
+            .any(|(key, _, proof)| key == &id && proof["version"] == version)
+        {
             continue;
         }
         if resources.len() >= 100 {
@@ -273,9 +291,10 @@ fn order_packages(
                 })?,
             )?)?;
             if doc["dependencies"].as_array().unwrap().iter().all(|dep| {
-                ordered.iter().any(|(id, _, _)| {
-                    id.split_once('/').map(|(_, name)| name).or(Some(&id[..]))
-                        == dep["name"].as_str()
+                ordered.iter().any(|(id, _, proof)| {
+                    proof["version"] == dep["version"]
+                        && id.split_once('/').map(|(_, name)| name).or(Some(&id[..]))
+                            == dep["name"].as_str()
                         && dep["publisher"].as_str().is_none_or(|author| {
                             id.split_once('/')
                                 .is_some_and(|(publisher, _)| publisher == author)
@@ -422,9 +441,8 @@ pub(super) fn verify_release(
         ));
     }
     let document = package_metadata(&package)?;
-    let data = &package["signature.json"];
-    let envelope: Value =
-        serde_json::from_slice(data).map_err(|_| invalid("invalid signature envelope"))?;
+    let envelope = super::format::waz_signature(&package)
+        .map_err(|_| invalid("invalid signature envelope"))?;
     let dependencies = document["dependencies"]
         .as_array()
         .unwrap()

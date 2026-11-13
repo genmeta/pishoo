@@ -274,8 +274,11 @@ struct FileRecord {
 }
 
 fn record(db: &Connection, id: &str) -> Result<FileRecord, Failure> {
+    read_record(db, sql::FILE_RECORD, id)
+}
+fn read_record(db: &Connection, query: &str, id: &str) -> Result<FileRecord, Failure> {
     let row = db
-        .query_row(sql::FILE_RECORD, [id], |r| {
+        .query_row(query, [id], |r| {
             Ok(FileRecord {
                 id: r.get(0)?,
                 request_id: r.get(1)?,
@@ -320,7 +323,7 @@ fn content_dir(root: &Dir, value: &FileRecord) -> Result<Dir, Failure> {
     } else {
         archive.to_owned()
     };
-    directory(root, &path, false)
+    directory(&directory(root, ".file", false)?, &path, false)
 }
 fn content_name(value: &FileRecord) -> &str {
     value.storage_name.as_deref().unwrap_or("content")
@@ -364,27 +367,79 @@ async fn index<T: Send + 'static>(
     action: impl FnOnce(&mut Connection) -> Result<T, Failure> + Send + 'static,
 ) -> Result<T, Failure> {
     blocking(move || {
-        vfs::with(root, |db| {
+        vfs::with(root.clone(), |db| {
             db.execute_batch(include_str!("file/sql/schema.sql"))
                 .map_err(storage)?;
-            let has_name = |db: &Connection| -> Result<bool, Failure> {
-                db.query_row(sql::HAS_STORAGE_NAME, [], |r| r.get(0))
-                    .map_err(storage)
-            };
-            if !has_name(db)? {
-                let tx = db
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .map_err(storage)?;
-                if !has_name(&tx)? {
-                    tx.execute_batch(include_str!("file/sql/add_storage_name.sql"))
-                        .map_err(storage)?;
-                }
-                tx.commit().map_err(storage)?;
-            }
+            migrate_index(&root, db)?;
             action(db)
         })
     })
     .await
+}
+
+fn migrate_index(root: &Dir, db: &mut Connection) -> Result<(), Failure> {
+    match root.symlink_metadata(".file") {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io(error)),
+        Ok(_) => {}
+    }
+    let files = Arc::new(directory(root, ".file", false)?);
+    match files.symlink_metadata("database") {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io(error)),
+        Ok(_) => {}
+    }
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage)?;
+    vfs::with(files.clone(), |legacy| {
+        let old = legacy
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let has_name: bool = old
+            .query_row(sql::LEGACY_HAS_STORAGE_NAME, [], |row| row.get(0))
+            .map_err(storage)?;
+        let query = if has_name {
+            sql::LEGACY_FILE_RECORD
+        } else {
+            sql::LEGACY_ID_FILE_RECORD
+        };
+        let mut statement = old.prepare(sql::LEGACY_FILE_IDS).map_err(storage)?;
+        let mut ids = statement.query([]).map_err(storage)?;
+        while let Some(row) = ids.next().map_err(storage)? {
+            let id: String = row.get(0).map_err(storage)?;
+            let value = read_record(&old, query, &id)?;
+            tx.execute(
+                sql::IMPORT_FILE,
+                params![
+                    value.id,
+                    value.request_id,
+                    value.directory,
+                    value.name,
+                    value.media_type,
+                    value.size,
+                    value.offset,
+                    value.checkpoint,
+                    value.digest,
+                    value.created_at,
+                    value.storage_name
+                ],
+            )
+            .map_err(storage)?;
+            if record(&tx, &id)? != value {
+                return Err(fail(409, "file index migration conflict"));
+            }
+        }
+        drop(ids);
+        drop(statement);
+        old.commit().map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        // The destination's exclusive connection lock lasts through cleanup.
+        // A failed commit leaves the complete source available for retry.
+        files.remove_file("database").map_err(io)?;
+        files.open(".").map_err(io)?.sync_all().map_err(io)?;
+        Ok(())
+    })
 }
 
 pub(crate) fn router(root: Dir, library: Router) -> Router {
@@ -447,7 +502,6 @@ async fn serve(root: Arc<Dir>, request: Request<Body>) -> Result<Response, Failu
     if upload && one(request.headers(), "tus-resumable")? != Some("1.0.0") {
         return Err(fail(412, "unsupported tus version"));
     }
-    let root = Arc::new(blocking(move || directory(&root, ".file", true)).await?);
     if upload && method == Method::POST {
         return create(root, request).await;
     }
@@ -558,7 +612,7 @@ async fn create(root: Arc<Dir>, mut request: Request<Body>) -> Result<Response, 
             return Ok(value);
         }
         let id = random_id()?;
-        let dir = directory(&files, &location, true)?;
+        let dir = directory(&directory(&files, ".file", true)?, &location, true)?;
         let storage_name = create_content(&dir, &name)?;
         dir.into_std_file().sync_all().map_err(io)?;
         let state = serde_json::to_string(&Checkpoint {
@@ -665,7 +719,7 @@ async fn patch(
             .seek(SeekFrom::Start(offset - tail.len() as u64))
             .map_err(io)?;
         content.read_exact(&mut tail).map_err(io)?;
-        let temp = directory(&files, "temporary", true)?;
+        let temp = directory(&files, ".file/temporary", true)?;
         let name = random_id()?;
         Ok((state, tail, temp, name))
     })

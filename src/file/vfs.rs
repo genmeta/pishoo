@@ -17,22 +17,32 @@ struct Vfs {
     raw: sqlite3_vfs,
     root: Arc<Dir>,
     name: CString,
+    database: &'static str,
 }
 #[repr(C)]
 struct File {
     raw: sqlite3_file,
     file: Option<std::fs::File>,
     lock: c_int,
+    root: Option<Arc<Dir>>,
+    lock_name: &'static str,
 }
 
 pub(super) fn with<T>(
     root: Arc<Dir>,
     action: impl FnOnce(&mut Connection) -> Result<T, Failure>,
 ) -> Result<T, Failure> {
+    // Message keeps using an existing legacy business database on reopen.
+    let database = match root.symlink_metadata("message.db") {
+        Ok(_) => "message.db",
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "database",
+        Err(error) => return Err(super::io(error)),
+    };
     let mut vfs = Box::new(Vfs {
         raw: unsafe { std::mem::zeroed() },
         root,
         name: CString::new(format!("pishoo-file-{}", super::random_id()?)).unwrap(),
+        database,
     });
     vfs.raw.iVersion = 1;
     vfs.raw.szOsFile = std::mem::size_of::<File>() as c_int;
@@ -87,6 +97,14 @@ unsafe fn filename<'a>(name: *const c_char) -> Option<&'a str> {
         _ => None,
     }
 }
+unsafe fn physical_name(vfs: *mut sqlite3_vfs, name: &str) -> &'static str {
+    match ((*((*vfs).pAppData as *mut Vfs)).database, name) {
+        ("message.db", "database") => "message.db",
+        ("message.db", _) => "message.db-journal",
+        (_, "database") => "database",
+        _ => "database-journal",
+    }
+}
 unsafe extern "C" fn open(
     vfs: *mut sqlite3_vfs,
     name: *const c_char,
@@ -98,6 +116,7 @@ unsafe extern "C" fn open(
     let Some(name) = filename(name) else {
         return SQLITE_CANTOPEN;
     };
+    let name = physical_name(vfs, name);
     if flags & (SQLITE_OPEN_DELETEONCLOSE | SQLITE_OPEN_WAL) != 0 {
         return SQLITE_CANTOPEN;
     }
@@ -106,17 +125,28 @@ unsafe extern "C" fn open(
         | rustix::fs::OFlags::CLOEXEC
         | rustix::fs::OFlags::NONBLOCK;
     if flags & SQLITE_OPEN_CREATE != 0 {
-        options |= rustix::fs::OFlags::CREATE;
+        // Avoid macOS openat(O_CREAT)'s ENOENT race during first creation.
+        options |= rustix::fs::OFlags::CREATE | rustix::fs::OFlags::EXCL;
     }
     if flags & SQLITE_OPEN_EXCLUSIVE != 0 {
         options |= rustix::fs::OFlags::EXCL;
     }
-    let Ok(fd) = rustix::fs::openat(
+    let opened = rustix::fs::openat(
         root(vfs),
         name,
         options,
         rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-    ) else {
+    );
+    let opened = match opened {
+        Err(rustix::io::Errno::EXIST) if flags & SQLITE_OPEN_EXCLUSIVE == 0 => rustix::fs::openat(
+            root(vfs),
+            name,
+            options & !(rustix::fs::OFlags::CREATE | rustix::fs::OFlags::EXCL),
+            rustix::fs::Mode::empty(),
+        ),
+        result => result,
+    };
+    let Ok(fd) = opened else {
         return SQLITE_CANTOPEN;
     };
     let file = std::fs::File::from(fd);
@@ -130,6 +160,12 @@ unsafe extern "C" fn open(
         raw: sqlite3_file { pMethods: &METHODS },
         file: Some(file),
         lock: SQLITE_LOCK_NONE,
+        root: Some((*((*vfs).pAppData as *mut Vfs)).root.clone()),
+        lock_name: if name.starts_with("message.db") {
+            "message.db.lock"
+        } else {
+            "database.lock"
+        },
     });
     if !result.is_null() {
         *result = SQLITE_OPEN_READWRITE;
@@ -140,6 +176,7 @@ unsafe extern "C" fn delete(vfs: *mut sqlite3_vfs, name: *const c_char, sync: c_
     let Some(name) = filename(name) else {
         return SQLITE_IOERR_DELETE;
     };
+    let name = physical_name(vfs, name);
     match root(vfs).remove_file(name) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SQLITE_IOERR_DELETE_NOENT,
@@ -161,6 +198,7 @@ unsafe extern "C" fn access(
     let Some(name) = filename(name) else {
         return SQLITE_OK;
     };
+    let name = physical_name(vfs, name);
     match root(vfs).symlink_metadata(name) {
         Ok(m) if m.is_file() => {
             *out = 1;
@@ -211,8 +249,10 @@ unsafe fn file<'a>(raw: *mut sqlite3_file) -> &'a mut File {
     &mut *raw.cast::<File>()
 }
 unsafe extern "C" fn close(raw: *mut sqlite3_file) -> c_int {
+    let result = unlock(raw, SQLITE_LOCK_NONE);
     file(raw).file.take();
-    SQLITE_OK
+    file(raw).root.take();
+    result
 }
 unsafe extern "C" fn read(
     raw: *mut sqlite3_file,
@@ -288,11 +328,14 @@ unsafe extern "C" fn size(raw: *mut sqlite3_file, out: *mut i64) -> c_int {
 unsafe extern "C" fn lock(raw: *mut sqlite3_file, level: c_int) -> c_int {
     let file = file(raw);
     if file.lock == SQLITE_LOCK_NONE {
-        // Conservatively serialize even read snapshots. One OS lock covers the
-        // SQLite transaction; upgrades cannot lose a shared lock, and separate
-        // connections in the same process remain mutually exclusive.
-        if file.file.as_ref().unwrap().try_lock().is_err() {
-            return SQLITE_BUSY;
+        // Match the guest's unix-dotfile VFS. Even SHARED owns this directory
+        // exclusively, so upgrades keep the same lock across both runtimes.
+        match file.root.as_ref().unwrap().create_dir(file.lock_name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return SQLITE_BUSY;
+            }
+            Err(_) => return SQLITE_IOERR_LOCK,
         }
     }
     file.lock = level;
@@ -300,17 +343,35 @@ unsafe extern "C" fn lock(raw: *mut sqlite3_file, level: c_int) -> c_int {
 }
 unsafe extern "C" fn unlock(raw: *mut sqlite3_file, level: c_int) -> c_int {
     let file = file(raw);
-    if level == SQLITE_LOCK_NONE && file.file.as_ref().unwrap().unlock().is_err() {
-        return SQLITE_IOERR_UNLOCK;
+    if level == SQLITE_LOCK_NONE && file.lock != SQLITE_LOCK_NONE {
+        match file.root.as_ref().unwrap().remove_dir(file.lock_name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return SQLITE_IOERR_UNLOCK,
+        }
     }
     file.lock = level;
     SQLITE_OK
 }
 unsafe extern "C" fn reserved(raw: *mut sqlite3_file, out: *mut c_int) -> c_int {
-    // A connection holding SHARED has the exclusive OS lock, so another
-    // connection cannot hold RESERVED. This is also correct for hot journals.
-    *out = i32::from(file(raw).lock >= SQLITE_LOCK_RESERVED);
-    SQLITE_OK
+    let file = file(raw);
+    // Owning the directory excludes every other connection. A SHARED holder
+    // must still report no RESERVED lock so SQLite can recover a hot journal.
+    if file.lock != SQLITE_LOCK_NONE {
+        *out = i32::from(file.lock >= SQLITE_LOCK_RESERVED);
+        return SQLITE_OK;
+    }
+    match file.root.as_ref().unwrap().symlink_metadata(file.lock_name) {
+        Ok(_) => {
+            *out = 1;
+            SQLITE_OK
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            *out = 0;
+            SQLITE_OK
+        }
+        Err(_) => SQLITE_IOERR_CHECKRESERVEDLOCK,
+    }
 }
 unsafe extern "C" fn control(_: *mut sqlite3_file, _: c_int, _: *mut c_void) -> c_int {
     SQLITE_NOTFOUND

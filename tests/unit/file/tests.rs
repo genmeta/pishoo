@@ -78,9 +78,7 @@ async fn put(api: &Router, id: &str, offset: u64, bytes: &[u8]) -> Response {
     .await
 }
 fn stored_file(dir: &tempfile::TempDir, id: &str) -> std::path::PathBuf {
-    let root = Arc::new(
-        Dir::open_ambient_dir(dir.path().join(".file"), cap_std::ambient_authority()).unwrap(),
-    );
+    let root = Arc::new(Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap());
     let value = vfs::with(root, |db| record(db, id)).unwrap();
     dir.path()
         .join(".file")
@@ -428,12 +426,13 @@ async fn traversal_symlinks_and_tampered_index_cannot_read_outside() {
     .await;
     assert_eq!(response.status(), 503);
     assert!(!outside.path().join("sub").exists());
-    let root = Arc::new(
-        Dir::open_ambient_dir(dir.path().join(".file"), cap_std::ambient_authority()).unwrap(),
-    );
+    let root = Arc::new(Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap());
     vfs::with(root, |db| {
-        db.execute("UPDATE files SET directory='../outside' WHERE id=?1", [&id])
-            .map_err(storage)?;
+        db.execute(
+            "UPDATE native_files SET directory='../outside' WHERE id=?1",
+            [&id],
+        )
+        .map_err(storage)?;
         Ok(())
     })
     .unwrap();
@@ -460,7 +459,7 @@ async fn index_and_journal_symlinks_are_not_opened() {
         } else {
             std::fs::create_dir(dir.path().join(".file")).unwrap();
         }
-        symlink(outside.path(), dir.path().join(".file").join(name)).unwrap();
+        symlink(outside.path(), dir.path().join(name)).unwrap();
         let r = call(
             &api,
             "POST",
@@ -484,11 +483,9 @@ async fn expiry_delete_and_reopen_preserve_facts() {
         Router::new(),
     );
     assert_eq!(facts(&api, &id).await["offset"], 3);
-    let root = Arc::new(
-        Dir::open_ambient_dir(dir.path().join(".file"), cap_std::ambient_authority()).unwrap(),
-    );
+    let root = Arc::new(Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap());
     vfs::with(root, |db| {
-        db.execute("UPDATE files SET created_at=1 WHERE id=?1", [&id])
+        db.execute("UPDATE native_files SET created_at=1 WHERE id=?1", [&id])
             .map_err(storage)?;
         Ok(())
     })
@@ -637,12 +634,14 @@ async fn identical_text_ids_in_two_roots_never_alias_bytes_or_deletion() {
     let id_b = make(&b, "same-key", 3).await;
     assert_eq!(put(&a, &id_a, 0, b"abc").await.status(), 204);
     assert_eq!(put(&b, &id_b, 0, b"xyz").await.status(), 204);
-    let root = Arc::new(
-        Dir::open_ambient_dir(second.path().join(".file"), cap_std::ambient_authority()).unwrap(),
-    );
+    let root =
+        Arc::new(Dir::open_ambient_dir(second.path(), cap_std::ambient_authority()).unwrap());
     vfs::with(root, |db| {
-        db.execute("UPDATE files SET id=?1 WHERE id=?2", params![id_a, id_b])
-            .map_err(storage)?;
+        db.execute(
+            "UPDATE native_files SET id=?1 WHERE id=?2",
+            params![id_a, id_b],
+        )
+        .map_err(storage)?;
         Ok(())
     })
     .unwrap();
@@ -788,11 +787,9 @@ async fn completed_files_do_not_expire_when_their_creation_time_is_old() {
     let (dir, api) = setup();
     let id = make(&api, "old-complete", 3).await;
     assert_eq!(put(&api, &id, 0, b"abc").await.status(), 204);
-    let root = Arc::new(
-        Dir::open_ambient_dir(dir.path().join(".file"), cap_std::ambient_authority()).unwrap(),
-    );
+    let root = Arc::new(Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap());
     vfs::with(root, |db| {
-        db.execute("UPDATE files SET created_at=1 WHERE id=?1", [&id])
+        db.execute("UPDATE native_files SET created_at=1 WHERE id=?1", [&id])
             .map_err(storage)?;
         Ok(())
     })
@@ -873,12 +870,10 @@ async fn filename_cannot_select_a_path_or_follow_existing_symlinks() {
     assert_eq!(put(&api, &id, 0, b"abc").await.status(), 204);
     assert_eq!(stored_file(&dir, &id), archive.join("测试 (2).txt"));
     assert_eq!(std::fs::read(outside.path()).unwrap(), b"secret");
-    let root = Arc::new(
-        Dir::open_ambient_dir(dir.path().join(".file"), cap_std::ambient_authority()).unwrap(),
-    );
+    let root = Arc::new(Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap());
     vfs::with(root, |db| {
         db.execute(
-            "UPDATE files SET storage_name='../secret' WHERE id=?1",
+            "UPDATE native_files SET storage_name='../secret' WHERE id=?1",
             [&id],
         )
         .map_err(storage)?;
@@ -935,4 +930,231 @@ async fn previously_installed_id_layout_can_resume_without_moving_bytes() {
         blake3::hash(b"abc").to_hex().to_string()
     );
     assert_eq!(std::fs::read(archive.join("content")).unwrap(), b"abc");
+}
+
+fn business_database(path: &std::path::Path) -> Connection {
+    let db = Connection::open_with_flags_and_vfs(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+        "unix-dotfile",
+    )
+    .unwrap();
+    db.busy_timeout(std::time::Duration::ZERO).unwrap();
+    db
+}
+
+#[tokio::test]
+async fn uploads_share_the_business_database_and_preserve_its_facts() {
+    let (dir, api) = setup();
+    let db = business_database(&dir.path().join("database"));
+    db.execute_batch("CREATE TABLE messages(id INTEGER PRIMARY KEY, text TEXT); INSERT INTO messages VALUES(1,'hello'); PRAGMA user_version=6;").unwrap();
+    let id = make(&api, "shared", 3).await;
+    assert_eq!(put(&api, &id, 0, b"abc").await.status(), 204);
+    assert!(!dir.path().join(".file/database").exists());
+    assert_eq!(
+        db.query_row("SELECT offset FROM native_files WHERE id=?1", [&id], |r| {
+            r.get::<_, u64>(0)
+        })
+        .unwrap(),
+        3
+    );
+    assert_eq!(
+        db.query_row("SELECT text FROM messages WHERE id=1", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "hello"
+    );
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        6
+    );
+    assert!(!dir.path().join("database.lock").exists());
+}
+
+#[test]
+fn native_and_guest_connections_observe_each_others_transaction_locks() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = Arc::new(Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap());
+    let guest = business_database(&dir.path().join("database"));
+    guest
+        .execute_batch("CREATE TABLE messages(value INTEGER); INSERT INTO messages VALUES(1);")
+        .unwrap();
+    vfs::with(root.clone(), |native| {
+        native.busy_timeout(std::time::Duration::ZERO).map_err(storage)?;
+        guest.execute_batch("BEGIN IMMEDIATE; UPDATE messages SET value=2;").unwrap();
+        assert!(matches!(native.query_row("SELECT value FROM messages", [], |r| r.get::<_, i64>(0)), Err(rusqlite::Error::SqliteFailure(code, _)) if code.code == rusqlite::ErrorCode::DatabaseBusy));
+        guest.execute_batch("ROLLBACK;").unwrap();
+        native.execute_batch("BEGIN IMMEDIATE; UPDATE messages SET value=3;").map_err(storage)?;
+        assert!(matches!(guest.query_row("SELECT value FROM messages", [], |r| r.get::<_, i64>(0)), Err(rusqlite::Error::SqliteFailure(code, _)) if code.code == rusqlite::ErrorCode::DatabaseBusy));
+        native.execute_batch("ROLLBACK;").map_err(storage)?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(
+        guest
+            .query_row("SELECT value FROM messages", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(!dir.path().join("database.lock").exists());
+}
+
+#[tokio::test]
+async fn current_index_migration_preserves_completed_files_and_partial_uploads() {
+    let (dir, api) = setup();
+    let complete = make(&api, "complete", 3).await;
+    assert_eq!(put(&api, &complete, 0, b"abc").await.status(), 204);
+    let partial = make(&api, "partial", 6).await;
+    assert_eq!(put(&api, &partial, 0, b"abc").await.status(), 204);
+    // Recreate the previous host layout with a standalone files table.
+    let db = business_database(&dir.path().join("database"));
+    db.execute_batch("ALTER TABLE native_files RENAME TO files;")
+        .unwrap();
+    drop(db);
+    std::fs::rename(
+        dir.path().join("database"),
+        dir.path().join(".file/database"),
+    )
+    .unwrap();
+    let business = business_database(&dir.path().join("database"));
+    business.execute_batch("CREATE TABLE messages(value TEXT); INSERT INTO messages VALUES('preserved'); PRAGMA user_version=6;").unwrap();
+    assert_eq!(facts(&api, &complete).await["offset"], 3);
+    assert!(!dir.path().join(".file/database").exists());
+    assert_eq!(put(&api, &partial, 3, b"def").await.status(), 204);
+    assert_eq!(
+        facts(&api, &partial).await["digest"],
+        blake3::hash(b"abcdef").to_hex().to_string()
+    );
+    assert_eq!(std::fs::read(stored_file(&dir, &complete)).unwrap(), b"abc");
+    assert_eq!(make(&api, "complete", 3).await, complete);
+    assert_eq!(
+        business
+            .query_row("SELECT value FROM messages", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "preserved"
+    );
+}
+
+#[tokio::test]
+async fn legacy_business_filename_keeps_one_shared_index() {
+    let (dir, api) = setup();
+    let business = business_database(&dir.path().join("message.db"));
+    business
+        .execute_batch("CREATE TABLE messages(value TEXT); INSERT INTO messages VALUES('legacy');")
+        .unwrap();
+    let id = make(&api, "legacy-business", 3).await;
+    assert_eq!(put(&api, &id, 0, b"abc").await.status(), 204);
+    assert_eq!(
+        business
+            .query_row("SELECT offset FROM native_files WHERE id=?1", [&id], |r| {
+                r.get::<_, u64>(0)
+            })
+            .unwrap(),
+        3
+    );
+    assert!(!dir.path().join("database").exists());
+    assert!(!dir.path().join(".file/database").exists());
+    assert!(!dir.path().join("message.db.lock").exists());
+}
+
+#[tokio::test]
+async fn migration_conflicts_preserve_both_indexes_and_committed_retries_finish_cleanup() {
+    let (dir, api) = setup();
+    let id = make(&api, "migration-retry", 3).await;
+    assert_eq!(put(&api, &id, 0, b"abc").await.status(), 204);
+    std::fs::copy(
+        dir.path().join("database"),
+        dir.path().join(".file/database"),
+    )
+    .unwrap();
+    let legacy = business_database(&dir.path().join(".file/database"));
+    legacy
+        .execute_batch(
+            "ALTER TABLE native_files RENAME TO files; UPDATE files SET name='conflict.txt';",
+        )
+        .unwrap();
+    let response = call(
+        &api,
+        "GET",
+        &format!("{FILE}?id={id}&view=meta"),
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), 409);
+    assert!(dir.path().join(".file/database").exists());
+    let business = business_database(&dir.path().join("database"));
+    assert_eq!(
+        business
+            .query_row("SELECT name FROM native_files WHERE id=?1", [&id], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+        "测试.txt"
+    );
+    // A committed destination with an identical source is safe to retry.
+    legacy
+        .execute("UPDATE files SET name='测试.txt'", [])
+        .unwrap();
+    drop(legacy);
+    assert_eq!(facts(&api, &id).await["offset"], 3);
+    assert!(!dir.path().join(".file/database").exists());
+    assert_eq!(std::fs::read(stored_file(&dir, &id)).unwrap(), b"abc");
+}
+
+#[test]
+fn native_reopen_recovers_hot_journal_before_reading_shared_business_rows() {
+    if let Some(path) = std::env::var_os("PISHOO_CRASH_JOURNAL_PATH") {
+        let database = Connection::open(path).unwrap();
+        database
+            .execute_batch("PRAGMA synchronous=FULL; PRAGMA cache_size=5; BEGIN IMMEDIATE;")
+            .unwrap();
+        database
+            .execute("UPDATE messages SET text=?1", ["b".repeat(1000)])
+            .unwrap();
+        // Exit in a separate process without dropping the unfinished transaction.
+        std::process::exit(0);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("database");
+    let database = Connection::open(&path).unwrap();
+    database
+        .execute_batch("CREATE TABLE messages(id INTEGER PRIMARY KEY, text TEXT);")
+        .unwrap();
+    for id in 0..200 {
+        database
+            .execute(
+                "INSERT INTO messages VALUES(?1, ?2)",
+                params![id, "a".repeat(1000)],
+            )
+            .unwrap();
+    }
+    drop(database);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "file::tests::native_reopen_recovers_hot_journal_before_reading_shared_business_rows",
+            "--nocapture",
+        ])
+        .env("PISHOO_CRASH_JOURNAL_PATH", &path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(dir.path().join("database-journal").is_file());
+    let root = Arc::new(Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap());
+    vfs::with(root, |database| {
+        let count: i64 = database
+            .query_row(
+                "SELECT count(*) FROM messages WHERE text=?1",
+                ["a".repeat(1000)],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        assert_eq!(
+            count, 200,
+            "uncommitted page spills must roll back before reads"
+        );
+        Ok(())
+    })
+    .unwrap();
 }

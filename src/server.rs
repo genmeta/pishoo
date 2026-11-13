@@ -76,26 +76,25 @@ fn native_router(server: &Server) -> Router {
             let profile = profile.clone();
             async move {
                 let path = request.uri().path();
-                let name = path
+                let tail = path
                     .strip_prefix("/app/")
-                    .unwrap_or(path.trim_start_matches('/'))
-                    .split('/')
-                    .next()
-                    .unwrap_or("");
-                let tail = path.trim_start_matches('/');
-                let local = (percent_encoding::percent_decode_str(name)
-                    .decode_utf8()
-                    .ok()
-                    .is_some_and(|name| crate::package::valid_id(&name).is_ok())
-                    && profile.join("dev").join(name).exists())
-                    || tail
-                        .match_indices('/')
-                        .map(|(end, _)| &tail[..end])
-                        .chain(std::iter::once(tail))
-                        .any(|name| {
-                            crate::package::valid_id(name).is_ok()
-                                && profile.join("dev").join(name.replace('/', "%2F")).is_dir()
-                        });
+                    .unwrap_or(path.trim_start_matches('/'));
+                let local = tail
+                    .match_indices('/')
+                    .map(|(end, _)| &tail[..end])
+                    .chain(std::iter::once(tail))
+                    .any(|name| {
+                        crate::package::valid_id(name).is_ok()
+                            && [name.to_owned(), name.replace('/', "%2F")]
+                                .iter()
+                                .any(|directory| {
+                                    profile
+                                        .join("dev")
+                                        .join(directory)
+                                        .join("manifest.json")
+                                        .is_file()
+                                })
+                    });
                 if !local
                     && !path.starts_with("/std/")
                     && !sandbox.read().unwrap().libs.keys().any(|id| {
@@ -173,12 +172,10 @@ fn current_router(server: &Server) -> Router {
                     .path()
                     .strip_prefix("/app/")
                     .is_some_and(|tail| {
-                        let app_name = tail.split('/').next().unwrap_or("");
                         sandbox.apps.keys().any(|id| {
-                            id.split_once('/')
-                                .map_or(&id[..], |(_, name)| name)
-                                .replace('/', "%2F")
-                                == app_name
+                            let name = id.split_once('/').map_or(&id[..], |(_, name)| name);
+                            tail.strip_prefix(name)
+                                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
                         })
                     })
                     || sandbox.libs.keys().any(|id| {
@@ -217,6 +214,8 @@ fn current_router(server: &Server) -> Router {
                 authorize,
             )),
         )
+        .layer(axum::Extension(server.sandbox.clone()))
+        .layer(axum::Extension(server.profile.clone()))
         .layer(axum::middleware::from_fn(crate::routes::normalize_method))
 }
 

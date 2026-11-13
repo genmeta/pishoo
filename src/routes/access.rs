@@ -62,8 +62,52 @@ pub(crate) async fn authorize(
     let app = matches!(request.method(), &http::Method::GET | &http::Method::HEAD)
         .then(|| request.uri().path().strip_prefix("/app/"))
         .flatten()
-        .and_then(|tail| tail.split('/').next())
-        .filter(|name| !name.is_empty())
+        .and_then(|tail| {
+            let installed = request
+                .extensions()
+                .get::<Arc<std::sync::RwLock<crate::sandbox::Sandbox>>>()
+                .and_then(|sandbox| {
+                    sandbox
+                        .read()
+                        .unwrap()
+                        .apps
+                        .keys()
+                        .map(|id| id.split_once('/').map_or(&id[..], |(_, name)| name))
+                        .filter(|name| {
+                            tail.strip_prefix(name)
+                                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+                        })
+                        .max_by_key(|name| name.len())
+                        .map(str::to_owned)
+                });
+            let local = request
+                .extensions()
+                .get::<dhttp_home::identity::IdentityProfile>()
+                .and_then(|profile| {
+                    tail.match_indices('/')
+                        .map(|(end, _)| &tail[..end])
+                        .chain(std::iter::once(tail))
+                        .rfind(|name| {
+                            crate::package::valid_id(name).is_ok()
+                                && profile
+                                    .join("dev")
+                                    .join(name)
+                                    .join("manifest.json")
+                                    .is_file()
+                        })
+                        .map(str::to_owned)
+                });
+            installed
+                .into_iter()
+                .chain(local)
+                .max_by_key(String::len)
+                .or_else(|| {
+                    tail.split('/')
+                        .next()
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned)
+                })
+        })
         .map(|name| format!("/app/{name}"));
     let app_head = app.is_some() && request.method() == http::Method::HEAD;
     let headers = Headers {

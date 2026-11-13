@@ -89,14 +89,7 @@ fn facts(profile: &IdentityProfile) -> Value {
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
     rows.iter()
-        .map(|name| {
-            db.query_row(
-                include_str!("../../../../src/package/sql/compat/v3/registration_facts.sql"),
-                [name],
-                |r| r.get::<_, String>(0),
-            )
-            .unwrap()
-        })
+        .map(|name| crate::package::registration_snapshot(&db, name, false).unwrap())
         .collect::<Vec<_>>()
         .into()
 }
@@ -113,16 +106,22 @@ fn dependency_update_switches_direct_and_shared_transitive_dependencies_together
     let next_releases = releases("2.0.0");
     install_packages(&profile, &next_releases, &mut sandbox).unwrap();
     for name in ["profile", "message"] {
-        assert!(profile.join(format!("lib/{name}_2.0.0.wasm")).is_file());
-        assert!(!profile.join(format!("lib/{name}_1.0.0.wasm")).exists());
+        assert!(profile.join(format!("lib/{name}.wasm.2.0.0")).is_file());
+        assert!(profile.join(format!("lib/{name}.wasm.1.0.0")).is_file());
         assert!(!profile.join(format!("lib/{name}.wasm")).exists());
     }
     let catalog = installed_packages(&profile, None).unwrap();
     for package in catalog.as_array().unwrap() {
-        assert_eq!(package["version"], "2.0.0");
+        let expected = if package["name"] == "workspace" {
+            "2.0.0"
+        } else {
+            "1.0.0"
+        };
+        assert_eq!(package["version"], expected);
         for dependency in package["dependencies"].as_array().unwrap() {
-            assert_eq!(dependency["version"], "2.0.0");
+            assert_eq!(dependency["version"], expected);
         }
+        assert_eq!(package["installed_versions"], json!(["1.0.0", "2.0.0"]));
     }
     assert_eq!(sandbox.libs.len(), 2);
     assert_eq!(sandbox.apps.len(), 2);
@@ -137,7 +136,10 @@ fn dependency_update_switches_direct_and_shared_transitive_dependencies_together
         "2.0.0"
     );
     assert_eq!(
-        sandbox.libs["alice.dhttp.net/profile"].openapi.info.version,
+        sandbox.versions[&("alice.dhttp.net/profile".to_owned(), "2.0.0".to_owned())]
+            .openapi
+            .info
+            .version,
         "2.0.0"
     );
     assert_eq!(
@@ -156,7 +158,10 @@ fn dependency_update_switches_direct_and_shared_transitive_dependencies_together
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(facts(&profile), before_restart);
     assert_eq!(
-        sandbox.libs["alice.dhttp.net/message"].openapi.info.version,
+        sandbox.versions[&("alice.dhttp.net/message".to_owned(), "2.0.0".to_owned())]
+            .openapi
+            .info
+            .version,
         "2.0.0"
     );
 
@@ -189,30 +194,29 @@ fn dependency_update_switches_direct_and_shared_transitive_dependencies_together
 }
 
 #[test]
-fn dependency_update_rejects_external_pins_without_changing_installation() {
+fn dependency_update_preserves_external_pins_with_parallel_versions() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
     let mut sandbox = installed(&profile);
     let (id, bytes) = release("other", "1.0.0", true, &[("profile", "1.0.0")]);
     install_package(&profile, &id, &bytes, &sandbox.runtime).unwrap();
     sandbox.load_libs(&profile).unwrap();
-    let before = facts(&profile);
     let previous = sandbox.libs["alice.dhttp.net/profile"].clone();
-    let error = install_packages(&profile, &releases("2.0.0"), &mut sandbox)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("alice.dhttp.net/other requires alice.dhttp.net/profile@1.0.0"),
-        "{error}"
-    );
-    assert_eq!(facts(&profile), before);
+    install_packages(&profile, &releases("2.0.0"), &mut sandbox).unwrap();
+    let other = crate::package::installed_version(&profile, &id, "1.0.0").unwrap();
+    assert_eq!(other["dependencies"][0]["version"], "1.0.0");
     assert!(Arc::ptr_eq(
         &previous,
         &sandbox.libs["alice.dhttp.net/profile"]
     ));
+    assert!(
+        sandbox
+            .versions
+            .contains_key(&("alice.dhttp.net/profile".to_owned(), "2.0.0".to_owned()))
+    );
     assert_eq!(
         std::fs::read(profile.join("app/workspace/index.html")).unwrap(),
-        b"1.0.0"
+        b"2.0.0"
     );
 }
 
@@ -224,19 +228,19 @@ fn dependency_update_rolls_back_all_files_registration_capabilities_and_runtime_
     let mut sandbox = installed(&profile);
     let before = facts(&profile);
     let previous = sandbox.libs["alice.dhttp.net/profile"].clone();
-    let wasm = std::fs::read(profile.join("lib/profile_1.0.0.wasm")).unwrap();
+    let wasm = std::fs::read(profile.join("lib/profile.wasm.1.0.0")).unwrap();
     let db =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    db.execute_batch("CREATE TABLE pkg_registry.fail_commit(name TEXT REFERENCES package(name) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER pkg_registry.reject_update AFTER UPDATE ON package WHEN NEW.name='workspace' BEGIN INSERT INTO fail_commit VALUES('missing'); END;").unwrap();
+    db.execute_batch("CREATE TABLE pkg_registry.fail_commit(name TEXT,version TEXT,FOREIGN KEY(name,version) REFERENCES package(name,version) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER pkg_registry.reject_update AFTER INSERT ON package WHEN NEW.name='workspace' AND NEW.version='2.0.0' BEGIN INSERT INTO fail_commit VALUES('missing','0.0.0'); END;").unwrap();
     let mut next = releases("2.0.0");
     next.insert(0, release("extra", "2.0.0", true, &[]));
     assert!(install_packages(&profile, &next, &mut sandbox).is_err());
     for name in ["profile", "message"] {
-        assert!(!profile.join(format!("lib/{name}_2.0.0.wasm")).exists());
+        assert!(!profile.join(format!("lib/{name}.wasm.2.0.0")).exists());
     }
     assert_eq!(facts(&profile), before);
     assert_eq!(
-        std::fs::read(profile.join("lib/profile_1.0.0.wasm")).unwrap(),
+        std::fs::read(profile.join("lib/profile.wasm.1.0.0")).unwrap(),
         wasm
     );
     for name in ["workspace", "introduction"] {
@@ -288,7 +292,7 @@ fn legacy_wasm_is_loaded_then_replaced_by_versioned_installation_and_removed() {
     let (id, bytes) = release("message", "1.0.0", false, &[]);
     install_package(&profile, &id, &bytes, &runtime).unwrap();
     std::fs::rename(
-        profile.join("lib/message_1.0.0.wasm"),
+        profile.join("lib/message.wasm.1.0.0"),
         profile.join("lib/message.wasm"),
     )
     .unwrap();
@@ -300,10 +304,139 @@ fn legacy_wasm_is_loaded_then_replaced_by_versioned_installation_and_removed() {
         &mut sandbox,
     )
     .unwrap();
-    assert!(!profile.join("lib/message.wasm").exists());
-    assert!(profile.join("lib/message_2.0.0.wasm").is_file());
+    assert!(profile.join("lib/message.wasm").is_file());
+    assert!(profile.join("lib/message.wasm.2.0.0").is_file());
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs[&id].openapi.info.version, "2.0.0");
     remove_package(&profile, &id).unwrap();
-    assert!(!profile.join("lib/message_2.0.0.wasm").exists());
+    assert!(!profile.join("lib/message.wasm.2.0.0").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_installation_pins_two_shared_versions_and_reactivates_cached_releases() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    let packages = vec![
+        release("shared", "1.0.0", false, &[]),
+        release("shared", "2.0.0", false, &[]),
+        release("a", "1.0.0", false, &[("shared", "1.0.0")]),
+        release("b", "1.0.0", false, &[("shared", "2.0.0")]),
+        release("root", "1.0.0", false, &[("a", "1.0.0"), ("b", "1.0.0")]),
+    ];
+    install_packages(&profile, &packages, &mut sandbox).unwrap();
+    assert_eq!(sandbox.versions.len(), 5);
+    let a = &sandbox.versions[&("alice.dhttp.net/a".to_owned(), "1.0.0".to_owned())];
+    let b = &sandbox.versions[&("alice.dhttp.net/b".to_owned(), "1.0.0".to_owned())];
+    let old = sandbox.versions[&("alice.dhttp.net/shared".to_owned(), "1.0.0".to_owned())].clone();
+    let new = sandbox.versions[&("alice.dhttp.net/shared".to_owned(), "2.0.0".to_owned())].clone();
+    assert!(Arc::ptr_eq(&a.dependencies["shared"], &old));
+    assert!(Arc::ptr_eq(&b.dependencies["shared"], &new));
+    assert_eq!(
+        sandbox.libs["alice.dhttp.net/shared"].openapi.info.version,
+        "1.0.0"
+    );
+    std::fs::write(
+        profile.join(".volume/shared/database"),
+        b"shared business data",
+    )
+    .unwrap();
+    sandbox.load_libs(&profile).unwrap();
+    assert_eq!(sandbox.versions.len(), 5);
+    assert_eq!(
+        sandbox.libs["alice.dhttp.net/a"].dependencies["shared"]
+            .openapi
+            .info
+            .version,
+        "1.0.0"
+    );
+    assert_eq!(
+        sandbox.libs["alice.dhttp.net/b"].dependencies["shared"]
+            .openapi
+            .info
+            .version,
+        "2.0.0"
+    );
+    let old = sandbox.versions[&("alice.dhttp.net/shared".to_owned(), "1.0.0".to_owned())].clone();
+    let new = sandbox.versions[&("alice.dhttp.net/shared".to_owned(), "2.0.0".to_owned())].clone();
+    let sandbox = Arc::new(std::sync::RwLock::new(sandbox));
+    let endpoint = crate::test_support::identity::endpoint("alice");
+    let selected =
+        crate::package::install_store_package(&profile, &endpoint, "", "shared", "2.0.0", &sandbox)
+            .await
+            .unwrap();
+    assert_eq!(selected["version"], "2.0.0");
+    assert_eq!(
+        sandbox.read().unwrap().libs["alice.dhttp.net/shared"]
+            .openapi
+            .info
+            .version,
+        "2.0.0"
+    );
+    assert_eq!(
+        sandbox.read().unwrap().libs["alice.dhttp.net/a"].dependencies["shared"]
+            .openapi
+            .info
+            .version,
+        "1.0.0"
+    );
+    assert_eq!(
+        std::fs::read(profile.join(".volume/shared/database")).unwrap(),
+        b"shared business data"
+    );
+    assert!(!profile.join(".volume/shared.1.0.0").exists());
+    assert!(!profile.join(".volume/shared.2.0.0").exists());
+    assert!(matches!(
+        crate::package::remove_package_version(&profile, "alice.dhttp.net/shared", Some("1.0.0")),
+        Err(crate::Error::PackageInUse(_))
+    ));
+    assert!(matches!(
+        crate::package::remove_package_version(&profile, "alice.dhttp.net/shared", Some("2.0.0")),
+        Err(crate::Error::PackagePolicy {
+            code: "package_active",
+            ..
+        })
+    ));
+    assert!(!old.stream_retired.is_cancelled());
+    assert!(!new.stream_retired.is_cancelled());
+}
+
+#[test]
+fn a_source_version_keeps_its_dependency_edges_when_another_version_is_added() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    install_packages(
+        &profile,
+        &[
+            release("shared", "1.0.0", false, &[]),
+            release("a", "1.0.0", false, &[("shared", "1.0.0")]),
+        ],
+        &mut sandbox,
+    )
+    .unwrap();
+    install_packages(
+        &profile,
+        &[
+            release("shared", "2.0.0", false, &[]),
+            release("a", "2.0.0", false, &[("shared", "2.0.0")]),
+        ],
+        &mut sandbox,
+    )
+    .unwrap();
+    for version in ["1.0.0", "2.0.0"] {
+        let metadata =
+            crate::package::installed_version(&profile, "alice.dhttp.net/a", version).unwrap();
+        assert_eq!(metadata["dependencies"][0]["version"], version);
+        assert_eq!(sandbox.versions[&("alice.dhttp.net/a".to_owned(), version.to_owned())].dependencies["shared"].openapi.info.version, version);
+    }
+    crate::package::remove_package_version(&profile, "alice.dhttp.net/a", Some("1.0.0")).unwrap();
+    assert!(matches!(
+        crate::package::remove_package_version(&profile, "alice.dhttp.net/shared", Some("2.0.0")),
+        Err(crate::Error::PackageInUse(_))
+    ));
+    assert!(profile.join("lib/shared.wasm.1.0.0").is_file());
+    assert!(profile.join("lib/shared.wasm.2.0.0").is_file());
 }
