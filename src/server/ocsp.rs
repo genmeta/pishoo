@@ -139,13 +139,75 @@ pub(super) async fn renew_ocsp(
     profile: &IdentityProfile,
     endpoint: &dhttp::Endpoint,
 ) -> Result<dhttp::Endpoint> {
+    use std::time::Duration;
+
     // Renew the loaded certificate's proof; certificate/key rotation still requires restart.
     let authority = endpoint.local_authority()?;
-    let response = fetch_ocsp(authority.certificates()).await?;
-    cache_ocsp(profile, &response)?;
+    let cached = profile.load_ocsp().await.ok();
+    let now = qtls::UnixTime::now();
+    let mut response = authority.ocsp();
+    let mut expiry = ocsp_expiry(response, authority.certificates(), now).ok();
+    // Keep the longest still-valid proof, including a cache updated outside this process.
+    // Prefer existing bytes on ties so an equal lifetime does not replace the cache.
+    if let Some(existing) = cached.as_deref()
+        && let Ok(existing_expiry) = ocsp_expiry(existing, authority.certificates(), now)
+        && expiry.is_none_or(|expiry| existing_expiry >= expiry)
+    {
+        response = existing;
+        expiry = Some(existing_expiry);
+    }
+    // Leave a full 72-hour renewal window after the next periodic check.
+    let fetched = if expiry.is_some_and(|expiry| {
+        expiry.saturating_sub(Duration::from_secs(now.as_secs()))
+            > Duration::from_secs(2 * 72 * 60 * 60)
+    }) {
+        None
+    } else {
+        Some(fetch_ocsp(authority.certificates()).await?)
+    };
+    if let Some(fetched) = fetched.as_deref() {
+        let fetched_expiry = ocsp_expiry(fetched, authority.certificates(), qtls::UnixTime::now())?;
+        if expiry.is_none_or(|expiry| fetched_expiry > expiry) {
+            response = fetched;
+        }
+    }
+    if cached.as_deref() != Some(response) {
+        cache_ocsp(profile, response)?;
+    }
+    if authority.ocsp() == response {
+        return Ok(endpoint.clone());
+    }
     // Root services can host profiles from other accounts or the global home.
     endpoint
         .reload_from(profile.path())
         .await
         .map_err(Into::into)
+}
+
+fn ocsp_expiry(
+    response: &[u8],
+    certificates: &[dhttp::CertificateDer<'_>],
+    now: qtls::UnixTime,
+) -> Result<std::time::Duration> {
+    use der::Decode;
+
+    let error = |error: String| Error::InvalidIdentity(format!("OCSP: {error}"));
+    // Only a proof valid for this certificate may prevent a renewal from replacing it.
+    qtls::validate_ocsp(response, certificates, now).map_err(|e| error(e.to_string()))?;
+    let leaf = x509_cert::Certificate::from_der(certificates[0].as_ref())
+        .map_err(|e| error(e.to_string()))?;
+    let response = x509_ocsp::OcspResponse::from_der(response)
+        .map_err(|e| error(e.to_string()))?
+        .response_bytes
+        .ok_or_else(|| error("missing response bytes".into()))?;
+    let response = x509_ocsp::BasicOcspResponse::from_der(response.response.as_bytes())
+        .map_err(|e| error(e.to_string()))?;
+    response
+        .tbs_response_data
+        .responses
+        .iter()
+        .find(|single| single.cert_id.serial_number == leaf.tbs_certificate.serial_number)
+        .and_then(|single| single.next_update)
+        .map(|next_update| next_update.0.to_unix_duration())
+        .ok_or_else(|| error("missing certificate nextUpdate".into()))
 }
