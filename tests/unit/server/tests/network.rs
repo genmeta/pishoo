@@ -10,7 +10,7 @@ use tokio::time::Instant;
 
 use super::{
     ocsp::renew_ocsp,
-    run::{apply_ocsp, load_profile, reconcile_profiles},
+    run::{apply_ocsp, load_profile},
     *,
 };
 use crate::test_support::credentials;
@@ -26,6 +26,9 @@ mod workspace_split;
 
 #[path = "network/std_workflow.rs"]
 mod std_workflow;
+
+#[path = "network/system.rs"]
+mod system;
 
 #[tokio::test]
 #[ignore = "run alone; requires OpenSSL/local TCP+UDP and owns global TLS/DNS/DHTTP_HOME"]

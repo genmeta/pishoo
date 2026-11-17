@@ -32,6 +32,8 @@ pub async fn run() -> Result<()> {
             .map_err(|e| Error::InvalidConfig(e.to_string()))?
     };
     let runtime = Arc::new(WasmRuntime::new()?);
+    let system_db = crate::system::open(&home)?;
+    let (system_commands, mut system_control) = tokio::sync::mpsc::channel(8);
     let mdns = dns::install()?;
     let addresses = qprotocol::AddressBook::global();
     let mut inner_events = addresses.subscribe_punch(dhttp::Scope::Internal);
@@ -39,13 +41,13 @@ pub async fn run() -> Result<()> {
     let mut servers = BTreeMap::<String, Server>::new();
     let mut jobs = FuturesUnordered::new();
     // Startup failures share the same DNS and application cleanup path as shutdown.
-    let result = async {
+    let result: Result<bool> = async {
         // OCSP bootstrap uses ordinary HTTPS and qtls's configured trust roots.
         dhttp::DhttpNetwork::init().await?;
         let user_homes = multiuser.then(account_homes).transpose()?;
         // Startup and later scans isolate per-identity load/listen failures alike.
         // A stale or damaged profile must not prevent healthy identities from serving.
-        reconcile_profiles(&mdns, &home, user_homes.as_deref(), &mut servers, runtime.clone()).await?;
+        reconcile_device(&mdns, &home, user_homes.as_deref(), &mut servers, runtime.clone(), &system_db, &system_commands).await?;
         let mut config_ticks = tokio::time::interval_at(
             Instant::now() + std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(1),
@@ -83,8 +85,19 @@ pub async fn run() -> Result<()> {
             }
             loop {
                 tokio::select! {
-                    result = &mut interrupt => { result?; return Ok(()); }
-                    _ = async { #[cfg(unix)] { terminate.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => return Ok(()),
+                    result = &mut interrupt => { result?; return Ok(false); }
+                    _ = async { #[cfg(unix)] { terminate.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => return Ok(false),
+                    Some(command) = system_control.recv() => {
+                        if command == "restart" { return Ok(true); }
+                        for server in servers.values_mut() {
+                            let result = server.sandbox.write().unwrap().load_libs(&server.profile);
+                            match result {
+                                Ok(()) => *server.router.write().unwrap() = current_router(server),
+                                Err(error) => tracing::warn!(identity=server.name(), %error, "System reload failed for identity"),
+                            }
+                        }
+                        config_ticks.reset_immediately();
+                    }
                     result = jobs.next(), if !jobs.is_empty() => {
                         if let Some(Some(due)) = result {
                             next_due = Some(next_due.map_or(due, |previous| previous.min(due)));
@@ -116,7 +129,7 @@ pub async fn run() -> Result<()> {
                     _ = config_ticks.tick(), if jobs.is_empty() && ocsp_updates.is_empty() => {
                         let result = async {
                             let user_homes = multiuser.then(account_homes).transpose()?;
-                            reconcile_profiles(&mdns, &home, user_homes.as_deref(), &mut servers, runtime.clone()).await
+                            reconcile_device(&mdns, &home, user_homes.as_deref(), &mut servers, runtime.clone(), &system_db, &system_commands).await
                         }.await;
                         match result {
                             Ok(true) => break,
@@ -179,7 +192,45 @@ pub async fn run() -> Result<()> {
         tracing::error!(%error, "mDNS shutdown failed");
         shutdown = Err(Error::Io(std::io::Error::other(error)));
     }
-    result.and(shutdown)
+    let restart = result?;
+    shutdown?;
+    if restart {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            return Err(std::process::Command::new(std::env::current_exe()?)
+                .args(std::env::args_os().skip(1))
+                .exec()
+                .into());
+        }
+        #[cfg(not(unix))]
+        {
+            std::process::Command::new(std::env::current_exe()?)
+                .args(std::env::args_os().skip(1))
+                .spawn()?;
+        }
+    }
+    Ok(())
+}
+
+async fn reconcile_device(
+    mdns: &ddns::mdns::MdnsResolverSet,
+    home: &DhttpHome,
+    user_homes: Option<&[std::path::PathBuf]>,
+    servers: &mut BTreeMap<String, Server>,
+    runtime: Arc<WasmRuntime>,
+    system_db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    commands: &tokio::sync::mpsc::Sender<&'static str>,
+) -> Result<bool> {
+    crate::system::recover(home, system_db).await?;
+    let changed =
+        reconcile_profiles(mdns, home, user_homes, servers, runtime.clone(), system_db).await?;
+    for server in servers.values_mut() {
+        server.system_router =
+            crate::system::router(home.clone(), system_db.clone(), commands.clone());
+        *server.router.write().unwrap() = current_router(server);
+    }
+    Ok(changed)
 }
 
 pub(super) async fn load_profile(
@@ -296,6 +347,17 @@ pub(super) fn discover_profiles(
     Ok(profiles.into_values().collect())
 }
 
+pub(crate) fn local_profiles(home: &DhttpHome) -> Result<Vec<IdentityProfile>> {
+    #[cfg(target_os = "linux")]
+    let user_homes = rustix::process::geteuid()
+        .is_root()
+        .then(account_homes)
+        .transpose()?;
+    #[cfg(not(target_os = "linux"))]
+    let user_homes: Option<Vec<std::path::PathBuf>> = None;
+    discover_profiles(home, user_homes.as_deref())
+}
+
 // mDNS responders are process-owned; retire this name on every interface before
 // waiting for application cleanup. Shared responders and other names remain live.
 fn remove_mdns_name(mdns: &ddns::mdns::MdnsResolverSet, name: &str) {
@@ -311,6 +373,7 @@ pub(super) async fn reconcile_profiles(
     user_homes: Option<&[std::path::PathBuf]>,
     servers: &mut BTreeMap<String, Server>,
     runtime: Arc<WasmRuntime>,
+    system_db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
 ) -> Result<bool> {
     let profiles = discover_profiles(home, user_homes)?;
     let mut changed = false;
@@ -383,6 +446,11 @@ pub(super) async fn reconcile_profiles(
                 servers.insert(name.clone(), server);
                 changed = true;
                 tracing::info!(identity = %name, "Server enabled");
+            }
+            if let Some(server) = servers.get(&name) {
+                if let Err(error) = crate::system::register_host(system_db, &server.profile, &server.endpoint).await {
+                    tracing::warn!(identity=%name, %error, "Initial administrator registration failed; retrying on next scan");
+                }
             }
             Ok::<_, Error>(())
         }

@@ -5,10 +5,14 @@ use tokio::time::Instant;
 
 use super::{
     ocsp::renew_ocsp,
-    run::{discover_profiles, load_profile, ocsp_ticks, parse_account_homes, reconcile_profiles},
+    run::{discover_profiles, load_profile, ocsp_ticks, parse_account_homes},
     *,
 };
 use crate::{Error, setup::load_server_config};
+
+#[path = "../../common/server_reconciliation.rs"]
+mod reconciliation;
+use reconciliation::reconcile_profiles;
 
 #[tokio::test]
 async fn old_static_files_are_not_exposed_and_proxy_paths_stay_separate() {
@@ -496,9 +500,110 @@ async fn server(root: &std::path::Path) -> Server {
         sandbox: Arc::new(RwLock::new(sandbox)),
         publisher: None,
         listener: None,
+        system_router: Router::new(),
     };
     *server.router.write().unwrap() = current_router(&server);
     server
+}
+
+#[tokio::test]
+async fn device_administration_uses_device_authority_through_the_normal_server_router() {
+    let root = tempfile::tempdir().unwrap();
+    let mut server = server(root.path()).await;
+    let home = DhttpHome::new(root.path().into());
+    let database = crate::system::open(&home).unwrap();
+    let (commands, _receiver) = tokio::sync::mpsc::channel(8);
+    server.system_router = crate::system::router(home, database.clone(), commands);
+    let local = server.endpoint.local_authority().unwrap();
+    let owner = dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
+        .unwrap();
+    server
+        .access
+        .set_policy(
+            access_control::Method::Unspecified,
+            "/",
+            access_control::Effect::Allow,
+            access_control::Grantee::All,
+        )
+        .await
+        .unwrap();
+    let request = || {
+        Request::builder()
+            .uri("/sys/info")
+            .extension(local.clone())
+            .body(AxumBody::empty())
+            .unwrap()
+    };
+    assert_eq!(
+        current_router(&server)
+            .oneshot(request())
+            .await
+            .unwrap()
+            .status(),
+        http::StatusCode::FORBIDDEN
+    );
+    database
+        .lock()
+        .await
+        .execute(
+            "INSERT INTO administrator(name,subject_id) VALUES(?1,?2)",
+            rusqlite::params![server.name(), owner.owner_hash().as_str().as_bytes()],
+        )
+        .unwrap();
+    assert_eq!(
+        current_router(&server)
+            .oneshot(request())
+            .await
+            .unwrap()
+            .status(),
+        http::StatusCode::OK
+    );
+    let request = Request::builder()
+        .method(http::Method::POST)
+        .uri("/sys/info")
+        .header("x-http-method-override", "GET")
+        .extension(local.clone())
+        .body(AxumBody::empty())
+        .unwrap();
+    assert_eq!(
+        current_router(&server)
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status(),
+        http::StatusCode::OK
+    );
+    let request = Request::builder()
+        .uri("/sys/info")
+        .extension(local.clone())
+        .body(AxumBody::empty())
+        .unwrap();
+    assert_eq!(
+        native_router(&server)
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status(),
+        http::StatusCode::FORBIDDEN
+    );
+    database
+        .lock()
+        .await
+        .execute("DELETE FROM administrator", [])
+        .unwrap();
+    let request = Request::builder()
+        .uri("/sys/info")
+        .extension(local)
+        .body(AxumBody::empty())
+        .unwrap();
+    assert_eq!(
+        current_router(&server)
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status(),
+        http::StatusCode::FORBIDDEN
+    );
 }
 
 #[tokio::test]

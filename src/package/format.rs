@@ -54,6 +54,16 @@ fn validate_contents(files: &PackageFiles) -> Result<Value> {
             "ordinary Lib name conflicts with the frontend app namespace",
         ));
     }
+    if metadata["has_lib"] == true
+        && !crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or(""))
+        && metadata["name"]
+            .as_str()
+            .is_some_and(|name| name == "sys" || name.starts_with("sys/"))
+    {
+        return Err(invalid(
+            "ordinary Lib name conflicts with the device system namespace",
+        ));
+    }
     if let Some(backend) = waz_backend(files) {
         if backend.get(..8) != Some(b"\0asm\x0d\0\x01\0") {
             return Err(invalid("backend must be a WASM component"));

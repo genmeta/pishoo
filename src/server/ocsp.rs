@@ -4,7 +4,7 @@ use dhttp_home::identity::IdentityProfile;
 use super::files::inherit_identity_owner;
 use crate::{Error, Result};
 
-pub(super) fn cache_ocsp(profile: &IdentityProfile, response: &[u8]) -> Result<()> {
+pub(crate) fn cache_ocsp(profile: &IdentityProfile, response: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut cache = tempfile::NamedTempFile::new_in(profile.ssl_dir())?;
     inherit_identity_owner(cache.as_file(), profile)?;
@@ -18,7 +18,7 @@ pub(super) fn cache_ocsp(profile: &IdentityProfile, response: &[u8]) -> Result<(
     Ok(())
 }
 
-pub(super) async fn fetch_ocsp(certificates: &[dhttp::CertificateDer<'_>]) -> Result<Vec<u8>> {
+pub(crate) async fn fetch_ocsp(certificates: &[dhttp::CertificateDer<'_>]) -> Result<Vec<u8>> {
     use der::{Decode, Encode};
     use sha1::{Digest, Sha1};
     use x509_parser::prelude::FromDer;

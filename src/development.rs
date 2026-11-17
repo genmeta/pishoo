@@ -39,6 +39,12 @@ pub(crate) fn router(
             let app_request = request.uri().path().starts_with("/app/");
             let result: Result<axum::response::Response> = async {
                 let path = request.uri().path();
+                if path == "/sys" || path.starts_with("/sys/") {
+                    return Ok(fallback
+                        .oneshot(request)
+                        .await
+                        .expect("Router is infallible"));
+                }
                 let (frontend, standard, tail) = if let Some(tail) = path.strip_prefix("/app/") {
                     (true, false, tail)
                 } else if let Some(tail) = path.strip_prefix("/std/") {

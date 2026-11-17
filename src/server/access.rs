@@ -129,7 +129,7 @@ fn snapshot_access(source: &std::path::Path, destination: &std::path::Path) -> R
     Ok(())
 }
 
-pub(super) async fn load_access(
+pub(crate) async fn load_access(
     profile: &IdentityProfile,
     subject: &access_control::SubjectId,
 ) -> Result<Arc<access_control::AccessService>> {

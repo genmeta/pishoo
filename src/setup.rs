@@ -422,12 +422,14 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
     })
 }
 
-// /std is reserved; App and ordinary Lib mounts are checked independently.
+// /std and /sys are reserved; App and ordinary Lib mounts are checked independently.
 fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()> {
     if proxies.iter().any(|proxy| {
         crate::routes::reserved(proxy.location.strip_prefix("= ").unwrap_or(&proxy.location))
     }) {
-        return Err(Error::InvalidConfig("proxy cannot occupy /std".into()));
+        return Err(Error::InvalidConfig(
+            "proxy cannot occupy a reserved system path".into(),
+        ));
     }
     let has_apps: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type IN ('table','view') AND name='app')",

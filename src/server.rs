@@ -14,9 +14,11 @@ use crate::{
 
 mod access;
 mod files;
-mod ocsp;
+pub(crate) mod ocsp;
 mod run;
 
+pub(crate) use self::access::load_access as access_for_system;
+pub(crate) use self::run::local_profiles;
 pub use self::run::run;
 use self::{
     access::load_access,
@@ -35,6 +37,7 @@ struct Server {
     sandbox: Arc<RwLock<Sandbox>>,
     publisher: Option<Arc<ddns::H3Resolver>>,
     listener: Option<dhttp::ListenFuture>,
+    system_router: Router,
 }
 
 #[cfg(test)]
@@ -80,6 +83,9 @@ fn native_router(server: &Server) -> Router {
             let profile = profile.clone();
             async move {
                 let path = request.uri().path();
+                if path == "/sys" || path.starts_with("/sys/") {
+                    return http::StatusCode::FORBIDDEN.into_response();
+                }
                 let tail = path
                     .strip_prefix("/app/")
                     .unwrap_or(path.trim_start_matches('/'));
@@ -205,7 +211,9 @@ fn current_router(server: &Server) -> Router {
             }
         },
     ));
-    Router::new()
+    server
+        .system_router
+        .clone()
         .fallback_service(
             crate::development::router(
                 server.profile.clone(),
@@ -352,6 +360,7 @@ impl Server {
             sandbox: Arc::new(RwLock::new(sandbox)),
             publisher,
             listener: None,
+            system_router: Router::new(),
         };
         *server.router.write().unwrap() = current_router(&server);
         Ok(server)
