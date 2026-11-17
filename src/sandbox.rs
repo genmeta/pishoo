@@ -40,6 +40,7 @@ pub struct WasmRuntime {
 
 pub(crate) struct Lib {
     pub(crate) id: String,
+    pub(crate) author_owner_hash: Option<String>,
     pub(crate) dependencies: HashMap<String, Arc<Lib>>,
     commands: Arc<HashMap<String, Component>>,
     pub(crate) stream_retired: tokio_util::sync::CancellationToken,
@@ -50,6 +51,7 @@ pub(crate) struct Lib {
 }
 
 struct StoreData {
+    caller_service: Option<(String, String, String)>,
     commands: Arc<HashMap<String, Component>>,
     table: ResourceTable,
     wasi: WasiCtx,
@@ -209,6 +211,7 @@ impl Sandbox {
                     },
                 ),
             )?;
+            lib.author_owner_hash = entry["author_owner_hash"].as_str().map(str::to_owned);
             if lib.openapi.info.version != version {
                 return Err(Error::InvalidComponent(format!(
                     "installed {id} {version} has runtime version {}",
@@ -407,7 +410,7 @@ pub(crate) fn requested_version(request: &http::Request<axum::body::Body>) -> Re
     Ok(Some(version))
 }
 
-fn select_library(
+pub(crate) fn select_library(
     sandbox: &Sandbox,
     endpoint: &dhttp::Endpoint,
     request: &http::Request<axum::body::Body>,
@@ -630,7 +633,7 @@ pub(crate) fn app_response(
             let asset = suffix.starts_with("/assets/")
                 || suffix.starts_with("/static/")
                 || matches!(suffix.as_ref(), "/assets" | "/static")
-                || resource.contains('.')
+                || mime_guess::from_path(resource).first().is_some()
                 || request
                     .headers()
                     .get("sec-fetch-dest")

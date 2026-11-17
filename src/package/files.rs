@@ -1394,8 +1394,9 @@ fn package_documents(
 }
 
 fn cached_release(profile: &IdentityProfile, hash: &str) -> Result<Option<super::PackageFiles>> {
-    use sha2::{Digest, Sha256};
     use std::io::Read;
+
+    use sha2::{Digest, Sha256};
 
     if hash.len() != 64
         || !hash
@@ -1743,6 +1744,7 @@ SET version=excluded.version
                     &wasm,
                     &data,
                 )?;
+                lib.author_owner_hash = metadata["author_owner_hash"].as_str().map(str::to_owned);
                 if lib.openapi.info.version
                     != metadata["version"].as_str().ok_or_else(expanded_error)?
                 {
@@ -1877,8 +1879,9 @@ pub(super) fn activate_installed_version(
     version: &str,
     sandbox: &mut super::Sandbox,
 ) -> Result<Option<serde_json::Value>> {
-    use rustix::fs::{FlockOperation, Mode, flock, mkdirat};
     use std::sync::Arc;
+
+    use rustix::fs::{FlockOperation, Mode, flock, mkdirat};
     let parent = initialized_profile(profile)?;
     flock(&parent, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
     let mut database = installation_database(profile, true)?;
@@ -1958,6 +1961,7 @@ ORDER BY p.name,p.version
                 &bytes,
                 &profile.join(".volume").join(data),
             )?;
+            loaded.author_owner_hash = metadata["author_owner_hash"].as_str().map(str::to_owned);
             for (dependency, dependency_version) in declared_dependencies(&metadata) {
                 if let Some((_, target)) = sandbox.versions.iter().find(|((id, version), _)| {
                     package_name(id) == package_name(&dependency) && version == &dependency_version

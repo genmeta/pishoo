@@ -516,7 +516,7 @@ fn contact_v1_upgrade_preserves_delivery_jobs_and_removes_only_saved_collection(
         assert_eq!(
             db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            6
         );
         assert_eq!(
             db.query_row(
@@ -725,7 +725,7 @@ fn v3_migration_preserves_unknown_snapshots_without_catalog_backfill() {
         assert_eq!(
             db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            6
         );
         assert_eq!(
             db.query_row(
@@ -802,4 +802,192 @@ async fn completed_contact_applications_never_reenter_the_delivery_queue() {
         "expired"
     );
     assert!(db.is_autocommit());
+}
+
+fn group_entry(revision: &str) -> Value {
+    json!({"kind":"group","name":"alice~#dev","host":"alice.dhttp.net","host_owner_hash":"a".repeat(64),"member_joined_seq":"2","status":"active","source_revision":revision,"nickname":"Development","avatar":null})
+}
+
+#[test]
+fn group_directory_is_revisioned_and_preserves_private_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let mut db = database(&profile).unwrap();
+    assert_eq!(
+        directory::put(&mut db, &group_entry("1"), None, true, 1)
+            .unwrap_err()
+            .1,
+        "local_group_required"
+    );
+    // A verified Group fact can be registered while the original visitor is remote.
+    directory::put(
+        &mut db,
+        &group_entry("1"),
+        Some(&("developer.dhttp.net/service".into(), "c".repeat(64))),
+        false,
+        1,
+    )
+    .unwrap();
+    directory::patch(&db, "alice~#dev", &json!({"alias":"Work","hidden":true}), 2).unwrap();
+    let mut update = group_entry("2");
+    update["nickname"] = "Engineering".into();
+    let saved = directory::put(
+        &mut db,
+        &update,
+        Some(&("developer.dhttp.net/service".into(), "c".repeat(64))),
+        false,
+        3,
+    )
+    .unwrap();
+    assert_eq!(saved["alias"], "Work");
+    assert_eq!(saved["hidden"], true);
+    assert!(directory::entries(&db).unwrap().is_empty());
+    assert_eq!(
+        directory::put(
+            &mut db,
+            &group_entry("1"),
+            Some(&("developer.dhttp.net/service".into(), "c".repeat(64))),
+            false,
+            4
+        )
+        .unwrap()["nickname"],
+        "Engineering"
+    );
+    assert_eq!(
+        directory::put(
+            &mut db,
+            &group_entry("2"),
+            Some(&("developer.dhttp.net/service".into(), "c".repeat(64))),
+            false,
+            4
+        )
+        .unwrap_err()
+        .0,
+        409
+    );
+    update["source_revision"] = "3".into();
+    update["member_joined_seq"] = "5".into();
+    assert_eq!(
+        directory::put(
+            &mut db,
+            &update,
+            Some(&("developer.dhttp.net/service".into(), "c".repeat(64))),
+            false,
+            5
+        )
+        .unwrap()["hidden"],
+        false
+    );
+    update["host_owner_hash"] = "b".repeat(64).into();
+    assert_eq!(
+        directory::put(
+            &mut db,
+            &update,
+            Some(&("developer.dhttp.net/service".into(), "c".repeat(64))),
+            false,
+            6
+        )
+        .unwrap_err()
+        .1,
+        "group_binding_conflict"
+    );
+}
+
+#[tokio::test]
+async fn directory_routes_merge_filter_paginate_and_require_verified_owner() {
+    let endpoint = crate::test_support::identity::endpoint("alice.dhttp.net");
+    let visitor = owner(&endpoint).unwrap();
+    let access = Arc::new(
+        AccessService::load_from_db("sqlite::memory:", endpoint.name(), visitor.subject_id())
+            .await
+            .unwrap(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    directory::put(
+        &mut database(&profile).unwrap(),
+        &group_entry("1"),
+        Some(&("developer.dhttp.net/service".into(), "c".repeat(64))),
+        false,
+        1,
+    )
+    .unwrap();
+    assert!(access.find_contact_by_name("alice~#dev").await.is_err());
+    let router = contact_router(profile, endpoint, access);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get("/std/contact/list?kind=all&page_size=1&sort=name&order=asc")
+                .extension(visitor.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(value["total"], 1);
+    assert_eq!(value["items"][0]["kind"], "group");
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get("/std/contact/list?kind=all&search=missing")
+                .extension(visitor.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let value: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(value["total"], 0);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get("/std/contact?name=alice~%23dev")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = router
+        .oneshot(
+            Request::put("/std/contact")
+                .extension(visitor)
+                .header(
+                    "pishoo-source-lib",
+                    "dev.genmeta.tech.dhttp.net/std/comm/group",
+                )
+                .body(Body::from(group_entry("1").to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn title_entries_require_owner_and_keep_explicit_subject_binding() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let mut db = database(&profile).unwrap();
+    let title = json!({"kind":"title","name":"student@mit.edu","bound_name":"bob.dhttp.net","bound_subject":"b".repeat(64),"source_revision":"1"});
+    assert_eq!(
+        directory::put(
+            &mut db,
+            &title,
+            Some(&("developer.dhttp.net/service".into(), "c".repeat(64))),
+            false,
+            1
+        )
+        .unwrap_err()
+        .0,
+        403
+    );
+    let saved = directory::put(&mut db, &title, None, true, 1).unwrap();
+    assert_eq!(saved["kind"], "title");
+    assert_eq!(saved["subject_id"], Value::Null);
+    assert_eq!(saved["bound_name"], "bob.dhttp.net");
 }

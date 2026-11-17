@@ -1,5 +1,25 @@
 # Pishoo Rust SDK
 
+## Interface sources
+
+`pishoo.wit` contains the Pishoo identity packages and their binding worlds.
+The Rust SDK uses the `sdk` world, which combines `identity-v1`, `identity-v2`,
+and `call-context`. The host selects these worlds individually. Each interface
+package carries its own version in its declaration.
+
+The SDK crate and developer bundle include `pishoo.wit`. The host's separate
+`pishoo-execution/` directory defines `pishoo:execution/runtime@0.1.0` and its
+standard WASI dependencies for command execution.
+
+## Verified identity
+
+`context::caller_service()` exposes `pishoo:identity/call-context@0.3.0`.
+It returns the direct same-identity calling Lib as `(author/package,
+author_owner_hash, version)`. The verified author subject belongs to the running
+Lib resource and is retained during package replacement. Owner-managed previews
+use the verified execution owner's hash as their service subject. External HTTP requests return
+`None`. Original visitor identity is available through `identity::caller()`.
+
 `pishoo-sdk` exports `identity` for the two-function
 `pishoo:identity/request-identity@0.2.0` interface. The host reads verified
 identity facts directly; the tuple is `(name, owner_hash from certificate SKI)`.

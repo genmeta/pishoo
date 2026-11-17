@@ -54,6 +54,10 @@ fn native_router(server: &Server) -> Router {
     let local_router = Arc::downgrade(&server.router);
     let profile = server.profile.clone();
     capabilities_router(server.profile.clone())
+        .merge(crate::file::personal_files_router(
+            server.profile.join("file"),
+            server.endpoint.clone(),
+        ))
         .merge(crate::contact::contact_router(
             server.profile.clone(),
             server.endpoint.clone(),
@@ -153,7 +157,9 @@ fn current_router(server: &Server) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             server.access.clone(),
             authorize,
-        ));
+        ))
+        .layer(axum::Extension(server.sandbox.clone()))
+        .layer(axum::Extension(server.endpoint.clone()));
     let api = Sandbox::api_router(
         server.sandbox.clone(),
         server.endpoint.clone(),
@@ -216,6 +222,7 @@ fn current_router(server: &Server) -> Router {
         )
         .layer(axum::Extension(server.sandbox.clone()))
         .layer(axum::Extension(server.profile.clone()))
+        .layer(axum::Extension(server.endpoint.clone()))
         .layer(axum::middleware::from_fn(crate::routes::normalize_method))
 }
 

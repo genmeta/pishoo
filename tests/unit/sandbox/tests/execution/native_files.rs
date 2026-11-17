@@ -244,6 +244,138 @@ async fn native_files_real_wasm_scope_and_message_authorization() {
     response.into_body().collect().await.unwrap();
     let bytes = std::fs::read(std::env::var_os("PISHOO_MESSAGE_COMPONENT").unwrap()).unwrap();
     let message = load(&bytes, &root.path().join("message"));
+    // Personal-library sources use the same native upload and file-read path
+    // for direct sends and service-scoped sends such as Group attachments.
+    let mut service = host_client::host_lib(&root.path().join("file-service"));
+    Arc::get_mut(&mut service).unwrap().id = "dev.example.dhttp.net/example/files".into();
+    Arc::get_mut(&mut service).unwrap().author_owner_hash = Some("c".repeat(64));
+    let response = invoke(message.clone(), Some(owner.clone()))
+        .execute(protocol(
+            json!({"type":"service_grant","service":service.id,
+            "author_owner_hash":"c".repeat(64),"channel":"example/files",
+            "operations":["upload","read_file"]}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    response.into_body().collect().await.unwrap();
+    for (case, size, scoped) in [
+        ("empty", 0, false),
+        ("json-limit", 64 * 1024, false),
+        ("above-json-limit", 64 * 1024 + 1, false),
+        (
+            "photo",
+            include_bytes!("../../../../fixtures/journal-photo.jpg").len(),
+            false,
+        ),
+        ("multiple-chunks", 4 * 1024 * 1024 + 65_537, false),
+        ("scoped-multiple-chunks", 4 * 1024 * 1024 + 65_537, true),
+    ] {
+        let contents: Vec<u8> = if case == "photo" {
+            include_bytes!("../../../../fixtures/journal-photo.jpg").to_vec()
+        } else {
+            (0..size).map(|index| (index % 251) as u8).collect()
+        };
+        let path = if case == "photo" {
+            "photo.jpg".to_owned()
+        } else {
+            format!("{case}.bin")
+        };
+        std::fs::write(root.path().join("file").join(&path), &contents).unwrap();
+        let response = invoke(first.clone(), Some(owner.clone()))
+            .execute(req(
+                "GET",
+                &format!("/std/file/library?path={path}&view=meta"),
+                vec![],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(status, 200, "{case}: {body:?}");
+        let source: Value = serde_json::from_slice(&body).unwrap();
+        let context = json!({"channel":"example/files","key":"library-resource"});
+        let request = |mut document: Value| {
+            if scoped {
+                document["resource_context"] = context.clone();
+            }
+            let mut request = protocol(document);
+            if scoped {
+                request.extensions_mut().insert(service.clone());
+            }
+            request
+        };
+        let document = json!({"type":"file_import","peer":"bob.dhttp.net",
+            "message_id":case,"request_id":case,"path":path,"version":source["version"]});
+        let mut imported_id = None;
+        let mut offset = 0;
+        loop {
+            let response = invoke(message.clone(), Some(owner.clone()))
+                .execute(request(document.clone()))
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(status, 201, "{case}: {body:?}");
+            let progress: Value = serde_json::from_slice(&body).unwrap();
+            let id = progress["id"].as_str().unwrap().to_owned();
+            if let Some(previous) = &imported_id {
+                assert_eq!(&id, previous, "resume must retain the native upload");
+            }
+            imported_id = Some(id);
+            assert_eq!(progress["size"], size);
+            assert_eq!(progress["offset"], size.min(offset + 4 * 1024 * 1024));
+            offset = progress["offset"].as_u64().unwrap() as usize;
+            if offset == size {
+                assert_eq!(
+                    progress["digest"],
+                    blake3::hash(&contents).to_hex().as_str()
+                );
+                break;
+            }
+        }
+        let id = imported_id.unwrap();
+        let response = invoke(message.clone(), Some(owner.clone()))
+            .execute(request(document.clone()))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(status, 201, "{case}: {body:?}");
+        let repeated: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(repeated["id"], id);
+        assert_eq!(repeated["offset"], size);
+        assert_eq!(repeated["name"], source["name"]);
+        assert_eq!(repeated["media_type"], source["media_type"]);
+        let response = invoke(message.clone(), Some(owner.clone()))
+            .execute(request(json!({"type":"file_read","id":id})))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{case}");
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
+            contents
+        );
+        std::fs::write(
+            root.path().join("file").join(&path),
+            b"edited after selection",
+        )
+        .unwrap();
+        let response = invoke(message.clone(), Some(owner.clone()))
+            .execute(request(document))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(status, 409, "{case}: {body:?}");
+    }
     let creation = json!({"type":"upload","peer":"bob","message_id":"file-test","request_id":"file-test","name":"test.txt","media_type":"text/plain","size":3});
     let response = invoke(message.clone(), Some(bob.clone()))
         .execute(protocol(creation.clone()))

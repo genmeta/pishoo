@@ -122,10 +122,11 @@ fn journal_authority(name: &str, owner: char) -> dhttp::LocalAuthority {
 #[tokio::test]
 #[ignore = "run alone: generates credentials and sets process-wide TLS roots"]
 async fn request_identity_is_derived_from_handshake_and_owner_requires_name_and_key() {
-    use identity::pishoo::identity::request_identity::Host;
+    use identity::pishoo::identity0_1_0::request_identity::Host;
     let root = tempfile::tempdir().unwrap();
     let (local, owner, bob) = journal_credentials(root.path()).await;
     let mut state = StoreData {
+        caller_service: None,
         commands: std::sync::Arc::default(),
         table: ResourceTable::new(),
         wasi: wasmtime_wasi::WasiCtx::builder().build(),
@@ -135,7 +136,7 @@ async fn request_identity_is_derived_from_handshake_and_owner_requires_name_and_
         local: local.clone(),
         remote: None,
     };
-    use crate::sandbox::host::identity_v2::pishoo::identity::request_identity::Host as HostV2;
+    use crate::sandbox::host::identity_v2::pishoo::identity0_2_0::request_identity::Host as HostV2;
     let verified_local = HostV2::local(&mut state).await.unwrap();
     assert_eq!(verified_local.0, "alice.dhttp.net");
     assert_eq!(HostV2::caller(&mut state).await.unwrap(), None);

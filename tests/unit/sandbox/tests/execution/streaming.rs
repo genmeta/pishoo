@@ -125,6 +125,7 @@ async fn large_echo_reports_fuel_exhaustion() {
     let mut store = Store::new(
         &lib.runtime.engine,
         StoreData {
+            caller_service: None,
             commands: std::sync::Arc::default(),
             table: wasmtime::component::ResourceTable::new(),
             wasi,

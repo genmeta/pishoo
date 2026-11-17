@@ -27,7 +27,7 @@ use wasmtime_wasi_http::{
 
 use super::{
     Invocation, Lib, Outgoing, Sandbox, StoreData, WasmRuntime,
-    host::{execution, identity, identity_v2},
+    host::{call_context, execution, identity, identity_v2},
 };
 use crate::{Body, Error, Result, package::valid_id};
 
@@ -143,12 +143,17 @@ impl WasmRuntime {
             wasmtime_wasi::filesystem::WasiFilesystem,
         >(&mut linker, StoreData::filesystem)
         .map_err(Error::Guest)?;
-        identity::IdentityHost::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+        identity::IdentityV1::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
             &mut linker,
             |state| state,
         )
         .map_err(Error::Guest)?;
-        identity_v2::IdentityHost::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+        identity_v2::IdentityV2::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+            &mut linker,
+            |state| state,
+        )
+        .map_err(Error::Guest)?;
+        call_context::CallContext::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
             &mut linker,
             |state| state,
         )
@@ -404,6 +409,7 @@ impl Lib {
         let filesystem = builder.build().filesystem().clone();
         Ok(Self {
             id,
+            author_owner_hash: None,
             dependencies: std::collections::HashMap::new(),
             commands: Arc::new(commands),
             stream_retired: tokio_util::sync::CancellationToken::new(),
@@ -520,7 +526,33 @@ impl Invocation {
         })
     }
 
-    pub(crate) async fn execute(self, request: Request<Body>) -> Result<Response<Body>> {
+    pub(crate) async fn execute(self, mut request: Request<Body>) -> Result<Response<Body>> {
+        let caller_service = if let Some(source) = request.extensions().get::<Arc<Lib>>() {
+            let owner = match &source.author_owner_hash {
+                Some(owner) => owner.clone(),
+                None => dhttp_home::certificate::extract_dhttp_subject_key_identifier(
+                    self.local.certificates(),
+                )
+                .map_err(|error| Error::InvalidIdentity(error.to_string()))?
+                .owner_hash()
+                .as_str()
+                .to_owned(),
+            };
+            Some((
+                source.id.clone(),
+                owner,
+                source.openapi.info.version.clone(),
+            ))
+        } else {
+            None
+        };
+        // Only the direct, same-identity WASI caller can supply this metadata.
+        request.headers_mut().remove("pishoo-source-lib");
+        if let Some(source) = request.extensions().get::<Arc<Lib>>() {
+            let source = http::HeaderValue::from_str(&source.id)
+                .map_err(|error| Error::Guest(wasmtime::Error::new(error)))?;
+            request.headers_mut().insert("pishoo-source-lib", source);
+        }
         let Self {
             lib,
             local,
@@ -536,6 +568,7 @@ impl Invocation {
         let mut wasi = WasiCtx::builder().build();
         *wasi.filesystem() = lib.filesystem.clone();
         let store_data = StoreData {
+            caller_service,
             commands: lib.commands.clone(),
             table: ResourceTable::new(),
             wasi,
@@ -682,6 +715,7 @@ impl Invocation {
                 let mut store = Store::new(
                     &lib.runtime.engine,
                     StoreData {
+                        caller_service: None,
                         commands: lib.commands.clone(),
                         table: ResourceTable::new(),
                         wasi,

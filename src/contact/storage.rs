@@ -119,14 +119,14 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
         }
         tx.execute_batch(include_str!("sql/schema.sql"))
             .map_err(storage)?;
-        tx.pragma_update(None, "user_version", 5).map_err(storage)?;
+        tx.pragma_update(None, "user_version", 6).map_err(storage)?;
     } else if version == 1 {
         tx.execute_batch(include_str!(
             "sql/migrations/v2_bind_contact_generation.sql"
         ))
         .map_err(storage)?;
         tx.pragma_update(None, "user_version", 2).map_err(storage)?;
-    } else if !(2..=5).contains(&version) {
+    } else if !(2..=6).contains(&version) {
         return Err(fail(500, "unsupported contact database version"));
     }
     if version == 1 || version == 2 {
@@ -147,6 +147,11 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
         tx.execute_batch(include_str!("sql/migrations/v5_add_review_tracking.sql"))
             .map_err(storage)?;
         tx.pragma_update(None, "user_version", 5).map_err(storage)?;
+    }
+    if (1..=5).contains(&version) {
+        tx.execute_batch(include_str!("sql/migrations/v6_add_directory_entries.sql"))
+            .map_err(storage)?;
+        tx.pragma_update(None, "user_version", 6).map_err(storage)?;
     }
     tx.prepare("SELECT id,target_name,description,requested_capabilities,offered_capabilities,application_id,status,expired_after,delivery_deadline,remote_expired_after,next_attempt_at,attempt_count,lease_until,last_checked_at,error_message,created_at,updated_at,contact_id,contact_subject,requested_access,offers,review_id,review_subject,review_method,review_path FROM outbound_contact_request LIMIT 0").map_err(storage)?;
     tx.commit().map_err(storage)?;

@@ -15,6 +15,7 @@ use tower::ServiceExt;
 mod access;
 mod capabilities;
 mod delivery;
+mod directory;
 mod storage;
 
 pub(crate) use delivery::contact_jobs;
@@ -92,7 +93,10 @@ fn integer(target: &str, key: &str, default: i64) -> Result<i64, Failure> {
 fn page(target: &str) -> Result<(i64, i64), Failure> {
     let p = integer(target, "page", 1)?;
     let size = integer(target, "page_size", 20)?;
-    if p < 1 || !(1..=100).contains(&size) {
+    if p < 1
+        || !(1..=100).contains(&size)
+        || p.checked_sub(1).and_then(|p| p.checked_mul(size)).is_none()
+    {
         return Err(fail(400, "invalid pagination"));
     }
     Ok((p, size))
@@ -111,7 +115,7 @@ fn project_contact(mut contact: Value, draft: &Value) -> Value {
         return contact;
     }
     if contact.is_null() {
-        contact = json!({"id":null,"name":draft["target_name"],"subject_id":null,"alias":null,"class":"Human",
+        contact = json!({"kind":"name","id":null,"name":draft["target_name"],"subject_id":null,"alias":null,"class":"Human",
             "description":draft["description"],"status":"pending","incoming":false,
             "created_at":draft["created_at"],"updated_at":draft["updated_at"],"valid_before":draft["valid_before"],
             "requested_access":{},"granted_access":{},"offers":{}});
@@ -139,7 +143,7 @@ pub(crate) fn contact_router(
                 if !((path == "/std/contact"
                     && matches!(
                         *request.method(),
-                        Method::GET | Method::POST | Method::DELETE
+                        Method::GET | Method::POST | Method::PUT | Method::PATCH | Method::DELETE
                     ))
                     || path == "/std/contact/list" && *request.method() == Method::GET)
                 {
@@ -176,12 +180,27 @@ async fn dispatch(
         .extensions()
         .get::<access_control::Visitor>()
         .cloned();
+    let verified_owner = access::owner(&endpoint)?;
+    let service = request
+        .extensions()
+        .get::<Arc<crate::sandbox::Lib>>()
+        .map(|lib| {
+            let subject = lib.author_owner_hash.clone().unwrap_or_else(|| {
+                String::from_utf8_lossy(verified_owner.subject_id().as_bytes()).into_owned()
+            });
+            (lib.id.clone(), subject)
+        });
+    let owner = visitor.as_ref().is_some_and(|v| {
+        v.name() == verified_owner.name() && v.subject_id() == verified_owner.subject_id()
+    });
     let method = request.method().clone();
-    if matches!(method, Method::POST | Method::PUT | Method::DELETE)
-        && request
-            .headers()
-            .get("sec-fetch-site")
-            .is_some_and(|v| v == "cross-site")
+    if matches!(
+        method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) && request
+        .headers()
+        .get("sec-fetch-site")
+        .is_some_and(|v| v == "cross-site")
     {
         return Err(fail(403, "cross-origin request denied"));
     }
@@ -190,7 +209,11 @@ async fn dispatch(
     let request_query = request.uri().query().unwrap_or("").to_owned();
     let bytes = axum::body::to_bytes(
         request.into_body(),
-        if (method == Method::POST || method == Method::DELETE) && path == "/std/contact" {
+        if matches!(
+            method,
+            Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+        ) && path == "/std/contact"
+        {
             65536
         } else {
             0
@@ -235,6 +258,131 @@ async fn dispatch(
             ))
         }
     };
+    if path == "/std/contact" && method == Method::PUT {
+        let doc: Value = serde_json::from_slice(&bytes).map_err(|_| fail(400, "invalid JSON"))?;
+        if doc["type"] == "service_identity" {
+            let service = service
+                .as_ref()
+                .ok_or_else(|| fail(403, "authenticated service required"))?;
+            let db = database(&profile)?;
+            return Ok((
+                200,
+                json!({"group_write":directory::authorize(&db,service,"group").is_ok(),"name_read":directory::authorize(&db,service,"name").is_ok()}),
+            ));
+        }
+        if doc["type"] == "service_grant" || doc["type"] == "service_grants" {
+            if !owner || service.is_some() {
+                return Err(fail(403, "direct owner required"));
+            }
+            return Ok((200, directory::grants(&mut database(&profile)?, &doc)?));
+        }
+        if let Some(service) = &service {
+            directory::authorize(&database(&profile)?, service, string(&doc, "kind")?)?;
+        }
+        if doc["kind"] == "title" {
+            if !owner {
+                return Err(fail(403, "verified owner required"));
+            }
+            let bound = access
+                .find_contact_by_name(string(&doc, "bound_name")?)
+                .await
+                .map_err(|error| fail(409, error.to_string()))?;
+            if bound.subject_id.as_bytes() != string(&doc, "bound_subject")?.as_bytes() {
+                return Err(fail(409, "title_binding_conflict"));
+            }
+        }
+        let mut db = database(&profile)?;
+        return Ok((
+            200,
+            directory::put(&mut db, &doc, service.as_ref(), owner, now())?,
+        ));
+    }
+    if path == "/std/contact" && method == Method::GET {
+        if let Some(service) = &service {
+            if let Some(target) = parameter(&target, "name")? {
+                if !target.contains('@')
+                    && !target.contains('#')
+                    && !owner
+                    && visitor
+                        .as_ref()
+                        .is_none_or(|person| person.name() != name(&target).unwrap_or_default())
+                {
+                    directory::authorize(&database(&profile)?, service, "name")?;
+                    let target = name(&target)?;
+                    let contact = access
+                        .find_contact_by_name(&target)
+                        .await
+                        .map_err(|error| fail(404, error.to_string()))?;
+                    let status = if contact.expired_after <= now() {
+                        "expired"
+                    } else {
+                        match contact.status {
+                            2 => "active",
+                            3 => "transfered",
+                            4 => "expired",
+                            5 => "blocked",
+                            _ => "pending",
+                        }
+                    };
+                    return Ok((
+                        200,
+                        json!({"name":contact.name,"status":status,"subject_id":String::from_utf8_lossy(contact.subject_id.as_bytes())}),
+                    ));
+                }
+            }
+        }
+    }
+    let directory_target = parameter(&target, "name")?
+        .filter(|name| name.contains('~') && name.contains('#') || name.contains('@'));
+    if path == "/std/contact"
+        && let Some(target) = directory_target
+    {
+        if !owner {
+            return Err(fail(403, "verified owner required"));
+        }
+        let db = database(&profile)?;
+        let mut value = match method {
+            Method::GET => directory::entry(&db, &target)?,
+            Method::PATCH => {
+                let doc = serde_json::from_slice(&bytes).map_err(|_| fail(400, "invalid JSON"))?;
+                directory::patch(&db, &target, &doc, now())?
+            }
+            Method::DELETE => {
+                if !bytes.is_empty() {
+                    return Err(fail(400, "provide name or names, not both"));
+                }
+                directory::patch(&db, &target, &json!({"hidden":true}), now())?;
+                return Ok((204, Value::Null));
+            }
+            _ => return Err(fail(405, "method not allowed")),
+        };
+        if value["kind"] == "title" {
+            let current = access
+                .find_contact_by_name(string(&value, "bound_name")?)
+                .await;
+            value["binding_changed"] = (!current.is_ok_and(|contact| {
+                Some(contact.subject_id.as_bytes())
+                    == value["bound_subject"].as_str().map(str::as_bytes)
+            }))
+            .into();
+        }
+        return Ok((200, value));
+    }
+    if method == Method::PATCH {
+        return native(
+            method,
+            target,
+            Some(serde_json::from_slice(&bytes).map_err(|_| fail(400, "invalid JSON"))?),
+        )
+        .await;
+    }
+    let kind = parameter(&target, "kind")?.unwrap_or_else(|| "name".into());
+    if !["name", "group", "title", "all"].contains(&kind.as_str()) {
+        return Err(fail(400, "invalid contact kind"));
+    }
+    if kind != "name" && !owner {
+        return Err(fail(403, "verified owner required"));
+    }
     let manager = if let Some(visitor) = &visitor {
         matches!(
             access
@@ -275,7 +423,12 @@ async fn dispatch(
         if path == "/std/contact" {
             let name =
                 name(&parameter(&target, "name")?.ok_or_else(|| fail(400, "name is required"))?)?;
-            let response = native(Method::GET, target, None).await;
+            let response = native(Method::GET, target, None)
+                .await
+                .map(|(status, mut value)| {
+                    value["kind"] = "name".into();
+                    (status, value)
+                });
             return match (response, drafts.get(&name)) {
                 (Ok((status, value)), Some(draft)) => Ok((status, project_contact(value, draft))),
                 (Err((404, _)), Some(draft))
@@ -289,12 +442,20 @@ async fn dispatch(
         }
         let (requested_page, size) = page(&target)?;
         let params = form_urlencoded::parse(request_query.as_bytes())
-            .filter(|(key, _)| key != "page" && key != "page_size")
+            .filter(|(key, _)| {
+                key != "page"
+                    && key != "page_size"
+                    && key != "kind"
+                    && (kind == "name" || (key != "search" && key != "modified_since"))
+            })
             .map(|(key, value)| (key.into_owned(), value.into_owned()))
             .collect::<Vec<_>>();
         let mut items = Vec::new();
         let mut current = 1;
         let deleted = loop {
+            if kind == "group" || kind == "title" {
+                break json!([]);
+            }
             let uri = {
                 let mut query = form_urlencoded::Serializer::new(String::new());
                 query
@@ -328,16 +489,57 @@ async fn dispatch(
                     .unwrap_or_default()
                     .to_lowercase();
                 let since = integer(&target, "modified_since", 0)?;
-                if name.to_lowercase().contains(&search)
-                    && value["updated_at"].as_i64().unwrap_or(0) >= since
+                if kind != "name"
+                    || name.to_lowercase().contains(&search)
+                        && value["updated_at"].as_i64().unwrap_or(0) >= since
                 {
                     items.push(value);
                 }
             }
         }
+        for item in &mut items {
+            item["kind"] = "name".into();
+        }
+        if kind != "name" {
+            items.extend(directory::entries(&database(&profile)?)?);
+            let search = parameter(&target, "search")?
+                .unwrap_or_default()
+                .to_lowercase();
+            let since = integer(&target, "modified_since", 0)?;
+            items.retain(|value| {
+                (kind == "all" || value["kind"] == kind)
+                    && value["updated_at"].as_i64().unwrap_or(0) >= since
+                    && ["name", "alias", "nickname", "description"]
+                        .iter()
+                        .any(|key| {
+                            value[*key]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_lowercase()
+                                .contains(&search)
+                        })
+            });
+        }
+        for item in items.iter_mut().filter(|item| item["kind"] == "title") {
+            let current = access
+                .find_contact_by_name(string(item, "bound_name")?)
+                .await;
+            item["binding_changed"] = (!current.is_ok_and(|contact| {
+                Some(contact.subject_id.as_bytes())
+                    == item["bound_subject"].as_str().map(str::as_bytes)
+            }))
+            .into();
+        }
         let key = parameter(&target, "sort")?.unwrap_or_else(|| "updated_at".into());
         let key = if key == "names" { "name" } else { key.as_str() };
-        let asc = parameter(&target, "order")?.as_deref() == Some("asc");
+        if !["name", "alias", "class", "created_at", "updated_at"].contains(&key) {
+            return Err(fail(400, "invalid contact sort"));
+        }
+        let order = parameter(&target, "order")?.unwrap_or_else(|| "desc".into());
+        if !["asc", "desc"].contains(&order.as_str()) {
+            return Err(fail(400, "invalid contact order"));
+        }
+        let asc = order == "asc";
         items.sort_by(|a, b| {
             let order = if matches!(key, "created_at" | "updated_at") {
                 a[key].as_i64().cmp(&b[key].as_i64())

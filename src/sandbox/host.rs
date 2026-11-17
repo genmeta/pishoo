@@ -9,21 +9,35 @@ mod http;
 
 pub(super) mod identity {
     wasmtime::component::bindgen!({
-        path: "wit/pishoo-identity",
-        inline: "package pishoo:host; world identity-host { import pishoo:identity/signatures@0.1.0; import pishoo:identity/request-identity@0.1.0; }",
+        path: "wit",
+        world: "identity-v1",
         imports: { default: async },
     });
 }
 
 pub(super) mod identity_v2 {
     wasmtime::component::bindgen!({
-        path: "wit/pishoo-identity-v2",
-        inline: "package pishoo:host; world identity-host { import pishoo:identity/request-identity@0.2.0; }",
+        path: "wit",
+        world: "identity-v2",
         imports: { default: async | trappable },
     });
 }
 
-impl identity_v2::pishoo::identity::request_identity::Host for StoreData {
+pub(super) mod call_context {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "call-context",
+        imports: { default: async | trappable },
+    });
+}
+
+impl call_context::pishoo::identity0_3_0::call_context::Host for StoreData {
+    async fn caller_service(&mut self) -> wasmtime::Result<Option<(String, String, String)>> {
+        Ok(self.caller_service.clone())
+    }
+}
+
+impl identity_v2::pishoo::identity0_2_0::request_identity::Host for StoreData {
     async fn local(&mut self) -> wasmtime::Result<(String, String)> {
         let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(
             self.local.certificates(),
@@ -49,7 +63,7 @@ impl identity_v2::pishoo::identity::request_identity::Host for StoreData {
     }
 }
 
-impl identity::pishoo::identity::request_identity::Host for StoreData {
+impl identity::pishoo::identity0_1_0::request_identity::Host for StoreData {
     async fn local_name(&mut self) -> String {
         self.local.name().to_owned()
     }
@@ -85,12 +99,12 @@ impl identity::pishoo::identity::request_identity::Host for StoreData {
     }
 }
 
-impl identity::pishoo::identity::signatures::Host for StoreData {
+impl identity::pishoo::identity0_1_0::signatures::Host for StoreData {
     async fn sign(
         &mut self,
         data: Vec<u8>,
-    ) -> std::result::Result<Vec<u8>, identity::pishoo::identity::signatures::SignError> {
-        use identity::pishoo::identity::signatures::SignError;
+    ) -> std::result::Result<Vec<u8>, identity::pishoo::identity0_1_0::signatures::SignError> {
+        use identity::pishoo::identity0_1_0::signatures::SignError;
         if data.len() > 1024 * 1024 {
             return Err(SignError::InputTooLarge);
         }
@@ -122,8 +136,8 @@ impl identity::pishoo::identity::signatures::Host for StoreData {
         signature: Vec<u8>,
         data: Vec<u8>,
         name: String,
-    ) -> std::result::Result<bool, identity::pishoo::identity::signatures::VerifyError> {
-        use identity::pishoo::identity::signatures::VerifyError;
+    ) -> std::result::Result<bool, identity::pishoo::identity0_1_0::signatures::VerifyError> {
+        use identity::pishoo::identity0_1_0::signatures::VerifyError;
         if data.len() > 1024 * 1024 || signature.len() > 8192 {
             return Err(VerifyError::InputTooLarge);
         }

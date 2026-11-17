@@ -3,6 +3,170 @@ use serde_json::{Value, json};
 
 use super::*;
 
+#[tokio::test]
+#[ignore = "run alone with PISHOO_MESSAGE_COMPONENT; verifies generic Message APIs in real WASM"]
+async fn message_foundation_http_save_receive_and_scoped_replay() {
+    let component = std::fs::read(std::env::var_os("PISHOO_MESSAGE_COMPONENT").unwrap()).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let (local, owner, bob) = journal::journal_credentials(root.path()).await;
+    let directory = root.path().join("message");
+    let lib = load(&component, &directory);
+    let tasks = TaskTracker::new();
+    let invoke = |remote| {
+        Invocation::new(
+            lib.clone(),
+            crate::test_support::identity::endpoint("alice.dhttp.net"),
+            &dhttp::HandshakeSummary {
+                alpn: None,
+                local: Some(local.clone()),
+                remote: Some(remote),
+            },
+            tasks.clone(),
+            Outgoing::Denied,
+        )
+        .unwrap()
+    };
+    let call = |method: &str, path: &str, document: &Value| {
+        Request::builder()
+            .method(method)
+            .uri(format!("https://alice.dhttp.net{path}"))
+            .header("content-type", "application/json")
+            .header("pishoo-source-lib", "forged/source")
+            .body(
+                Full::new(Bytes::from(document.to_string()))
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+            )
+            .unwrap()
+    };
+    let saved = json!({"type":"save","channel":"example/history","client_message_id":"event-1",
+        "content":{"text":"verified history","seq":"1"}});
+    let response = invoke(bob.clone())
+        .execute(call("POST", "/comm/message", &saved))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+    response.into_body().collect().await.unwrap();
+    let response = invoke(owner.clone())
+        .execute(call("POST", "/comm/message", &saved))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::CREATED);
+    let original: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(original["source_kind"], "save");
+    assert!(original["from"].is_null());
+    let response = invoke(owner.clone())
+        .execute(call("POST", "/comm/message", &saved))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let repeated: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(original, repeated);
+    let mut service = host_client::host_lib(&root.path().join("service"));
+    Arc::get_mut(&mut service).unwrap().id = "dev.example.dhttp.net/example/tool".into();
+    let mut request = call("POST", "/comm/message", &saved);
+    request.extensions_mut().insert(service.clone());
+    let response = invoke(owner.clone()).execute(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+    response.into_body().collect().await.unwrap();
+    let receive = json!({"type":"receive","to":"alice.dhttp.net","channel":"example/protocol",
+        "client_message_id":"incoming-1","content":{"type":"submit","text":"hello"}});
+    let response = invoke(bob.clone())
+        .execute(call("POST", "/comm/message", &receive))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::CREATED);
+    let received: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(received["from"], "bob.dhttp.net");
+    assert_eq!(received["source_kind"], "receive");
+    let response = invoke(owner.clone())
+        .execute(call(
+            "GET",
+            "/comm/message/list?channel=example%2Fhistory&indices=1",
+            &Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let page: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(page["items"], json!([original]));
+    let mut verified_service = host_client::host_lib(&root.path().join("verified-service"));
+    Arc::get_mut(&mut verified_service).unwrap().id = service.id.clone();
+    Arc::get_mut(&mut verified_service)
+        .unwrap()
+        .author_owner_hash = Some("c".repeat(64));
+    let service = verified_service;
+    let grant = json!({"type":"service_grant","service":service.id,"author_owner_hash":"c".repeat(64),
+        "channel":"example/history","operations":["save","read"]});
+    let response = invoke(owner.clone())
+        .execute(call("POST", "/comm/message", &grant))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    response.into_body().collect().await.unwrap();
+    let mut delegated = saved.clone();
+    delegated["client_message_id"] = "service-event".into();
+    let mut request = call("POST", "/comm/message", &delegated);
+    request.extensions_mut().insert(service.clone());
+    let response = invoke(bob.clone()).execute(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::CREATED);
+    let delegated: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(delegated["writer"]["kind"], "service");
+    assert_eq!(delegated["writer"]["name"], service.id);
+    assert_eq!(delegated["writer"]["subject"], "c".repeat(64));
+    assert!(delegated["from"].is_null());
+    let mut request = call(
+        "GET",
+        "/comm/message/list?channel=example%2Fprotocol",
+        &Value::Null,
+    );
+    request.extensions_mut().insert(service.clone());
+    let response = invoke(owner.clone()).execute(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+    response.into_body().collect().await.unwrap();
+    let mut request = call("POST", "/comm/message", &grant);
+    request.extensions_mut().insert(service.clone());
+    let response = invoke(owner.clone()).execute(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+    response.into_body().collect().await.unwrap();
+    let mut replacement = host_client::host_lib(&root.path().join("replacement-service"));
+    Arc::get_mut(&mut replacement).unwrap().id = service.id.clone();
+    Arc::get_mut(&mut replacement).unwrap().author_owner_hash = Some("d".repeat(64));
+    let mut request = call("POST", "/comm/message", &saved);
+    request.extensions_mut().insert(replacement);
+    let response = invoke(owner.clone()).execute(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+    response.into_body().collect().await.unwrap();
+    let request = Request::get(
+        "https://alice.dhttp.net/comm/message/list?channel=example%2Fprotocol&direction=incoming",
+    )
+    .header("accept", "text/event-stream")
+    .body(empty())
+    .unwrap();
+    let response = invoke(owner.clone()).execute(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let mut stream = response.into_body();
+    let mut pending = Vec::new();
+    assert!(
+        event(&mut stream, &mut pending)
+            .await
+            .starts_with("event: ready\n")
+    );
+    let frame = event(&mut stream, &mut pending).await;
+    assert!(frame.starts_with("event: records\n"));
+    let data: Value = serde_json::from_str(frame.split_once("data: ").unwrap().1).unwrap();
+    assert_eq!(data["items"][0]["index"], received["index"]);
+    assert_eq!(data["items"][0]["content"], receive["content"]);
+    drop(stream);
+    reaped(&tasks).await;
+    assert!(!directory.join("database.lock").exists());
+}
+
 async fn event(body: &mut Body, pending: &mut Vec<u8>) -> String {
     tokio::time::timeout(Duration::from_secs(3), async {
         let mut checked = 0;
@@ -179,6 +343,12 @@ async fn verify_message_stream(large_replay: bool, escaped: bool) {
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     let message = event(&mut stream, &mut pending).await;
     assert!(message.contains("跨实例消息"));
+    let summary = event(&mut stream, &mut pending).await;
+    assert!(summary.starts_with("event: conversations"));
+    let summary: Value =
+        serde_json::from_str(summary.split_once("data: ").unwrap().1.trim()).unwrap();
+    assert_eq!(summary["items"][0]["name"], "bob.dhttp.net");
+    assert_eq!(summary["items"][0]["last_message"]["content"], "跨实例消息");
     let cursor = message
         .lines()
         .find_map(|line| line.strip_prefix("id: "))
@@ -237,6 +407,9 @@ async fn verify_message_stream(large_replay: bool, escaped: bool) {
         while seen.len() < 102 {
             let frame = event(&mut stream, &mut pending).await;
             assert!(frame.len() + 2 <= 512 * 1024);
+            if frame.starts_with("event: conversations") {
+                continue;
+            }
             let data: Value = serde_json::from_str(
                 frame
                     .lines()
@@ -417,16 +590,6 @@ async fn verify_message_delivery(large_image: bool, cancel_early: bool) {
         let db = rusqlite::Connection::open(data.join("database")).unwrap();
         db.execute_batch(&std::fs::read_to_string(repo.join("src/sql/schema.sql")).unwrap())
             .unwrap();
-        db.execute_batch(
-            &std::fs::read_to_string(repo.join("src/sql/migrations/v5_add_message_changes.sql"))
-                .unwrap(),
-        )
-        .unwrap();
-        db.execute_batch(
-            &std::fs::read_to_string(repo.join("src/sql/migrations/v6_add_image_content.sql"))
-                .unwrap(),
-        )
-        .unwrap();
         for id in 1..=if large_image || cancel_early { 1 } else { 34 } {
             let target = if !large_image && id == 1 {
                 "slow.dhttp.net"
@@ -773,4 +936,151 @@ async fn message_chat_idle_subscription_resource_samples() {
             break;
         }
     }
+}
+
+#[tokio::test]
+#[ignore = "run alone with PISHOO_MESSAGE_COMPONENT; generates isolated TLS credentials"]
+async fn message_group_lifecycle_and_leases_require_direct_trusted_source() {
+    let component = std::fs::read(std::env::var_os("PISHOO_MESSAGE_COMPONENT").unwrap()).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let (local, owner, bob) = journal::journal_credentials(root.path()).await;
+    let lib = load(&component, &root.path().join("message"));
+    let mut group = host_client::host_lib(&root.path().join("group"));
+    Arc::get_mut(&mut group).unwrap().id = "dev.genmeta.tech.dhttp.net/std/comm/group".into();
+    let endpoint = crate::test_support::identity::endpoint("alice.dhttp.net");
+    let tasks = TaskTracker::new();
+    let call =
+        |method: &str, path: &str, doc: Value, remote: dhttp::RemoteAuthority, trusted: bool| {
+            let invocation = Invocation::new(
+                lib.clone(),
+                endpoint.clone(),
+                &dhttp::HandshakeSummary {
+                    alpn: None,
+                    local: Some(local.clone()),
+                    remote: Some(remote),
+                },
+                tasks.clone(),
+                Outgoing::Denied,
+            )
+            .unwrap();
+            let mut request = Request::builder()
+                .method(method)
+                .uri(format!("https://alice.dhttp.net{path}"))
+                .header("content-type", "application/json")
+                .header(
+                    "pishoo-source-lib",
+                    "dev.genmeta.tech.dhttp.net/std/comm/group",
+                )
+                .body(
+                    Full::new(Bytes::from(doc.to_string()))
+                        .map_err(|never| match never {})
+                        .boxed_unsync(),
+                )
+                .unwrap();
+            if trusted {
+                request.extensions_mut().insert(group.clone());
+            }
+            async move {
+                let response = invocation.execute(request).await.unwrap();
+                let status = response.status().as_u16();
+                let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+            }
+        };
+    let context = json!({"type":"group_record","group_id":"alice~#dev","host":"alice.dhttp.net","host_owner_hash":"a".repeat(64),"local_joined_seq":"1","group_revision":"1","local_state":"active"});
+    assert_eq!(
+        call(
+            "POST",
+            "/comm/message",
+            context.clone(),
+            owner.clone(),
+            false
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        call("POST", "/comm/message", context.clone(), bob.clone(), true)
+            .await
+            .0,
+        200
+    );
+    let history = call(
+        "GET",
+        "/comm/message/list?name=alice~%23dev",
+        Value::Null,
+        owner.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(history.0, 200);
+    assert_eq!(history.1["items"], json!([]));
+    let summary = call(
+        "GET",
+        "/comm/message/conversations",
+        Value::Null,
+        owner.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(summary.1["items"], json!([]));
+    let local_hash =
+        dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
+            .unwrap()
+            .owner_hash()
+            .to_string();
+    let mut queued = context.clone();
+    queued["client_message_id"] = "one".into();
+    queued["from"] = "alice.dhttp.net".into();
+    queued["from_subject"] = local_hash.into();
+    queued["sender_joined_seq"] = "1".into();
+    queued["content"] = "Hello group".into();
+    queued["state"] = "queued".into();
+    assert_eq!(
+        call("POST", "/comm/message", queued.clone(), bob.clone(), true)
+            .await
+            .0,
+        403
+    );
+    let saved = call("POST", "/comm/message", queued.clone(), owner.clone(), true).await;
+    assert_eq!(saved.0, 202);
+    let index = saved.1["index"].clone();
+    let claim = json!({"type":"group_claim","group_id":"alice~#dev","local_joined_seq":"1"});
+    let leased = call("POST", "/comm/message", claim.clone(), owner.clone(), true).await;
+    assert_eq!(leased.0, 200);
+    assert_eq!(leased.1["message"]["index"], index);
+    let mut left = context;
+    left["group_revision"] = "2".into();
+    left["local_state"] = "left".into();
+    assert_eq!(
+        call("POST", "/comm/message", left, bob.clone(), true)
+            .await
+            .0,
+        200
+    );
+    assert_eq!(
+        call("POST", "/comm/message", claim, owner.clone(), true)
+            .await
+            .0,
+        409
+    );
+    queued["state"] = "sent".into();
+    queued["seq"] = "2".into();
+    queued["created_at"] = 1.into();
+    queued["lease_token"] = leased.1["lease_token"].clone();
+    let sent = call("POST", "/comm/message", queued, bob, true).await;
+    assert_eq!(sent.0, 200);
+    assert_eq!(sent.1["index"], index);
+    assert_eq!(sent.1["state"], "sent");
+    let history = call(
+        "GET",
+        "/comm/message/list?name=alice~%23dev",
+        Value::Null,
+        owner,
+        false,
+    )
+    .await;
+    assert_eq!(history.1["items"][0]["to"], "alice~#dev");
+    reaped(&tasks).await;
 }

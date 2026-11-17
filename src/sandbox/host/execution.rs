@@ -159,6 +159,7 @@ async fn execute_child(
         let mut store = Store::new(
             &engine,
             StoreData {
+                caller_service: None,
                 commands: Arc::default(),
                 table: ResourceTable::new(),
                 wasi,

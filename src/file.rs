@@ -21,7 +21,7 @@ use sha2::Digest;
 use tokio::io::AsyncWriteExt;
 mod checkpoint;
 mod copy;
-pub(crate) use copy::library_router;
+pub(crate) use copy::{library_router, personal_files_router};
 mod sql;
 mod vfs;
 use checkpoint::Checkpoint;

@@ -466,6 +466,9 @@ async fn app_ranges_and_conditions_follow_the_selected_file_including_spa_fallba
     for path in [
         "/app/hello/",
         "/app/hello/conversations/bob",
+        "/app/hello/groups/sky.lee~%23developer",
+        "/app/hello/contacts/zero.ai.dhttp.net",
+        "/app/hello/contacts/student%40mit.edu",
         "/app/hello/index.html?view=1",
     ] {
         let mut conditional = request(Method::GET, path);
@@ -508,6 +511,9 @@ async fn app_ranges_and_conditions_follow_the_selected_file_including_spa_fallba
             "/app/hello/assets/missing.js",
             StatusCode::NOT_FOUND,
         ),
+        (Method::GET, "/app/hello/missing.js", StatusCode::NOT_FOUND),
+        (Method::GET, "/app/hello/missing.css", StatusCode::NOT_FOUND),
+        (Method::GET, "/app/hello/missing.png", StatusCode::NOT_FOUND),
         (Method::POST, "/app/hello/", StatusCode::METHOD_NOT_ALLOWED),
         (Method::GET, "/app/absent/", StatusCode::NOT_FOUND),
     ] {
