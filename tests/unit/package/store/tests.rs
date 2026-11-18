@@ -152,7 +152,7 @@ fn complete_ids_conflict_with_legacy_names_and_reject_other_authors() {
     assert!(install_lib(&profile, "bob.dhttp.net/note", &bytes, &runtime).is_err());
     super::super::remove_lib(&profile, id).unwrap();
     super::super::remove_lib(&profile, id).unwrap();
-    assert!(!profile.join("lib/note_1.2.4.wasm").exists());
+    assert!(!profile.join("lib/note.wasm.1.2.4").exists());
     assert!(profile.join(".volume/note").is_dir());
     let outside = root.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
@@ -175,7 +175,7 @@ fn frontend_release_proof_binds_package_dependencies_without_runtime_projection(
 }
 
 #[test]
-fn dependency_tree_orders_transitive_libs_and_rejects_cycles() {
+fn dependency_closure_preserves_root_and_accepts_cycles() {
     use super::super::tests::{package_fixture, publisher};
     let authority = publisher("alice.dhttp.net", 'a');
     let package = |name: &str, names: &[&str]| {
@@ -205,7 +205,7 @@ fn dependency_tree_orders_transitive_libs_and_rejects_cycles() {
         .iter()
         .map(|(_, id, _, _)| id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids.first(), Some(&"alice.dhttp.net/shared"));
+    assert!(ids.contains(&"alice.dhttp.net/shared"));
     assert_eq!(ids.last(), Some(&"alice.dhttp.net/parent"));
     assert_eq!(ids.len(), 4);
     assert!(
@@ -213,7 +213,7 @@ fn dependency_tree_orders_transitive_libs_and_rejects_cycles() {
             package("first", &["second"]),
             package("second", &["first"])
         ])
-        .is_err()
+        .is_ok()
     );
     assert!(order_releases(vec![package("parent", &["missing"])]).is_err());
     let (kind, id, bytes, reused) = package("parent", &["first", "second"]);
@@ -284,6 +284,7 @@ fn order_releases(
             .into_iter()
             .map(|(_, id, bytes, _)| super::super::tests::packages::with_proof((id, bytes)))
             .collect(),
+        &[],
     )?
     .into_iter()
     .map(|(id, bytes, _)| ("pkg".into(), id, bytes, false))

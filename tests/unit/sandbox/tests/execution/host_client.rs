@@ -59,6 +59,119 @@ async fn native(endpoint: &dhttp::Endpoint) -> (Arc<access_control::AccessServic
 }
 
 #[tokio::test]
+async fn wasi_outgoing_sse_uses_idle_deadlines_and_keeps_finite_response_limits() {
+    use wasmtime_wasi_http::WasiHttpHooks;
+    let endpoint = endpoint();
+    let (access, _) = native(&endpoint).await;
+    tokio::time::pause();
+    for (accept, content_type, large, expected) in [
+        ("text/event-stream", "text/event-stream", false, true),
+        ("text/event-stream", "text/event-stream", true, true),
+        ("text/event-stream;q=0", "text/event-stream", false, false),
+        ("text/event-stream", "application/json", false, false),
+    ] {
+        let api=axum::Router::new().route("/std/native",axum::routing::get(move || async move {
+            let frames=async_stream::stream! {
+                if large {
+                    for _ in 0..3 {
+                        yield Ok::<_,std::io::Error>(http_body::Frame::data(Bytes::from(vec![b'x';8*1024*1024])));
+                    }
+                } else {
+                    yield Ok::<_,std::io::Error>(http_body::Frame::data(Bytes::from_static(b":\n\n")));
+                }
+                tokio::time::sleep(Duration::from_secs(18)).await;
+                yield Ok(http_body::Frame::data(Bytes::from_static(b"data: done\n\n")));
+            };
+            http::Response::builder().header(http::header::CONTENT_TYPE,content_type)
+                .body(axum::body::Body::new(StreamBody::new(Box::pin(frames)))).unwrap()
+        }));
+        let mut outgoing = Outgoing::Granted {
+            source: None,
+            endpoint: endpoint.clone(),
+            access: access.clone(),
+            api,
+        };
+        let request = Request::get("https://~/std/native")
+            .header(http::header::ACCEPT, accept)
+            .body(
+                Empty::<Bytes>::new()
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+            )
+            .unwrap();
+        let (response, _completion) =
+            Box::into_pin(outgoing.send_request(request, None, Box::new(async { Ok(()) })))
+                .await
+                .unwrap();
+        let result = response.into_body().collect().await;
+        assert_eq!(
+            result.is_ok(),
+            expected,
+            "{accept}, {content_type}, large={large}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn local_service_admission_uses_the_bound_provider_authorization_declaration() {
+    use tower::ServiceExt;
+    let root = tempfile::tempdir().unwrap();
+    let endpoint = endpoint();
+    let (access, _) = native(&endpoint).await;
+    let mut target = host_lib(&root.path().join("target"));
+    Arc::get_mut(&mut target).unwrap().id = "dev.genmeta.tech.dhttp.net/std/comm/message".into();
+    Arc::get_mut(&mut target).unwrap().openapi = serde_json::from_value(json!({
+        "openapi":"3.1.0","info":{"title":"Message","version":"2"},
+        "paths":{"/comm/message/list":{"get":{}}},"x-pishoo-service-authorization":true
+    }))
+    .unwrap();
+    let mut older = host_lib(&root.path().join("older"));
+    Arc::get_mut(&mut older).unwrap().id = target.id.clone();
+    Arc::get_mut(&mut older).unwrap().openapi = serde_json::from_value(json!({
+        "openapi":"3.1.0","info":{"title":"Message","version":"1"},
+        "paths":{"/comm/message/list":{"get":{}}}
+    }))
+    .unwrap();
+    let mut state = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    state.libs.insert(target.id.clone(), target.clone());
+    state
+        .versions
+        .insert((older.id.clone(), "1".into()), older.clone());
+    let sandbox = Arc::new(std::sync::RwLock::new(state));
+    let router = axum::Router::new()
+        .fallback(axum::routing::get(|| async { "provider checks grants" }))
+        .layer(axum::middleware::from_fn_with_state(
+            access,
+            crate::routes::authorize,
+        ));
+    for (provider, expected) in [(None, 403), (Some(target.clone()), 200), (Some(older), 403)] {
+        let mut request =
+            Request::get("https://alice.dhttp.net/std/comm/message/list?channel=example")
+                .header("pishoo-source-lib", "forged/source")
+                .body(axum::body::Body::empty())
+                .unwrap();
+        request.extensions_mut().insert(dhttp::HandshakeSummary {
+            alpn: None,
+            local: Some(endpoint.local_authority().unwrap()),
+            remote: None,
+        });
+        request.extensions_mut().insert(endpoint.clone());
+        request.extensions_mut().insert(sandbox.clone());
+        if let Some(provider) = provider {
+            let mut source = host_lib(&root.path().join(format!("source-{expected}")));
+            Arc::get_mut(&mut source).unwrap().id = "dev.example.dhttp.net/example/source".into();
+            Arc::get_mut(&mut source).unwrap().dependencies.insert(
+                "std/comm/message".into(),
+                (provider.id.clone(), provider.openapi.info.version.clone()),
+            );
+            request.extensions_mut().insert(source);
+        }
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status().as_u16(), expected);
+    }
+}
+
+#[tokio::test]
 async fn identity_v2_is_a_real_component_import_and_anonymous_has_no_caller() {
     let root = tempfile::tempdir().unwrap();
     let lib = host_lib(root.path());
@@ -105,6 +218,7 @@ async fn local_http_keeps_anonymous_authorization_and_cli_run_uses_native_owner(
         },
         tasks.clone(),
         Outgoing::Granted {
+            source: None,
             endpoint: endpoint.clone(),
             access: access.clone(),
             api: api.clone(),
@@ -125,6 +239,7 @@ async fn local_http_keeps_anonymous_authorization_and_cli_run_uses_native_owner(
         endpoint.clone(),
         tasks.clone(),
         Outgoing::Granted {
+            source: None,
             endpoint,
             access,
             api,
@@ -258,6 +373,7 @@ async fn host_client_real_dhttp_transport_uses_endpoint_credentials() {
         },
         tasks.clone(),
         Outgoing::Granted {
+            source: None,
             endpoint: endpoint.clone(),
             access,
             api: axum::Router::new(),
@@ -291,6 +407,7 @@ async fn granted_http_streams_before_upload_eof_and_checks_local_certificate_seq
         }),
     );
     let mut outgoing = Outgoing::Granted {
+        source: None,
         endpoint,
         access,
         api,
@@ -362,6 +479,7 @@ async fn cli_run_deadline_cancels_and_reaps_the_store_task() {
         endpoint.clone(),
         tasks.clone(),
         Outgoing::Granted {
+            source: None,
             endpoint,
             access,
             api,
@@ -390,6 +508,7 @@ async fn outgoing_default_options_preserve_review_wait_and_body_idle_timeout() {
         }),
     );
     let mut outgoing = Outgoing::Granted {
+        source: None,
         endpoint,
         access,
         api,
@@ -411,4 +530,146 @@ async fn outgoing_default_options_preserve_review_wait_and_body_idle_timeout() {
         Some(Err(HttpError::HttpResponseTimeout))
     ));
     Box::into_pin(completion).await.unwrap();
+}
+
+#[tokio::test]
+async fn source_header_is_rebuilt_from_same_identity_direct_lib_extension() {
+    let root = tempfile::tempdir().unwrap();
+    let lib = host_lib(root.path());
+    let endpoint = endpoint();
+    let tasks = TaskTracker::new();
+    let mut source = host_lib(&root.path().join("source"));
+    Arc::get_mut(&mut source).unwrap().id = "dev.genmeta.tech.dhttp.net/std/comm/group".into();
+    for trusted in [false, true] {
+        let invocation = Invocation::new(
+            lib.clone(),
+            endpoint.clone(),
+            &dhttp::HandshakeSummary {
+                alpn: None,
+                local: Some(endpoint.local_authority().unwrap().clone()),
+                remote: None,
+            },
+            tasks.clone(),
+            Outgoing::Denied,
+        )
+        .unwrap();
+        let mut request = request("/source", empty());
+        request.headers_mut().insert(
+            "pishoo-source-lib",
+            "spoofed/std/comm/group".parse().unwrap(),
+        );
+        if trusted {
+            request.extensions_mut().insert(source.clone());
+        }
+        let response = invocation.execute(request).await.unwrap();
+        let value: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(
+            value["source"],
+            if trusted {
+                json!(source.id)
+            } else {
+                Value::Null
+            }
+        );
+    }
+    reaped(&tasks).await;
+}
+
+#[tokio::test]
+async fn wasi_outgoing_discards_upstream_source_headers_and_sets_direct_lib() {
+    use wasmtime_wasi_http::WasiHttpHooks;
+    let root = tempfile::tempdir().unwrap();
+    let source = host_lib(root.path());
+    let endpoint = endpoint();
+    let (access, _) = native(&endpoint).await;
+    let expected = source.id.clone();
+    let api = axum::Router::new().route(
+        "/echo",
+        axum::routing::post(move |request: axum::extract::Request| {
+            let expected = expected.clone();
+            async move {
+                assert!(request.headers().get("pishoo-source-lib").is_none());
+                assert_eq!(request.extensions().get::<Arc<Lib>>().unwrap().id, expected);
+                "ok"
+            }
+        }),
+    );
+    let mut outgoing = Outgoing::Granted {
+        source: Some(source),
+        endpoint,
+        access,
+        api,
+    };
+    let request = Request::post("https://~/echo")
+        .header(
+            "pishoo-source-lib",
+            "dev.genmeta.tech.dhttp.net/std/comm/group",
+        )
+        .body(
+            http_body_util::Empty::<Bytes>::new()
+                .map_err(|never| match never {})
+                .boxed_unsync(),
+        )
+        .unwrap();
+    let (response, _) =
+        Box::into_pin(outgoing.send_request(request, None, Box::new(async { Ok(()) })))
+            .await
+            .unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn local_group_directory_authorization_preserves_original_anonymous_visitor() {
+    use tower::ServiceExt;
+    let root = tempfile::tempdir().unwrap();
+    let mut group = host_lib(root.path());
+    Arc::get_mut(&mut group).unwrap().id = "dev.genmeta.tech.dhttp.net/std/comm/group".into();
+    let endpoint = endpoint();
+    let (access, _) = native(&endpoint).await;
+    let api = axum::Router::new()
+        .route(
+            "/std/contact",
+            axum::routing::put(|request: axum::extract::Request| async move {
+                assert!(
+                    request
+                        .extensions()
+                        .get::<access_control::Visitor>()
+                        .is_none()
+                );
+                assert!(request.headers().get("pishoo-source-lib").is_none());
+                "verified group operation"
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            access,
+            crate::routes::authorize,
+        ));
+    for trusted in [false, true] {
+        let mut request = Request::put("https://alice.dhttp.net/std/contact")
+            .header(
+                "pishoo-source-lib",
+                "dev.genmeta.tech.dhttp.net/std/comm/group",
+            )
+            .extension(dhttp::HandshakeSummary {
+                alpn: None,
+                local: Some(endpoint.local_authority().unwrap().clone()),
+                remote: None,
+            })
+            .body(axum::body::Body::empty())
+            .unwrap();
+        if trusted {
+            request.extensions_mut().insert(group.clone());
+        }
+        let response = api.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            if trusted {
+                http::StatusCode::OK
+            } else {
+                http::StatusCode::FORBIDDEN
+            }
+        );
+    }
 }

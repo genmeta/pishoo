@@ -10,11 +10,14 @@ use super::{host::identity, *};
 use crate::{
     Body,
     package::{
-        install_lib, installed_libs, read_package, remove_lib,
+        disk_bytes, install_lib, installed_libs, read_package, remove_lib,
         tests::{package_component, runtime_fixture},
         validate_lib,
     },
 };
+
+#[path = "tests/versions.rs"]
+mod versions;
 
 #[path = "tests/api.rs"]
 mod api;
@@ -32,6 +35,7 @@ mod store_network;
 pub(crate) fn api_router(sandbox: &Sandbox, endpoint: dhttp::Endpoint) -> axum::Router {
     Sandbox::api_router(
         Arc::new(RwLock::new(Sandbox {
+            versions: sandbox.versions.clone(),
             libs: sandbox.libs.clone(),
             apps: sandbox.apps.clone(),
             runtime: sandbox.runtime.clone(),

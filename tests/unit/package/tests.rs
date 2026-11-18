@@ -20,3 +20,6 @@ pub(crate) use packages::{package_component, package_fixture, publisher};
 mod pkg;
 #[path = "tests/updates.rs"]
 mod updates;
+
+#[path = "tests/renames.rs"]
+mod renames;

@@ -40,7 +40,7 @@ pub(super) fn catalog(profile: &IdentityProfile) -> Result<Value, Failure> {
         .map_err(|error| fail(500, error.to_string()))?;
     let author: bool = db
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('lib') WHERE name='author')",
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('installed_lib') WHERE name='author')",
             [],
             |row| row.get(0),
         )
@@ -65,7 +65,7 @@ pub(super) fn catalog(profile: &IdentityProfile) -> Result<Value, Failure> {
         std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     >::new();
     let mut stmt = db.prepare(&format!(
-        "SELECT ({package}),c.title,CASE WHEN coalesce({standard},0)=0 AND substr(o.path,1,5)='/std/' THEN '/'||l.name||substr(o.path,5) ELSE o.path END,o.method FROM lib_capability c JOIN lib l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operation o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
+        "SELECT ({package}),c.title,CASE WHEN coalesce({standard},0)=0 AND substr(o.path,1,5)='/std/' THEN '/'||l.name||substr(o.path,5) ELSE o.path END,o.method FROM lib_capability c JOIN installed_lib l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operation o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
     )).map_err(storage)?;
     for row in stmt
         .query_map([], |row| {
@@ -130,6 +130,9 @@ pub(super) async fn selected(
         .await?
         .1
     };
+    expand(&catalog, ids)
+}
+pub(super) fn expand(catalog: &Value, ids: &[Value]) -> Result<Vec<Value>, Failure> {
     let catalog = catalog
         .as_object()
         .ok_or_else(|| fail(502, "invalid permission catalog"))?;

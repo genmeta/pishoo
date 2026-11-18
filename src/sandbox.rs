@@ -21,10 +21,11 @@ use crate::{Error, Result};
 mod host;
 mod runtime;
 
-use crate::package::{app_file, disk_bytes, installed_apps, lib_root};
+use crate::package::{app_file, installed_apps, lib_root};
 
 pub(crate) struct Sandbox {
     pub(crate) libs: HashMap<String, Arc<Lib>>,
+    pub(crate) versions: HashMap<(String, String), Arc<Lib>>,
     pub(crate) apps: HashMap<String, (String, Arc<std::fs::File>)>,
     pub(crate) runtime: Arc<WasmRuntime>,
     pub(crate) tasks: TaskTracker,
@@ -38,6 +39,10 @@ pub struct WasmRuntime {
 }
 
 pub(crate) struct Lib {
+    pub(crate) id: String,
+    pub(crate) author_owner_hash: Option<String>,
+    pub(crate) dependencies: HashMap<String, (String, String)>,
+    commands: Arc<HashMap<String, Component>>,
     pub(crate) stream_retired: tokio_util::sync::CancellationToken,
     pub(crate) openapi: oas3::OpenApiV3Spec,
     component: Component,
@@ -46,6 +51,8 @@ pub(crate) struct Lib {
 }
 
 struct StoreData {
+    caller_service: Option<(String, String, String)>,
+    commands: Arc<HashMap<String, Component>>,
     table: ResourceTable,
     wasi: WasiCtx,
     http: WasiHttpCtx,
@@ -64,12 +71,9 @@ pub(crate) struct Invocation {
 }
 
 pub(crate) enum Outgoing {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "frozen outgoing policy used by isolation tests")
-    )]
     Denied,
     Granted {
+        source: Option<Arc<Lib>>,
         endpoint: dhttp::Endpoint,
         access: Arc<access_control::AccessService>,
         api: axum::Router,
@@ -80,6 +84,7 @@ impl Sandbox {
     pub(crate) fn new(runtime: Arc<WasmRuntime>) -> Self {
         Self {
             libs: HashMap::new(),
+            versions: HashMap::new(),
             apps: HashMap::new(),
             runtime,
             tasks: TaskTracker::new(),
@@ -91,14 +96,16 @@ impl Sandbox {
     /// Server separately clears the HTTP router.
     pub(crate) fn close(&mut self) {
         for lib in self
-            .libs
+            .versions
             .values()
+            .chain(self.libs.values())
             .chain(self.dev_libs.values().map(|(_, lib)| lib))
         {
             lib.stream_retired.cancel();
         }
         self.tasks.close();
         self.libs.clear();
+        self.versions.clear();
         self.apps.clear();
         self.dev_libs.clear();
     }
@@ -129,70 +136,99 @@ impl Sandbox {
         );
         rustix::fs::flock(&parent, rustix::fs::FlockOperation::LockShared)
             .map_err(std::io::Error::from)?;
-        let mut candidates = HashMap::new();
-        // Startup selects registered IDs, then reads each executable once.
-        // Package integrity, dependencies and route conflicts were checked when
-        // installation committed these rows and files together.
-        let database = profile.join(".volume/sys/setting/database");
-        if !database.symlink_metadata()?.file_type().is_file() {
-            return Err(Error::InvalidConfig(
-                "config.db must be a regular file".into(),
-            ));
-        }
-        let conn = crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        conn.busy_timeout(Duration::from_secs(3))?;
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type IN ('table','view') AND name='lib')",
-            [],
-            |row| row.get(0),
-        )?;
-        let registered = if exists {
-            let author: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('lib') WHERE name='author')",
-                [],
-                |row| row.get(0),
-            )?;
-            conn.prepare(if author {
-                "SELECT CASE WHEN author IS NULL THEN name ELSE author||'/'||name END FROM lib ORDER BY author,name"
-            } else {
-                "SELECT id FROM lib ORDER BY id"
-            })?
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?
+        let active = crate::package::installed_packages(profile, None)?;
+        let active_versions = active
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                (
+                    entry["id"].as_str().unwrap(),
+                    entry["version"].as_str().unwrap(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let metadata = crate::package::installed_package_versions(profile, None)?;
+        let mut pending = metadata
+            .into_iter()
+            .filter(|entry| entry["has_lib"] == true)
+            .collect::<Vec<_>>();
+        let mut versions: HashMap<(String, String), Arc<Lib>> = HashMap::new();
+        let root = if pending.is_empty() {
+            None
         } else {
-            Vec::new()
+            Some(lib_root(profile)?)
         };
-        match lib_root(profile) {
-            Ok(root) => {
-                rustix::fs::flock(&root, rustix::fs::FlockOperation::LockShared)
-                    .map_err(std::io::Error::from)?;
-                for id in &registered {
-                    let bytes = disk_bytes(profile, &root, id)?;
-                    let lib = Lib::load(
-                        self.runtime.clone(),
-                        id.clone(),
-                        &bytes,
-                        &profile.join(".volume").join(
-                            if crate::package::is_standard_author(
-                                id.split('/').next().unwrap_or(""),
-                            ) {
-                                format!("std/{}", id.rsplit('/').next().unwrap())
-                            } else {
-                                id.rsplit('/').next().unwrap().to_owned()
-                            },
-                        ),
-                    )?;
-                    candidates.insert(id.clone(), Arc::new(lib));
-                }
+        while !pending.is_empty() {
+            let entry = pending.pop().unwrap();
+            let id = entry["id"]
+                .as_str()
+                .ok_or_else(|| Error::InvalidConfig("missing installed identity".into()))?;
+            let version = entry["version"]
+                .as_str()
+                .ok_or_else(|| Error::InvalidConfig("missing installed version".into()))?;
+            let bytes = if active_versions
+                .get(id)
+                .is_some_and(|active| *active == version)
+            {
+                crate::package::disk_bytes(profile, root.as_ref().unwrap(), id)?
+            } else {
+                crate::package::disk_version_bytes(
+                    profile,
+                    root.as_ref().unwrap(),
+                    id,
+                    Some(version),
+                )?
+            };
+            let mut lib = Lib::load(
+                self.runtime.clone(),
+                id.to_owned(),
+                &bytes,
+                &profile.join(".volume").join(
+                    if crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
+                        && !package_name(id).starts_with("std/")
+                    {
+                        format!("std/{}", package_name(id))
+                    } else {
+                        package_name(id).to_owned()
+                    },
+                ),
+            )?;
+            lib.author_owner_hash = entry["author_owner_hash"].as_str().map(str::to_owned);
+            if lib.openapi.info.version != version {
+                return Err(Error::InvalidComponent(format!(
+                    "installed {id} {version} has runtime version {}",
+                    lib.openapi.info.version
+                )));
             }
-            Err(Error::Io(error))
-                if error.kind() == std::io::ErrorKind::NotFound && registered.is_empty() => {}
-            Err(error) => return Err(error),
+            for dependency in entry["dependencies"].as_array().unwrap() {
+                let name = dependency["name"].as_str().unwrap();
+                let id = dependency["publisher"]
+                    .as_str()
+                    .map_or_else(|| name.to_owned(), |author| format!("{author}/{name}"));
+                lib.dependencies.insert(
+                    name.to_owned(),
+                    (id, dependency["version"].as_str().unwrap().to_owned()),
+                );
+            }
+            versions.insert((id.to_owned(), version.to_owned()), Arc::new(lib));
+        }
+        let mut candidates = HashMap::new();
+        for entry in active.as_array().unwrap() {
+            if entry["has_lib"] == true {
+                let id = entry["id"].as_str().unwrap();
+                let version = entry["version"].as_str().unwrap();
+                let lib = versions
+                    .get(&(id.to_owned(), version.to_owned()))
+                    .ok_or_else(|| Error::InvalidConfig("missing active version".into()))?;
+                candidates.insert(id.to_owned(), Arc::clone(lib));
+            }
         }
         let apps = installed_apps(profile, None)?;
-        for lib in self.libs.values() {
+        for lib in self.versions.values().chain(self.libs.values()) {
             lib.stream_retired.cancel();
         }
+        self.versions = versions;
         self.libs = candidates;
         self.apps = apps;
         Ok(())
@@ -216,51 +252,41 @@ impl Sandbox {
             );
             async move {
                 let result: Result<axum::response::Response> = async {
-                    // One exact snapshot, then release the shared collection lock.
                     let (lib, path, tasks) = {
                         let sandbox = sandbox.read().unwrap();
-                        let path = request.uri().path();
-                        let (standard, tail) = match path.strip_prefix("/std/") {
-                            Some(tail) => (true, tail),
-                            None => (false, path.strip_prefix('/').unwrap_or(path)),
-                        };
-                        let name = if standard {
-                            match tail.strip_prefix("comm/message") {
-                                Some(suffix) if suffix.is_empty() || suffix.starts_with('/') => {
-                                    "message"
-                                }
-                                _ if tail == "message" || tail.starts_with("message/") => {
-                                    return Err(Error::RouteNotFound);
-                                }
-                                _ => tail.split('/').next().unwrap_or(""),
-                            }
-                        } else {
-                            tail.split('/').next().unwrap_or("")
-                        };
-                        let lib = sandbox
-                            .libs
-                            .iter()
-                            .find(|(id, _)| {
-                                crate::package::is_standard_author(
-                                    id.split('/').next().unwrap_or(""),
-                                ) == standard
-                                    && id.rsplit('/').next() == Some(name)
-                            })
-                            .map(|(_, lib)| lib.clone())
-                            .ok_or(Error::RouteNotFound)?;
-                        // Directory placement selects the Lib, never OpenAPI.
-                        // Standard guests keep /<name>/... after removing /std;
-                        // ordinary guests receive the suffix after /<name>.
-                        let path = if standard {
-                            format!("/{tail}")
-                        } else {
-                            match tail.strip_prefix(name).unwrap() {
-                                "" => "/".to_owned(),
-                                suffix => suffix.to_owned(),
-                            }
-                        };
+                        let (lib, path) = select_library(&sandbox, &endpoint, &request)?;
                         (lib, path, sandbox.tasks.clone())
                     };
+                    let version = lib.openapi.info.version.clone();
+                    if request.uri().path().starts_with("/std/") {
+                        let methods = lib
+                            .openapi
+                            .paths
+                            .as_ref()
+                            .unwrap()
+                            .iter()
+                            .find(|(pattern, _)| crate::package::api_path_matches(pattern, &path))
+                            .ok_or(Error::RouteNotFound)?
+                            .1
+                            .methods()
+                            .into_iter()
+                            .map(|(method, _)| method.as_str().to_owned())
+                            .collect::<Vec<_>>();
+                        if !methods
+                            .iter()
+                            .any(|method| method == request.method().as_str())
+                        {
+                            use axum::response::IntoResponse;
+                            return Ok(version_response(
+                                (
+                                    http::StatusCode::METHOD_NOT_ALLOWED,
+                                    [(http::header::ALLOW, methods.join(", "))],
+                                )
+                                    .into_response(),
+                                &version,
+                            ));
+                        }
+                    }
                     let handshake = request
                         .extensions()
                         .get::<dhttp::HandshakeSummary>()
@@ -271,6 +297,7 @@ impl Sandbox {
                         handshake,
                         tasks,
                         Outgoing::Granted {
+                            source: None,
                             endpoint,
                             access,
                             api: native_api,
@@ -288,10 +315,9 @@ impl Sandbox {
                     );
                     *request.uri_mut() = http::Uri::from_parts(parts)
                         .map_err(|_| Error::BadRequest("invalid request URI".into()))?;
-                    invocation
-                        .execute(request)
-                        .await
-                        .map(|response| response.map(axum::body::Body::new))
+                    invocation.execute(request).await.map(|response| {
+                        version_response(response.map(axum::body::Body::new), &version)
+                    })
                 }
                 .await;
                 result.unwrap_or_else(reject_api)
@@ -312,15 +338,18 @@ impl Sandbox {
                             .path()
                             .strip_prefix("/app/")
                             .ok_or(Error::RouteNotFound)?;
-                        let name = tail.split('/').next().unwrap();
-                        // Keep installation/uninstallation from removing the selected directory
-                        // until the requested file is open. The response owns only that file.
+                        // Select the complete registered name at a path-segment boundary.
                         let sandbox = sandbox.read().unwrap();
-                        let (_, directory) = sandbox
+                        let (name, directory) = sandbox
                             .apps
                             .iter()
-                            .find(|(id, _)| id.rsplit('/').next() == Some(name))
-                            .map(|(_, app)| app)
+                            .filter_map(|(id, (_, directory))| {
+                                let name = package_name(id);
+                                tail.strip_prefix(name)
+                                    .filter(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+                                    .map(|_| (name, directory))
+                            })
+                            .max_by_key(|(name, _)| name.len())
                             .ok_or(Error::RouteNotFound)?;
                         app_response(directory, tail.strip_prefix(name).unwrap(), &request)
                     })
@@ -346,6 +375,218 @@ impl Sandbox {
             .route("/std/{*path}", api)
             .fallback(frontend)
     }
+}
+
+pub(crate) fn requested_version(request: &http::Request<axum::body::Body>) -> Result<Option<&str>> {
+    let mut values = request.headers().get_all("pishoo-package-version").iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    let version = value.to_str().map_err(|_| Error::PackagePolicy {
+        code: "invalid_package_version",
+        status: http::StatusCode::BAD_REQUEST,
+    })?;
+    if values.next().is_some()
+        || version.split('.').count() != 3
+        || version.split('.').any(|part| {
+            part.is_empty()
+                || !part.bytes().all(|byte| byte.is_ascii_digit())
+                || part.parse::<u64>().is_err()
+                || part.len() > 1 && part.starts_with('0')
+        })
+    {
+        return Err(Error::PackagePolicy {
+            code: "invalid_package_version",
+            status: http::StatusCode::BAD_REQUEST,
+        });
+    }
+    Ok(Some(version))
+}
+
+pub(crate) fn select_library(
+    sandbox: &Sandbox,
+    endpoint: &dhttp::Endpoint,
+    request: &http::Request<axum::body::Body>,
+) -> Result<(Arc<Lib>, String)> {
+    let requested = requested_version(request)?;
+    let path = request.uri().path();
+    let standard = path.starts_with("/std/");
+    let standard_path = path.strip_prefix("/std").unwrap_or(path);
+    let tail = path.trim_start_matches('/');
+    let source = request.extensions().get::<Arc<Lib>>();
+    let candidates = sandbox
+        .versions
+        .iter()
+        .map(|((id, _), lib)| (id.as_str(), lib))
+        .chain(sandbox.libs.iter().map(|(id, lib)| (id.as_str(), lib)))
+        .chain(
+            sandbox
+                .dev_libs
+                .iter()
+                .map(|(id, (_, lib))| (id.as_str(), lib)),
+        )
+        .chain(source.into_iter().map(|lib| (lib.id.as_str(), lib)));
+    let mut providers = std::collections::BTreeSet::new();
+    for (id, lib) in candidates {
+        let matches = if standard {
+            crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
+                && lib.openapi.paths.as_ref().is_some_and(|paths| {
+                    paths
+                        .keys()
+                        .any(|pattern| crate::package::api_path_matches(pattern, standard_path))
+                })
+        } else {
+            !crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
+                && tail
+                    .strip_prefix(package_name(id))
+                    .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+        };
+        if matches {
+            providers.insert(id.to_owned());
+        }
+    }
+    let id = if standard {
+        if providers.len() > 1 {
+            return Err(Error::PackagePolicy {
+                code: "route_conflict",
+                status: http::StatusCode::CONFLICT,
+            });
+        }
+        providers.into_iter().next()
+    } else {
+        providers
+            .into_iter()
+            .max_by_key(|id| package_name(id).len())
+    }
+    .ok_or(Error::RouteNotFound)?;
+    let bound = source.and_then(|source| {
+        if source.id == id {
+            Some(Arc::clone(source))
+        } else {
+            source.dependencies.get(package_name(&id)).and_then(|key| {
+                sandbox
+                    .versions
+                    .get(key)
+                    .or_else(|| {
+                        sandbox
+                            .libs
+                            .get(&key.0)
+                            .filter(|lib| lib.openapi.info.version == key.1)
+                    })
+                    .or_else(|| {
+                        sandbox
+                            .dev_libs
+                            .get(&key.0)
+                            .map(|(_, lib)| lib)
+                            .filter(|lib| lib.openapi.info.version == key.1)
+                    })
+                    .filter(|lib| lib.id == id)
+                    .cloned()
+            })
+        }
+    });
+    if bound.is_none()
+        && source.is_some_and(|source| source.dependencies.contains_key(package_name(&id)))
+    {
+        return Err(Error::PackagePolicy {
+            code: "package_version_unavailable",
+            status: http::StatusCode::NOT_ACCEPTABLE,
+        });
+    }
+    if let Some(bound) = &bound
+        && requested.is_some_and(|version| version != bound.openapi.info.version)
+    {
+        return Err(Error::PackagePolicy {
+            code: "dependency_version_conflict",
+            status: http::StatusCode::CONFLICT,
+        });
+    }
+    let owner = crate::package::require_owner(endpoint, request).is_ok();
+    let selected_version = bound
+        .as_ref()
+        .map(|lib| lib.openapi.info.version.as_str())
+        .or(requested);
+    let preview = sandbox.dev_libs.get(&id).map(|(_, lib)| lib).filter(|lib| {
+        owner && selected_version.is_none_or(|version| lib.openapi.info.version == version)
+    });
+    let lib = if let Some(preview) = preview {
+        Arc::clone(preview)
+    } else if let Some(bound) = bound {
+        bound
+    } else if let Some(version) = requested {
+        sandbox
+            .versions
+            .get(&(id.clone(), version.to_owned()))
+            .or_else(|| {
+                sandbox
+                    .libs
+                    .get(&id)
+                    .filter(|lib| lib.openapi.info.version == version)
+            })
+            .cloned()
+            .ok_or(Error::PackagePolicy {
+                code: "package_version_unavailable",
+                status: http::StatusCode::NOT_ACCEPTABLE,
+            })?
+    } else {
+        sandbox.libs.get(&id).cloned().ok_or_else(|| {
+            if !owner && sandbox.dev_libs.contains_key(&id) {
+                Error::Denied
+            } else {
+                Error::PackagePolicy {
+                    code: "package_inactive",
+                    status: http::StatusCode::SERVICE_UNAVAILABLE,
+                }
+            }
+        })?
+    };
+    let path = if standard {
+        if !lib.openapi.paths.as_ref().is_some_and(|paths| {
+            paths
+                .keys()
+                .any(|pattern| crate::package::api_path_matches(pattern, standard_path))
+        }) {
+            return Err(Error::RouteNotFound);
+        }
+        standard_path.to_owned()
+    } else {
+        match tail
+            .strip_prefix(package_name(&id))
+            .ok_or(Error::RouteNotFound)?
+        {
+            "" => "/".to_owned(),
+            suffix => suffix.to_owned(),
+        }
+    };
+    Ok((lib, path))
+}
+
+pub(crate) fn version_response(
+    mut response: axum::response::Response,
+    version: &str,
+) -> axum::response::Response {
+    if let Ok(value) = http::HeaderValue::from_str(version) {
+        response
+            .headers_mut()
+            .insert("pishoo-package-version", value);
+    }
+    let varies = response
+        .headers()
+        .get_all(http::header::VARY)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| {
+            value.split(',').any(|name| {
+                name.trim().eq_ignore_ascii_case("pishoo-package-version") || name.trim() == "*"
+            })
+        });
+    if !varies {
+        response.headers_mut().append(
+            http::header::VARY,
+            http::HeaderValue::from_static("Pishoo-Package-Version"),
+        );
+    }
+    response
 }
 
 pub(crate) fn app_response(
@@ -401,7 +642,7 @@ pub(crate) fn app_response(
             let asset = suffix.starts_with("/assets/")
                 || suffix.starts_with("/static/")
                 || matches!(suffix.as_ref(), "/assets" | "/static")
-                || resource.contains('.')
+                || mime_guess::from_path(resource).first().is_some()
                 || request
                     .headers()
                     .get("sec-fetch-dest")
@@ -428,6 +669,12 @@ pub(crate) fn app_response(
 }
 
 fn reject_api(error: Error) -> axum::response::Response {
+    if let Error::PackagePolicy { code, status } = &error {
+        return axum::response::IntoResponse::into_response((
+            *status,
+            axum::Json(serde_json::json!({"error":{"code":code}})),
+        ));
+    }
     let status = error.status();
     if status.is_server_error() {
         tracing::error!(%error, "request failed");
@@ -441,3 +688,9 @@ fn reject_api(error: Error) -> axum::response::Response {
 #[cfg(test)]
 #[path = "../tests/unit/sandbox/tests.rs"]
 pub(crate) mod tests;
+
+fn package_name(id: &str) -> &str {
+    id.split_once('/')
+        .filter(|(author, _)| dhttp_home::normalize_name(author).as_deref() == Some(*author))
+        .map_or(id, |(_, name)| name)
+}

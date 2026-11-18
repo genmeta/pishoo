@@ -5,10 +5,14 @@ use tokio::time::Instant;
 
 use super::{
     ocsp::renew_ocsp,
-    run::{discover_profiles, load_profile, ocsp_ticks, parse_account_homes, reconcile_profiles},
+    run::{discover_profiles, load_profile, ocsp_ticks, parse_account_homes},
     *,
 };
 use crate::{Error, setup::load_server_config};
+
+#[path = "../../common/server_reconciliation.rs"]
+mod reconciliation;
+use reconciliation::reconcile_profiles;
 
 #[tokio::test]
 async fn old_static_files_are_not_exposed_and_proxy_paths_stay_separate() {
@@ -496,9 +500,110 @@ async fn server(root: &std::path::Path) -> Server {
         sandbox: Arc::new(RwLock::new(sandbox)),
         publisher: None,
         listener: None,
+        system_router: Router::new(),
     };
     *server.router.write().unwrap() = current_router(&server);
     server
+}
+
+#[tokio::test]
+async fn device_administration_uses_device_authority_through_the_normal_server_router() {
+    let root = tempfile::tempdir().unwrap();
+    let mut server = server(root.path()).await;
+    let home = DhttpHome::new(root.path().into());
+    let database = crate::system::open(&home).unwrap();
+    let (commands, _receiver) = tokio::sync::mpsc::channel(8);
+    server.system_router = crate::system::router(home, database.clone(), commands);
+    let local = server.endpoint.local_authority().unwrap();
+    let owner = dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
+        .unwrap();
+    server
+        .access
+        .set_policy(
+            access_control::Method::Unspecified,
+            "/",
+            access_control::Effect::Allow,
+            access_control::Grantee::All,
+        )
+        .await
+        .unwrap();
+    let request = || {
+        Request::builder()
+            .uri("/sys/info")
+            .extension(local.clone())
+            .body(AxumBody::empty())
+            .unwrap()
+    };
+    assert_eq!(
+        current_router(&server)
+            .oneshot(request())
+            .await
+            .unwrap()
+            .status(),
+        http::StatusCode::FORBIDDEN
+    );
+    database
+        .lock()
+        .await
+        .execute(
+            "INSERT INTO administrator(name,subject_id) VALUES(?1,?2)",
+            rusqlite::params![server.name(), owner.owner_hash().as_str().as_bytes()],
+        )
+        .unwrap();
+    assert_eq!(
+        current_router(&server)
+            .oneshot(request())
+            .await
+            .unwrap()
+            .status(),
+        http::StatusCode::OK
+    );
+    let request = Request::builder()
+        .method(http::Method::POST)
+        .uri("/sys/info")
+        .header("x-http-method-override", "GET")
+        .extension(local.clone())
+        .body(AxumBody::empty())
+        .unwrap();
+    assert_eq!(
+        current_router(&server)
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status(),
+        http::StatusCode::OK
+    );
+    let request = Request::builder()
+        .uri("/sys/info")
+        .extension(local.clone())
+        .body(AxumBody::empty())
+        .unwrap();
+    assert_eq!(
+        native_router(&server)
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status(),
+        http::StatusCode::FORBIDDEN
+    );
+    database
+        .lock()
+        .await
+        .execute("DELETE FROM administrator", [])
+        .unwrap();
+    let request = Request::builder()
+        .uri("/sys/info")
+        .extension(local)
+        .body(AxumBody::empty())
+        .unwrap();
+    assert_eq!(
+        current_router(&server)
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status(),
+        http::StatusCode::FORBIDDEN
+    );
 }
 
 #[tokio::test]
@@ -1401,9 +1506,10 @@ async fn permission_catalog_qualifies_group_titles_and_preserves_legacy_registra
                 INSERT INTO lib_capability VALUES ('dev.dhttp.net/message', 'read', 'read message'), ('dev.dhttp.net/message', 'details', 'read message'), ('dev.dhttp.net/message', 'empty', 'empty');
                 INSERT INTO lib_capability_operation VALUES ('dev.dhttp.net/message', 'read', '/std/message', 'GET'), ('dev.dhttp.net/message', 'read', '/std/message', 'HEAD'), ('dev.dhttp.net/message', 'details', '/std/message', 'GET'), ('dev.dhttp.net/message', 'details', '/std/message/history', 'GET');").unwrap();
         } else {
-            db.execute_batch(include_str!(
-                "../../../src/package/sql/compat/v3/schema.sql"
-            ))
+            db.execute_batch(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/package/v3/schema.sql"
+            )))
             .unwrap();
             db.execute_batch("INSERT INTO package (has_lib,has_app,name, author, version) VALUES (1,0,'message', 'dev.dhttp.net', '1.0.0');
                 INSERT INTO lib_capability VALUES ('message', 'read', 'read message'), ('message', 'details', 'read message'), ('message', 'empty', 'empty');
@@ -1504,10 +1610,14 @@ async fn reconciliation_isolates_bad_profiles_and_preserves_current_with_legacy_
     servers.get_mut(&name).unwrap().close().await.unwrap();
 }
 
+#[path = "tests/administrator_permissions.rs"]
+mod administrator_permissions;
 #[path = "tests/initialization.rs"]
 mod initialization;
 #[path = "tests/logging.rs"]
 mod logging;
+#[path = "tests/management_permissions.rs"]
+mod management_permissions;
 #[path = "tests/network.rs"]
 mod network;
 #[path = "tests/review.rs"]

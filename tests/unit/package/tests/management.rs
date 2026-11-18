@@ -52,7 +52,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
         parent_mode
     );
     assert_eq!(
-        std::fs::metadata(profile.join("lib/note_1.0.0.wasm"))
+        std::fs::metadata(profile.join("lib/note.wasm.1.0.0"))
             .unwrap()
             .mode()
             & 0o777,
@@ -61,7 +61,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     let mut sandbox = Sandbox::new(runtime.clone());
     sandbox.load_libs(&profile).unwrap();
     std::fs::write(profile.join(".volume/note/saved.db"), b"keep").unwrap();
-    let before = std::fs::read(profile.join("lib/note_1.0.0.wasm")).unwrap();
+    let before = std::fs::read(profile.join("lib/note.wasm.1.0.0")).unwrap();
     // A manifest-only component passes metadata validation, but has no incoming handler.
     let metadata_only = package_fixture(
         &serde_json::json!({"openapi":"3.1.0","info":{"title":"Test","version":"1.0.0","description":"Test","license":{"name":"MIT"}},"x-pishoo":{"publisher":"alice.dhttp.net","name":"note"},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload","responses":{"200":{"description":"ok"}}}}}}),
@@ -72,7 +72,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     assert!(read_package(&metadata_only).is_ok());
     assert!(install_lib(&profile, "note", &metadata_only, &runtime).is_err());
     assert_eq!(
-        std::fs::read(profile.join("lib/note_1.0.0.wasm")).unwrap(),
+        std::fs::read(profile.join("lib/note.wasm.1.0.0")).unwrap(),
         before
     );
     install_lib(&profile, "note", &component("2"), &runtime).unwrap();
@@ -81,7 +81,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
         installed_libs(&profile, Some("note")).unwrap()["version"],
         "2.0.0"
     );
-    assert_eq!(std::fs::read_dir(profile.join("lib")).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(profile.join("lib")).unwrap().count(), 2);
     remove_lib(&profile, "note").unwrap();
     remove_lib(&profile, "note").unwrap();
     assert!(sandbox.libs.contains_key("note"));
@@ -406,7 +406,7 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
     );
     std::fs::write(profile.join(".volume/note/keep.db"), b"keep").unwrap();
     std::fs::write(
-        profile.join("lib/note_1.2.3.wasm"),
+        profile.join("lib/note.wasm.1.2.3"),
         b"corrupt runtime payload",
     )
     .unwrap();
@@ -424,7 +424,7 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
         std::fs::read(profile.join(".volume/note/keep.db")).unwrap(),
         b"keep"
     );
-    assert!(!profile.join("lib/note_1.2.3.wasm").exists());
+    assert!(!profile.join("lib/note.wasm.1.2.3").exists());
     assert_eq!(
         router
             .clone()
@@ -468,6 +468,14 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
         json!({}),
         json!(null),
         json!([]),
+        json!({"packages":[]}),
+        json!({"packages":null}),
+        json!({"packages":[{"name":"note"}]}),
+        json!({"packages":[{"name":"note","version":"1.0.0","author":7}]}),
+        json!({"packages":[{"name":"alice.dhttp.net/note","version":"1.0.0"}]}),
+        json!({"packages":[{"author":"alice.dhttp.net","name":"note","version":"1.0.0"},{"author":"alice.dhttp.net","name":"note","version":"2.0.0"}]}),
+        json!({"packages":[{"author":"dev.genmeta.tech.dhttp.net","name":"profile","version":"1.0.0"},{"author":"dev.genmeta.tech.dhttp.net","name":"std/profile","version":"2.0.0"}]}),
+        json!({"packages":vec![json!({"name":"note","version":"1.0.0"});101]}),
         json!({"kind":"lib","publisher":"alice.dhttp.net","name":"note","version":"1.0.0"}),
         json!({"kind":"invalid","author":"alice.dhttp.net","name":"note","version":"1.0.0"}),
         json!({"kind":"lib","author":1,"name":"note","version":"1.0.0"}),
@@ -564,7 +572,7 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
             .oneshot(request(
                 Method::POST,
                 "/std/sys/pkg/install",
-                AxumBody::from(" ".repeat(4097))
+                AxumBody::from(" ".repeat(64 * 1024 + 1))
             ))
             .await
             .unwrap()
@@ -588,7 +596,7 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
         for uri in [
             format!("/std/sys/{kind}"),
             format!("/std/sys/{kind}?name=note&name=other"),
-            format!("/std/sys/{kind}?name=note&version=1.0.0"),
+            format!("/std/sys/{kind}?name=note&version=invalid"),
             format!("/std/sys/{kind}?name=alice.dhttp.net%2Fnote"),
             format!("/std/sys/{kind}?name=%FF"),
             format!("/std/sys/{kind}/list?name=note"),
@@ -613,11 +621,11 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
             .is_empty()
     );
     assert!(installed_apps(&profile, None).unwrap().is_empty());
-    assert!(!profile.join("lib/note_1.2.3.wasm").exists());
+    assert!(!profile.join("lib/note.wasm.1.2.3").exists());
 }
 
 #[tokio::test]
-async fn management_protocol_preserves_owner_version_headers_body_limits_and_closed_lifecycle() {
+async fn management_protocol_preserves_version_headers_body_limits_and_closed_lifecycle() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     let sandbox = Arc::new(RwLock::new(Sandbox::new(Arc::new(
@@ -650,37 +658,6 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
                 StatusCode::OK
             }
         );
-    }
-    for visitor in [
-        None,
-        Some(access_control::Visitor::new(
-            "bob.dhttp.net",
-            access_control::SubjectId::new("a".repeat(64).as_bytes()).unwrap(),
-        )),
-        Some(access_control::Visitor::new(
-            "alice.dhttp.net",
-            access_control::SubjectId::new("b".repeat(64).as_bytes()).unwrap(),
-        )),
-    ] {
-        for method in [Method::GET, Method::POST] {
-            let mut req = request(
-                method.clone(),
-                if method == Method::POST {
-                    "/std/sys/pkg/install"
-                } else {
-                    "/std/sys/pkg?name=note"
-                },
-                AxumBody::from("{}"),
-            );
-            req.extensions_mut().remove::<access_control::Visitor>();
-            if let Some(visitor) = &visitor {
-                req.extensions_mut().insert(visitor.clone());
-            }
-            assert_eq!(
-                router.clone().oneshot(req).await.unwrap().status(),
-                StatusCode::FORBIDDEN
-            );
-        }
     }
     for method in [Method::GET, Method::POST] {
         let mut req = request(

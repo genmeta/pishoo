@@ -5,7 +5,7 @@ use tower::ServiceExt;
 
 use super::*;
 
-fn load(sandbox: &Sandbox, directory: &Path, paths: &str) -> Arc<Lib> {
+pub(super) fn load(sandbox: &Sandbox, directory: &Path, paths: &str) -> Arc<Lib> {
     fn leb(mut n: usize, output: &mut Vec<u8>) {
         loop {
             let byte = (n & 127) as u8;
@@ -182,7 +182,11 @@ async fn lib_paths_are_scoped_to_the_registered_publisher_and_name() {
 async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_package() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
-    let standard = load(&sandbox, directory.path(), r#"{"/message":{"post":{}}}"#);
+    let standard = load(
+        &sandbox,
+        directory.path(),
+        r#"{"/comm/message":{"post":{}}}"#,
+    );
     let ordinary = load(
         &sandbox,
         directory.path(),
@@ -195,9 +199,15 @@ async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_pack
         .libs
         .insert("alice.dhttp.net/journal".into(), ordinary);
     let router = api_router(&sandbox, crate::test_support::identity::endpoint("alice"));
+    assert_eq!(
+        status(&router, Method::POST, "/std/comm/message").await,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        status(&router, Method::GET, "/std/comm/message").await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
     for path in [
-        "/std/comm/message",
-        "/std/comm/message/undeclared",
         "/journal/missing",
         "/journal/message",
         "/journal/std/xxxx?value=a%2Fb",
@@ -216,6 +226,7 @@ async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_pack
     for path in [
         "/std/message",
         "/std/message/file",
+        "/std/comm/message/undeclared",
         "/std/comm/voip",
         "/std/comm/group",
         "/std/xxxx",
@@ -234,23 +245,87 @@ async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_pack
 }
 
 #[tokio::test]
-async fn standard_lib_selection_uses_the_name_instead_of_declared_paths() {
+async fn standard_lib_selection_uses_declared_paths_and_methods() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
-    // A Lib's declaration cannot capture a different standard Lib's namespace.
-    let lib = load(&sandbox, directory.path(), r#"{"/message":{"post":{}}}"#);
-    sandbox.libs.insert("std.dhttp.net/profile".into(), lib);
+    let lib = load(
+        &sandbox,
+        directory.path(),
+        r#"{"/comm/group":{"post":{}},"/comm/group/list":{"get":{}}}"#,
+    );
+    sandbox
+        .libs
+        .insert("dev.genmeta.tech.dhttp.net/conversations".into(), lib);
     let router = api_router(&sandbox, crate::test_support::identity::endpoint("alice"));
     assert_eq!(
         status(&router, Method::POST, "/std/comm/message").await,
         StatusCode::NOT_FOUND
     );
-    for path in ["/std/profile", "/std/profile/undeclared?value=a%2Fb"] {
+    for (method, path) in [
+        (Method::POST, "/std/comm/group?value=a%2Fb"),
+        (Method::GET, "/std/comm/group/list"),
+    ] {
         assert_eq!(
-            status(&router, Method::PATCH, path).await,
+            status(&router, method, path).await,
             StatusCode::INTERNAL_SERVER_ERROR
         );
     }
+    assert_eq!(
+        status(&router, Method::PATCH, "/std/comm/group").await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    for path in [
+        "/std/conversations",
+        "/std/conversations/comm/group",
+        "/std/comm/group/undeclared",
+        "/std/comm/group-other",
+    ] {
+        assert_eq!(
+            status(&router, Method::POST, path).await,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn standard_routes_follow_replaced_declarations_without_rebuilding_the_router() {
+    let sandbox = Arc::new(RwLock::new(Sandbox::new(Arc::new(
+        WasmRuntime::new().unwrap(),
+    ))));
+    let endpoint = crate::test_support::identity::endpoint("alice");
+    let router = Sandbox::api_router(
+        sandbox.clone(),
+        endpoint.clone(),
+        Arc::new(access_control::AccessService::new(
+            sea_orm::DatabaseConnection::default(),
+            endpoint.name(),
+        )),
+        Router::new(),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let id = "std.dhttp.net/conversations";
+    for (path, previous) in [("/rooms/old", "/rooms/new"), ("/rooms/new", "/rooms/old")] {
+        let lib = load(
+            &sandbox.read().unwrap(),
+            directory.path(),
+            &format!(r#"{{"{path}":{{"post":{{}}}}}}"#),
+        );
+        sandbox.write().unwrap().libs.insert(id.into(), lib);
+        assert_eq!(
+            status(&router, Method::GET, &format!("/std{path}")).await,
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            status(&router, Method::POST, &format!("/std{previous}")).await,
+            StatusCode::NOT_FOUND
+        );
+    }
+    sandbox.write().unwrap().libs.clear();
+    assert_eq!(
+        status(&router, Method::POST, "/std/rooms/new").await,
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -391,6 +466,9 @@ async fn app_ranges_and_conditions_follow_the_selected_file_including_spa_fallba
     for path in [
         "/app/hello/",
         "/app/hello/conversations/bob",
+        "/app/hello/groups/sky.lee~%23developer",
+        "/app/hello/contacts/zero.ai.dhttp.net",
+        "/app/hello/contacts/student%40mit.edu",
         "/app/hello/index.html?view=1",
     ] {
         let mut conditional = request(Method::GET, path);
@@ -433,6 +511,9 @@ async fn app_ranges_and_conditions_follow_the_selected_file_including_spa_fallba
             "/app/hello/assets/missing.js",
             StatusCode::NOT_FOUND,
         ),
+        (Method::GET, "/app/hello/missing.js", StatusCode::NOT_FOUND),
+        (Method::GET, "/app/hello/missing.css", StatusCode::NOT_FOUND),
+        (Method::GET, "/app/hello/missing.png", StatusCode::NOT_FOUND),
         (Method::POST, "/app/hello/", StatusCode::METHOD_NOT_ALLOWED),
         (Method::GET, "/app/absent/", StatusCode::NOT_FOUND),
     ] {
@@ -558,4 +639,68 @@ async fn app_static_files_are_read_on_demand_and_open_responses_survive_replacem
         status(&router, Method::GET, "/app/hello/assets/app.js").await,
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn hierarchical_app_routes_keep_the_full_name_for_pages_assets_and_redirects() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("assets")).unwrap();
+    std::fs::write(root.path().join("index.html"), b"dashboard").unwrap();
+    std::fs::write(root.path().join("assets/app.js"), b"script").unwrap();
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    sandbox.apps.insert(
+        "alice.dhttp.net/live/dashboard".into(),
+        (
+            "1.0.0".into(),
+            Arc::new(std::fs::File::open(root.path()).unwrap()),
+        ),
+    );
+    let router = api_router(
+        &sandbox,
+        crate::test_support::identity::endpoint("alice.dhttp.net"),
+    );
+    let redirect = router
+        .clone()
+        .oneshot(request(Method::GET, "/app/live/dashboard?tab=1"))
+        .await
+        .unwrap();
+    assert_eq!(redirect.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(redirect.headers()["location"], "/app/live/dashboard/?tab=1");
+    for (path, expected) in [
+        ("/app/live/dashboard/", &b"dashboard"[..]),
+        ("/app/live/dashboard/settings/profile", &b"dashboard"[..]),
+        ("/app/live/dashboard/assets/app.js", &b"script"[..]),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request(Method::GET, path))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
+            expected
+        );
+    }
+    for path in [
+        "/app/live/",
+        "/app/live/dashboard-other/",
+        "/app/dashboard/",
+    ] {
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(Method::GET, path))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
 }

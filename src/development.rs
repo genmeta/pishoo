@@ -1,5 +1,6 @@
 //! Owner-only development routes backed directly by local files.
 use std::{
+    collections::HashSet,
     fs::{File, Metadata},
     io::Read,
     os::unix::fs::MetadataExt,
@@ -38,6 +39,12 @@ pub(crate) fn router(
             let app_request = request.uri().path().starts_with("/app/");
             let result: Result<axum::response::Response> = async {
                 let path = request.uri().path();
+                if path == "/sys" || path.starts_with("/sys/") {
+                    return Ok(fallback
+                        .oneshot(request)
+                        .await
+                        .expect("Router is infallible"));
+                }
                 let (frontend, standard, tail) = if let Some(tail) = path.strip_prefix("/app/") {
                     (true, false, tail)
                 } else if let Some(tail) = path.strip_prefix("/std/") {
@@ -45,37 +52,58 @@ pub(crate) fn router(
                 } else {
                     (false, false, path.trim_start_matches('/'))
                 };
-                let lookup = if standard {
-                    tail.strip_prefix("comm/")
-                        .filter(|s| *s == "message" || s.starts_with("message/"))
-                        .unwrap_or(tail)
-                } else {
-                    tail
-                };
-                let (name, suffix) = lookup
-                    .split_once('/')
-                    .map_or((lookup, ""), |(name, _)| (name, &lookup[name.len()..]));
+                if standard {
+                    if !matches!(
+                        tail.split('/').next().unwrap_or(""),
+                        "sys" | "acl" | "contact" | "forward" | "file" | "pishoo" | "contacts"
+                    ) {
+                        let profile = profile.clone();
+                        let sandbox = sandbox.clone();
+                        tokio::task::spawn_blocking(move || {
+                            load_standard_libraries(&profile, &sandbox)
+                        })
+                        .await??;
+                    }
+                    return Ok(fallback
+                        .oneshot(request)
+                        .await
+                        .expect("Router is infallible"));
+                }
+                let name = tail
+                    .match_indices('/')
+                    .map(|(end, _)| &tail[..end])
+                    .chain(std::iter::once(tail))
+                    .rfind(|name| {
+                        package::valid_id(name).is_ok()
+                            && profile
+                                .join("lib")
+                                .join(format!("{name}.preview/manifest.json"))
+                                .is_file()
+                    })
+                    .unwrap_or_else(|| tail.split('/').next().unwrap_or(""));
+                let suffix = &tail[name.len()..];
+                let name = name.to_owned();
                 // Local files require the real owner, independently of identity spelling.
-                // Native services retain precedence over local projects.
-                let local_exists = package::valid_id(name).is_ok()
-                    && profile.join("dev").join(name).try_exists()?;
+                let local_exists = package::valid_id(&name).is_ok()
+                    && profile
+                        .join("lib")
+                        .join(format!("{name}.preview/manifest.json"))
+                        .is_file();
                 if !local_exists {
                     sandbox.write().unwrap().dev_libs.retain(|id, (_, lib)| {
-                        let keep = id.rsplit('/').next() != Some(name);
+                        let package = id.split_once('/').map_or(id.as_str(), |(_, name)| name);
+                        let keep = profile
+                            .join("lib")
+                            .join(format!("{package}.preview/manifest.json"))
+                            .is_file();
                         if !keep {
                             lib.stream_retired.cancel();
                         }
                         keep
                     });
                 }
-                if package::valid_id(name).is_err()
-                    || (!frontend
-                        && (name == "app"
-                            || standard
-                                && (matches!(
-                                    name,
-                                    "sys" | "acl" | "contact" | "forward" | "file" | "comm"
-                                ) || name == "message" && lookup == tail)))
+                if package::valid_id(&name).is_err()
+                    || (!frontend && name == "app")
                     || !local_exists
                 {
                     return Ok(fallback
@@ -84,13 +112,74 @@ pub(crate) fn router(
                         .expect("Router is infallible"));
                 }
                 let name = name.to_owned();
-                let suffix = if standard {
-                    format!("/{tail}")
-                } else {
-                    suffix.to_owned()
-                };
+                let suffix = suffix.to_owned();
                 let author = author(&profile, &name)?;
-                if !frontend && (crate::package::is_standard_author(&author)) != standard {
+                let selected = crate::sandbox::requested_version(&request)?;
+                let profile_root = root(&profile)?;
+                let directory = project_directory(&profile_root, &name)?;
+                let local_manifest = manifest(&directory, &name)?;
+                let local_version = local_manifest["package"]["version"].as_str().unwrap();
+                let source_version = request
+                    .extensions()
+                    .get::<Arc<Lib>>()
+                    .and_then(|source| source.dependencies.get(&name))
+                    .map(|(_, version)| version.as_str());
+                let use_formal = selected
+                    .or(source_version)
+                    .is_some_and(|version| version != local_version);
+                drop(directory);
+                drop(profile_root);
+                if use_formal {
+                    return Ok(fallback
+                        .oneshot(request)
+                        .await
+                        .expect("Router is infallible"));
+                }
+                if package::require_owner(&endpoint, &request).is_err() {
+                    let id = format!("{author}/{name}");
+                    let installed = {
+                        let state = sandbox.read().unwrap();
+                        if frontend {
+                            state.apps.contains_key(&id)
+                        } else {
+                            state.libs.contains_key(&id)
+                        }
+                    };
+                    if installed {
+                        return Ok(fallback
+                            .oneshot(request)
+                            .await
+                            .expect("Router is infallible"));
+                    }
+                }
+
+                if !frontend && package::is_standard_author(&author) {
+                    return Ok(fallback
+                        .oneshot(request)
+                        .await
+                        .expect("Router is infallible"));
+                }
+                let replaced = {
+                    let root = root(&profile)?;
+                    let directory = project_directory(&root, &name)?;
+                    let manifest = manifest(&directory, &name)?;
+                    let kind = if frontend { "app" } else { "lib" };
+                    child(&directory, "state.json", false).is_ok()
+                        && matches!(
+                            runtime_file(&root, &directory, &name, &manifest, kind),
+                            Err(Error::RouteNotFound)
+                        )
+                };
+                if replaced {
+                    if !frontend {
+                        sandbox.write().unwrap().dev_libs.retain(|id, (_, lib)| {
+                            let keep = id.split_once('/').map(|(_, name)| name) != Some(&name);
+                            if !keep {
+                                lib.stream_retired.cancel();
+                            }
+                            keep
+                        });
+                    }
                     return Ok(fallback
                         .oneshot(request)
                         .await
@@ -100,8 +189,9 @@ pub(crate) fn router(
                 if frontend {
                     let mut response = tokio::task::spawn_blocking(move || {
                         let root = root(&profile)?;
-                        let directory = child(&root, &name, true)?;
-                        let app = child(&directory, "app", true)?;
+                        let directory = project_directory(&root, &name)?;
+                        let manifest = manifest(&directory, &name)?;
+                        let app = runtime_file(&root, &directory, &name, &manifest, "app")?;
                         crate::sandbox::app_response(&app, &suffix, &request)
                     })
                     .await??;
@@ -121,12 +211,14 @@ pub(crate) fn router(
                     .extensions()
                     .get::<dhttp::HandshakeSummary>()
                     .ok_or(Error::MissingHandshake)?;
+                let version = lib.openapi.info.version.clone();
                 let invocation = Invocation::new(
                     lib,
                     endpoint.clone(),
                     handshake,
                     tasks,
                     Outgoing::Granted {
+                        source: None,
                         endpoint,
                         access,
                         api: native_api,
@@ -145,10 +237,9 @@ pub(crate) fn router(
                 );
                 *request.uri_mut() = http::Uri::from_parts(parts)
                     .map_err(|_| Error::BadRequest("invalid development URI".into()))?;
-                invocation
-                    .execute(request)
-                    .await
-                    .map(|response| response.map(Body::new))
+                invocation.execute(request).await.map(|response| {
+                    crate::sandbox::version_response(response.map(Body::new), &version)
+                })
             }
             .await;
             result.unwrap_or_else(|error| {
@@ -180,7 +271,7 @@ fn root(profile: &IdentityProfile) -> Result<File> {
     let owner = profile.path().metadata()?;
     let root = File::from(
         rustix::fs::open(
-            profile.join("dev"),
+            profile.path(),
             rustix::fs::OFlags::RDONLY
                 | rustix::fs::OFlags::DIRECTORY
                 | rustix::fs::OFlags::NOFOLLOW
@@ -226,13 +317,23 @@ fn child(parent: &File, name: &str, directory: bool) -> Result<File> {
     Ok(file)
 }
 
-fn author(profile: &IdentityProfile, name: &str) -> Result<String> {
-    let root = root(profile)?;
-    let directory = child(&root, name, true)?;
-    author_from_directory(&directory, name)
+fn project_directory(root: &File, name: &str) -> Result<File> {
+    package::valid_id(name)?;
+    format!("lib/{name}.preview")
+        .split('/')
+        .try_fold(root.try_clone()?, |parent, part| child(&parent, part, true))
 }
 
-fn author_from_directory(directory: &File, name: &str) -> Result<String> {
+fn author(profile: &IdentityProfile, name: &str) -> Result<String> {
+    let root = root(profile)?;
+    let directory = project_directory(&root, name)?;
+    Ok(manifest(&directory, name)?["package"]["author"]
+        .as_str()
+        .unwrap()
+        .to_owned())
+}
+
+fn manifest(directory: &File, name: &str) -> Result<serde_json::Value> {
     let mut file = child(directory, "manifest.json", false)?;
     let mut bytes = Vec::new();
     (&mut file).take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
@@ -243,12 +344,99 @@ fn author_from_directory(directory: &File, name: &str) -> Result<String> {
     let author = manifest["package"]["author"]
         .as_str()
         .ok_or(Error::Denied)?;
+    let version = manifest["package"]["version"]
+        .as_str()
+        .ok_or(Error::Denied)?;
     if manifest["package"]["name"] != name
         || dhttp_home::normalize_name(author).as_deref() != Some(author)
+        || version.is_empty()
+        || version.len() > 128
+        || !version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
     {
         return Err(Error::Denied);
     }
-    Ok(author.to_owned())
+    Ok(manifest)
+}
+
+fn runtime_file(
+    root: &File,
+    directory: &File,
+    name: &str,
+    manifest: &serde_json::Value,
+    kind: &str,
+) -> Result<File> {
+    let path = if kind == "lib" {
+        let prefix = if package::is_standard_author(manifest["package"]["author"].as_str().unwrap())
+            && !name.starts_with("std/")
+        {
+            "lib/std"
+        } else {
+            "lib"
+        };
+        format!(
+            "{prefix}/{name}.wasm.{}",
+            manifest["package"]["version"].as_str().unwrap()
+        )
+    } else {
+        format!(
+            "app/{name}.{}",
+            manifest["package"]["version"].as_str().unwrap()
+        )
+    };
+    let state = match child(directory, "state.json", false) {
+        Ok(file) => Some(
+            serde_json::from_reader::<_, serde_json::Value>(file.take(1024 * 1024))
+                .map_err(|_| Error::Denied)?,
+        ),
+        Err(Error::RouteNotFound) => None,
+        Err(error) => return Err(error),
+    };
+    let open = |path: &str| -> Result<File> {
+        let mut parts = path.split('/').peekable();
+        let mut file = root.try_clone()?;
+        while let Some(part) = parts.next() {
+            file = child(&file, part, parts.peek().is_some() || kind == "app")?;
+        }
+        Ok(file)
+    };
+    let file = match open(&path) {
+        Ok(file) => file,
+        Err(Error::RouteNotFound)
+            if state
+                .as_ref()
+                .is_none_or(|state| state["layout"] != "versions") =>
+        {
+            let legacy = if kind == "app" {
+                format!("app/{name}")
+            } else {
+                let prefix =
+                    if package::is_standard_author(manifest["package"]["author"].as_str().unwrap())
+                        && !name.starts_with("std/")
+                    {
+                        "lib/std"
+                    } else {
+                        "lib"
+                    };
+                format!(
+                    "{prefix}/{name}_{}.wasm",
+                    manifest["package"]["version"].as_str().unwrap()
+                )
+            };
+            open(&legacy)?
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(state) = state {
+        let metadata = file.metadata()?;
+        if state[kind]["dev"].as_u64() != Some(metadata.dev())
+            || state[kind]["ino"].as_u64() != Some(metadata.ino())
+        {
+            return Err(Error::RouteNotFound);
+        }
+    }
+    Ok(file)
 }
 
 fn same_file(left: &Metadata, right: &Metadata) -> bool {
@@ -261,17 +449,211 @@ fn same_file(left: &Metadata, right: &Metadata) -> bool {
         && left.ctime_nsec() == right.ctime_nsec()
 }
 
+// Refresh local standard Libs, then let the common API router select declarations.
+fn load_standard_libraries(
+    profile: &IdentityProfile,
+    sandbox: &Arc<RwLock<Sandbox>>,
+) -> Result<()> {
+    let directory = match root(profile) {
+        Ok(root) => match child(&root, "lib", true) {
+            Ok(lib) => Some(lib),
+            Err(Error::RouteNotFound) => None,
+            Err(error) => return Err(error),
+        },
+        Err(Error::RouteNotFound) => None,
+        Err(error) => return Err(error),
+    };
+    let mut present = HashSet::new();
+    let mut pending = directory
+        .into_iter()
+        .map(|directory| (String::new(), directory))
+        .collect::<Vec<_>>();
+    while let Some((prefix, directory)) = pending.pop() {
+        for entry in cap_std::fs::Dir::from_std_file(directory.try_clone()?).entries()? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let Ok(leaf) = entry.file_name().into_string() else {
+                continue;
+            };
+            let marker = leaf.strip_suffix(".preview");
+            let segment = marker.unwrap_or(&leaf);
+            let name = if prefix.is_empty() {
+                segment.to_owned()
+            } else {
+                format!("{prefix}/{segment}")
+            };
+            if package::valid_id(&name).is_err() {
+                continue;
+            }
+            let opened = child(&directory, &leaf, true)?;
+            if marker.is_none() {
+                pending.push((name, opened));
+                continue;
+            }
+            let manifest = manifest(&opened, &name)?;
+            let author = manifest["package"]["author"].as_str().unwrap();
+            if package::is_standard_author(author) {
+                match load(profile, sandbox, author, &name) {
+                    Ok(_) => {
+                        present.insert(format!("{author}/{name}"));
+                    }
+                    Err(Error::RouteNotFound) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+    sandbox.write().unwrap().dev_libs.retain(|id, (_, lib)| {
+        let keep = !package::is_standard_author(id.split('/').next().unwrap_or(""))
+            || present.contains(id);
+        if !keep {
+            lib.stream_retired.cancel();
+        }
+        keep
+    });
+    Ok(())
+}
+
 fn load(
     profile: &IdentityProfile,
     sandbox: &Arc<RwLock<Sandbox>>,
     expected_author: &str,
     name: &str,
 ) -> Result<Arc<Lib>> {
+    let result = load_dependencies(profile, sandbox, expected_author, name, &mut HashSet::new());
+    if result.is_err() {
+        sandbox.write().unwrap().dev_libs.retain(|id, (_, lib)| {
+            let keep = id.split_once('/').map_or(id.as_str(), |(_, name)| name) != name;
+            if !keep {
+                lib.stream_retired.cancel();
+            }
+            keep
+        });
+    }
+    result
+}
+
+fn load_dependencies(
+    profile: &IdentityProfile,
+    sandbox: &Arc<RwLock<Sandbox>>,
+    expected_author: &str,
+    name: &str,
+    visiting: &mut HashSet<String>,
+) -> Result<Arc<Lib>> {
+    visiting.insert(name.to_owned());
+    let declared = {
+        let root = root(profile)?;
+        let directory = project_directory(&root, name)?;
+        let manifest = manifest(&directory, name)?;
+        manifest["dependencies"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut dependencies = std::collections::HashMap::new();
+    for dependency in declared {
+        let dependency_name = dependency["name"]
+            .as_str()
+            .ok_or_else(|| Error::InvalidComponent("missing local dependency name".into()))?;
+        let version = dependency["version"]
+            .as_str()
+            .ok_or_else(|| Error::InvalidComponent("missing local dependency version".into()))?;
+        package::valid_id(dependency_name)?;
+        let (local_author, local_frontend) = {
+            let root = root(profile)?;
+            match project_directory(&root, dependency_name) {
+                Ok(directory) => {
+                    let local = manifest(&directory, dependency_name)?;
+                    let author = local["package"]["author"].as_str().unwrap();
+                    let expected = dependency["publisher"]
+                        .as_str()
+                        .or_else(|| dependency["author"].as_str());
+                    let has_lib =
+                        runtime_file(&root, &directory, dependency_name, &local, "lib").is_ok();
+                    let matches = local["package"]["version"] == version
+                        && expected.is_none_or(|expected| expected == author);
+                    (
+                        if matches && has_lib {
+                            Some(author.to_owned())
+                        } else {
+                            None
+                        },
+                        matches
+                            && !has_lib
+                            && runtime_file(&root, &directory, dependency_name, &local, "app")
+                                .is_ok(),
+                    )
+                }
+                Err(Error::RouteNotFound) => (None, false),
+                Err(error) => return Err(error),
+            }
+        };
+        if let Some(author) = local_author {
+            if !visiting.contains(dependency_name) {
+                load_dependencies(profile, sandbox, &author, dependency_name, visiting)?;
+            }
+            dependencies.insert(
+                dependency_name.to_owned(),
+                (format!("{author}/{dependency_name}"), version.to_owned()),
+            );
+        } else {
+            let target = sandbox
+                .read()
+                .unwrap()
+                .versions
+                .iter()
+                .find(|((id, candidate_version), _)| {
+                    id.split_once('/').map_or(id.as_str(), |(_, name)| name) == dependency_name
+                        && candidate_version == version
+                })
+                .map(|(_, lib)| Arc::clone(lib));
+            if let Some(target) = target {
+                dependencies.insert(
+                    dependency_name.to_owned(),
+                    (target.id.clone(), target.openapi.info.version.clone()),
+                );
+            } else if !local_frontend {
+                let installed = if profile.join(".volume/sys/setting/database").is_file() {
+                    package::installed_package_versions(profile, None)?
+                } else {
+                    Vec::new()
+                };
+                if !installed.iter().any(|entry| {
+                    entry["name"] == dependency_name
+                        && entry["version"] == version
+                        && entry["has_lib"] == false
+                }) {
+                    return Err(Error::InvalidComponent(format!(
+                        "dependency {dependency_name} {version} is unavailable"
+                    )));
+                }
+            }
+        }
+    }
+    visiting.remove(name);
+    load_library(profile, sandbox, expected_author, name, dependencies)
+}
+
+fn load_library(
+    profile: &IdentityProfile,
+    sandbox: &Arc<RwLock<Sandbox>>,
+    expected_author: &str,
+    name: &str,
+    dependencies: std::collections::HashMap<String, (String, String)>,
+) -> Result<Arc<Lib>> {
+    // Installation takes the Sandbox lock before the identity directory lock.
+    let mut state = sandbox.write().unwrap();
+    if state.tasks.is_closed() {
+        return Err(Error::Denied);
+    }
     let opened = (|| {
         let root = root(profile)?;
-        let directory = child(&root, name, true)?;
-        let file = child(&directory, "lib.wasm", false)?;
-        let author = author_from_directory(&directory, name)?;
+        let directory = project_directory(&root, name)?;
+        let manifest = manifest(&directory, name)?;
+        let file = runtime_file(&root, &directory, name, &manifest, "lib")?;
+        let author = manifest["package"]["author"].as_str().unwrap().to_owned();
         if author != expected_author {
             return Err(Error::RouteNotFound);
         }
@@ -280,8 +662,8 @@ fn load(
     let (_root, mut file, author) = match opened {
         Ok(opened) => opened,
         Err(error) => {
-            sandbox.write().unwrap().dev_libs.retain(|id, (_, lib)| {
-                let keep = id.rsplit('/').next() != Some(name);
+            state.dev_libs.retain(|id, (_, lib)| {
+                let keep = id.split_once('/').map(|(_, name)| name).or(Some(&id[..])) != Some(name);
                 if !keep {
                     lib.stream_retired.cancel();
                 }
@@ -292,18 +674,20 @@ fn load(
     };
     let metadata = file.metadata()?;
     let id = format!("{author}/{name}");
-    let mut state = sandbox.write().unwrap();
-    if state.tasks.is_closed() {
-        return Err(Error::Denied);
-    }
     if let Some((previous, lib)) = state.dev_libs.get(&id)
         && same_file(previous, &metadata)
+        && lib.dependencies.len() == dependencies.len()
+        && dependencies.iter().all(|(name, target)| {
+            lib.dependencies
+                .get(name)
+                .is_some_and(|previous| previous == target)
+        })
     {
         return Ok(lib.clone());
     }
     // Changed or removed files never fall back to stale executable code.
     state.dev_libs.retain(|id, (_, lib)| {
-        let keep = id.rsplit('/').next() != Some(name);
+        let keep = id.split_once('/').map(|(_, name)| name).or(Some(&id[..])) != Some(name);
         if !keep {
             lib.stream_retired.cancel();
         }
@@ -348,16 +732,20 @@ fn load(
     {
         return Err(Error::Denied);
     }
-    let lib = Arc::new(Lib::load(
+    let mut lib = Lib::load(
         state.runtime.clone(),
         id.clone(),
         &bytes,
-        &data_root.join(if crate::package::is_standard_author(&author) {
-            format!("std/{name}")
-        } else {
-            name.to_owned()
-        }),
-    )?);
+        &data_root.join(
+            if crate::package::is_standard_author(&author) && !name.starts_with("std/") {
+                format!("std/{name}")
+            } else {
+                name.to_owned()
+            },
+        ),
+    )?;
+    lib.dependencies = dependencies;
+    let lib = Arc::new(lib);
     state.dev_libs.insert(id, (metadata, lib.clone()));
     Ok(lib)
 }

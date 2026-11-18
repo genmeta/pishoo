@@ -36,8 +36,7 @@ pub(crate) const STORE_OWNER: &str = match option_env!("PISHOO_REGISTRY_OWNER_HA
 // Resolve only through the authenticated, pinned store, then verify the canonical release normally.
 async fn resolve_author(endpoint: &dhttp::Endpoint, name: &str, version: &str) -> Result<String> {
     super::valid_id(name)?;
-    if name.contains('/')
-        || version.split('.').count() != 3
+    if version.split('.').count() != 3
         || version.split('.').any(|part| {
             part.is_empty()
                 || !part.bytes().all(|b| b.is_ascii_digit())
@@ -52,7 +51,7 @@ async fn resolve_author(endpoint: &dhttp::Endpoint, name: &str, version: &str) -
     let metadata: Value = serde_json::from_slice(
         &store_get(
             endpoint,
-            &format!("/store/v1/packages/{name}/versions/{version}"),
+            &format!("/store/v1/packages/{}/versions/{version}", name.to_owned()),
             8 * 1024 * 1024,
         )
         .await?,
@@ -94,7 +93,10 @@ async fn download_release(
             "version must be MAJOR.MINOR.PATCH".into(),
         ));
     }
-    let path = format!("/store/v1/packages/{publisher}/{name}/versions/{version}");
+    let path = format!(
+        "/store/v1/packages/{publisher}/{}/versions/{version}",
+        name.to_owned()
+    );
     let metadata: Value =
         serde_json::from_slice(&store_get(endpoint, &path, 8 * 1024 * 1024).await?)
             .map_err(|_| Error::InvalidComponent("invalid store metadata".into()))?;
@@ -132,26 +134,100 @@ pub(crate) async fn install_store_package(
     version: &str,
     sandbox: &Arc<RwLock<Sandbox>>,
 ) -> Result<Value> {
-    let publisher = if publisher.is_empty() {
-        resolve_author(endpoint, name, version).await?
-    } else {
-        publisher.to_owned()
-    };
-    let publisher = publisher.as_str();
-    let root_id = format!("{publisher}/{name}");
-    super::valid_id(&root_id)?;
+    let installed_versions = super::files::installed_package_versions(profile, None)?;
+    let has_predecessor = installed_versions.iter().any(|entry| {
+        let author = entry["author"].as_str().unwrap_or("");
+        let old = entry["name"].as_str().unwrap_or("");
+        (publisher.is_empty() || author == publisher)
+            && old != name
+            && super::renames::canonical_name(author, old) == name
+    });
+    if let Some(installed) =
+        installed_versions
+            .iter()
+            .filter(|_| !has_predecessor)
+            .find(|installed| {
+                installed["name"] == name
+                    && installed["version"] == version
+                    && installed["author"].is_string()
+                    && (publisher.is_empty() || installed["author"] == publisher)
+            })
+    {
+        let id = installed["id"]
+            .as_str()
+            .ok_or_else(|| Error::InvalidConfig("missing installed identity".into()))?
+            .to_owned();
+        let activated = tokio::task::block_in_place(|| {
+            let mut sandbox = sandbox.write().unwrap();
+            if sandbox.tasks.is_closed() {
+                return Err(Error::Denied);
+            }
+            super::files::activate_installed_version(profile, &id, version, &mut sandbox)
+        })?;
+        if let Some(activated) = activated {
+            return Ok(activated);
+        }
+    }
+    let result = install_store_packages(
+        profile,
+        endpoint,
+        &[(publisher.to_owned(), name.to_owned(), version.to_owned())],
+        sandbox,
+    )
+    .await?;
+    Ok(result[0].clone())
+}
+
+pub(super) async fn install_store_packages(
+    profile: &IdentityProfile,
+    endpoint: &dhttp::Endpoint,
+    requests: &[(String, String, String)],
+    sandbox: &Arc<RwLock<Sandbox>>,
+) -> Result<Value> {
+    if requests.is_empty() || requests.len() > 100 {
+        return Err(Error::BadRequest(
+            "installation requires 1 to 100 roots".into(),
+        ));
+    }
+    let mut roots = Vec::new();
+    let mut unique = std::collections::BTreeSet::new();
+    for (author, name, version) in requests {
+        let author = if author.is_empty() {
+            resolve_author(endpoint, name, version).await?
+        } else {
+            author.clone()
+        };
+        let id = format!("{author}/{name}");
+        super::valid_id(&id)?;
+        let logical = format!("{author}/{}", super::renames::canonical_name(&author, name));
+        if !unique.insert(logical) {
+            return Err(Error::BadRequest("duplicate installation root".into()));
+        }
+        roots.push((id, author, name.clone(), version.clone()));
+    }
     let installed = installed_packages(profile, None)?;
-    let mut pending = vec![(publisher.to_owned(), name.to_owned(), version.to_owned())];
+    let installed_versions = super::files::installed_package_versions(profile, None)?;
+    let mut pending = roots
+        .iter()
+        .rev()
+        .map(|(_, author, name, version)| (author.clone(), name.clone(), version.clone()))
+        .collect::<Vec<_>>();
     let mut resources: Vec<(String, Vec<u8>, Value)> = Vec::new();
     while let Some((publisher, name, version)) = pending.pop() {
         let id = format!("{publisher}/{name}");
-        if let Some((_, _, proof)) = resources.iter().find(|(key, _, _)| key == &id) {
-            if proof["version"] != version {
-                return Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("conflicting dependency versions for {id}"),
-                )));
-            }
+        if resources
+            .iter()
+            .any(|(key, _, proof)| key == &id && proof["version"] == version)
+        {
+            continue;
+        }
+        if !roots
+            .iter()
+            .any(|(root, _, _, wanted)| root == &id && wanted == &version)
+            && installed_versions
+                .iter()
+                .any(|entry| entry["id"] == id && entry["version"] == version)
+        {
             continue;
         }
         if resources.len() >= 100 {
@@ -159,10 +235,14 @@ pub(crate) async fn install_store_package(
                 "installation exceeds 100 packages".into(),
             ));
         }
-        if resources
-            .iter()
-            .any(|(other, _, _)| other != &id && other.rsplit('/').next() == Some(name.as_str()))
-        {
+        if resources.iter().any(|(other, _, _)| {
+            other != &id
+                && other
+                    .split_once('/')
+                    .map(|(_, name)| name)
+                    .or(Some(&other[..]))
+                    == Some(name.as_str())
+        }) {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "conflicting package authors",
@@ -180,6 +260,7 @@ pub(crate) async fn install_store_package(
             )));
         }
         let (bytes, mut proof) = download_release(endpoint, &publisher, &name, &version).await?;
+        proof.as_object_mut().unwrap().remove("_requested");
         if let Some(current) = installed.as_array().unwrap().iter().find(|p| p["id"] == id)
             && current["author_owner_hash"].is_null()
         {
@@ -208,14 +289,23 @@ pub(crate) async fn install_store_package(
         for dep in document["dependencies"].as_array().unwrap() {
             let author = match dep["publisher"].as_str() {
                 Some(author) => author.to_owned(),
-                None => {
-                    resolve_author(
-                        endpoint,
-                        dep["name"].as_str().unwrap(),
-                        dep["version"].as_str().unwrap(),
-                    )
-                    .await?
-                }
+                None => match installed_versions
+                    .iter()
+                    .find(|entry| {
+                        entry["name"] == dep["name"] && entry["version"] == dep["version"]
+                    })
+                    .and_then(|entry| entry["author"].as_str())
+                {
+                    Some(author) => author.to_owned(),
+                    None => {
+                        resolve_author(
+                            endpoint,
+                            dep["name"].as_str().unwrap(),
+                            dep["version"].as_str().unwrap(),
+                        )
+                        .await?
+                    }
+                },
             };
             pending.push((
                 author,
@@ -223,62 +313,80 @@ pub(crate) async fn install_store_package(
                 dep["version"].as_str().unwrap().to_owned(),
             ));
         }
+        if roots
+            .iter()
+            .any(|(root, _, _, wanted)| root == &id && wanted == &version)
+        {
+            proof["_requested"] = true.into();
+        }
         resources.push((id, bytes, proof));
     }
-    let ordered = order_packages(resources)?;
+    let ordered = order_packages(resources, &installed_versions)?;
     tokio::task::block_in_place(|| {
         let mut sandbox = sandbox.write().unwrap();
         if sandbox.tasks.is_closed() {
             return Err(Error::Denied);
         }
-        // The root is last in dependency order. Prepare its response before the
-        // commit so no fallible work follows the durable/runtime switch.
-        let result = super::lib_metadata(
-            &super::format::read_package_at(
-                &ordered.last().unwrap().1,
-                ordered.last().unwrap().2["signature"]["verified_at"]
-                    .as_i64()
-                    .unwrap(),
-            )?,
-            Some(&root_id),
-        );
+        // Build the complete response before switching durable/runtime state.
+        let result = roots
+            .iter()
+            .map(|(id, _, _, version)| {
+                let (_, bytes, proof) = ordered
+                    .iter()
+                    .find(|(key, _, proof)| key == id && proof["version"] == *version)
+                    .ok_or_else(|| Error::InvalidConfig("missing requested release".into()))?;
+                Ok(super::lib_metadata(
+                    &super::format::read_package_at(
+                        bytes,
+                        proof["signature"]["verified_at"].as_i64().unwrap(),
+                    )?,
+                    Some(id),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
         super::files::install_packages(profile, &ordered, &mut sandbox)?;
-        Ok(result)
+        Ok(Value::Array(result))
     })
 }
 
 fn order_packages(
     mut resources: Vec<(String, Vec<u8>, Value)>,
+    installed: &[Value],
 ) -> Result<Vec<(String, Vec<u8>, Value)>> {
-    let mut ordered: Vec<(String, Vec<u8>, Value)> = Vec::new();
-    while !resources.is_empty() {
-        let mut ready = None;
-        for (index, (_, bytes, proof)) in resources.iter().enumerate() {
-            let doc = package_metadata(&super::format::read_package_at(
-                bytes,
-                proof["signature"]["verified_at"].as_i64().ok_or_else(|| {
-                    super::signing::policy(
-                        "package_policy_upgrade_required",
-                        http::StatusCode::UNPROCESSABLE_ENTITY,
-                    )
-                })?,
-            )?)?;
-            if doc["dependencies"].as_array().unwrap().iter().all(|dep| {
-                ordered.iter().any(|(id, _, _)| {
-                    id.rsplit('/').next() == dep["name"].as_str()
-                        && dep["publisher"].as_str().is_none_or(|author| {
-                            id.split_once('/')
-                                .is_some_and(|(publisher, _)| publisher == author)
-                        })
-                })
-            }) {
-                ready = Some(index);
-                break;
-            }
+    // Runtime packages need no build order. Validate the complete closure before
+    // registration; keep the requested root last for activation and its response.
+    for (_, bytes, proof) in &resources {
+        let doc = package_metadata(&super::format::read_package_at(
+            bytes,
+            proof["signature"]["verified_at"].as_i64().ok_or_else(|| {
+                super::signing::policy(
+                    "package_policy_upgrade_required",
+                    http::StatusCode::UNPROCESSABLE_ENTITY,
+                )
+            })?,
+        )?)?;
+        if !doc["dependencies"].as_array().unwrap().iter().all(|dep| {
+            resources.iter().any(|(id, _, proof)| {
+                proof["version"] == dep["version"]
+                    && id.split_once('/').map_or(id.as_str(), |(_, name)| name)
+                        == dep["name"].as_str().unwrap()
+                    && dep["publisher"].as_str().is_none_or(|author| {
+                        id.split_once('/')
+                            .is_some_and(|(publisher, _)| publisher == author)
+                    })
+            }) || installed.iter().any(|entry| {
+                entry["name"] == dep["name"]
+                    && entry["version"] == dep["version"]
+                    && dep["publisher"]
+                        .as_str()
+                        .is_none_or(|author| entry["author"] == author)
+            })
+        }) {
+            return Err(Error::BadRequest("missing exact package dependency".into()));
         }
-        let index = ready.ok_or_else(|| Error::BadRequest("cyclic package dependencies".into()))?;
-        ordered.push(resources.remove(index));
     }
+    resources.reverse();
+    let ordered = resources;
     Ok(ordered)
 }
 
@@ -412,9 +520,8 @@ pub(super) fn verify_release(
         ));
     }
     let document = package_metadata(&package)?;
-    let data = &package["signature.json"];
-    let envelope: Value =
-        serde_json::from_slice(data).map_err(|_| invalid("invalid signature envelope"))?;
+    let envelope = super::format::waz_signature(&package)
+        .map_err(|_| invalid("invalid signature envelope"))?;
     let dependencies = document["dependencies"]
         .as_array()
         .unwrap()

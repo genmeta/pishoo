@@ -1,0 +1,47 @@
+package pishoo:execution@0.1.0;
+
+interface runtime {
+    use wasi:filesystem/types@0.2.12.{descriptor};
+
+    record directory {
+        descriptor: borrow<descriptor>,
+        path: string,
+        read-only: bool,
+    }
+
+    record request {
+        program: string,
+        args: list<string>,
+        env: list<tuple<string, string>>,
+        stdin: list<u8>,
+        directories: list<directory>,
+        timeout-ms: u64,
+        fuel: u64,
+    }
+
+    enum termination-reason {
+        exited,
+        timeout,
+        fuel-exhausted,
+        output-limit,
+        trap,
+    }
+
+    record execution-result {
+        stdout: list<u8>,
+        stderr: list<u8>,
+        exit-code: option<u8>,
+        termination-reason: termination-reason,
+        truncated: bool,
+    }
+
+    enum execution-error {
+        invalid-request,
+        program-not-found,
+        unavailable,
+    }
+
+    execute: func(request: request) -> result<execution-result, execution-error>;
+}
+
+world execution-client { import runtime; }

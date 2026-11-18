@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS files (
+CREATE TABLE IF NOT EXISTS native_files (
     id TEXT PRIMARY KEY,
     request_id TEXT NOT NULL UNIQUE,
     directory TEXT NOT NULL,

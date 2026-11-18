@@ -19,8 +19,7 @@ pub(super) fn certificates(
             http::StatusCode::UNPROCESSABLE_ENTITY,
         )
     };
-    let envelope: Value =
-        serde_json::from_slice(files.get("signature.json").ok_or_else(bad)?).map_err(|_| bad())?;
+    let envelope = super::format::waz_signature(files).map_err(|_| bad())?;
     envelope["certificates"]
         .as_array()
         .filter(|chain| (2..=3).contains(&chain.len()))

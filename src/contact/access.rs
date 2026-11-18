@@ -7,11 +7,7 @@ use http::{Method, Request};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use super::{
-    Failure,
-    capabilities::{offered, requested},
-    fail,
-};
+use super::{Failure, fail};
 
 pub(super) fn owner(endpoint: &dhttp::Endpoint) -> Result<access_control::Visitor, Failure> {
     let local = endpoint
@@ -95,6 +91,44 @@ pub(super) fn encoded(value: &str) -> String {
     form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
+pub(super) async fn receipt(
+    access: &AccessService,
+    receiver: &access_control::Visitor,
+    applicant: &access_control::Visitor,
+    id: &str,
+) -> Result<Value, Failure> {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
+    let decode = |error: sea_orm::DbErr| fail(500, error.to_string());
+    let tx = access.database().begin().await.map_err(decode)?;
+    let row=tx.query_one_raw(Statement::from_sql_and_values(DatabaseBackend::Sqlite,
+        "SELECT CASE WHEN a.status='active' AND (c.id IS NULL OR c.status<>2 OR c.expired_after<=?1) THEN 'revoked'
+                     WHEN a.status='pending' AND a.expired_after<=?1 THEN 'expired' ELSE a.status END AS state,
+                a.received_at,a.expired_after FROM contact_applications a
+         LEFT JOIN contacts c ON c.name=a.applicant_name AND c.subject_id=a.applicant_sid
+         WHERE a.application_id=?2 AND a.applicant_name=?3 AND a.applicant_sid=?4",
+        [super::now().into(),id.into(),applicant.name().into(),applicant.subject_id().as_bytes().to_vec().into()]))
+        .await.map_err(decode)?.ok_or_else(||fail(404,"application not found"))?;
+    let state: String = row.try_get("", "state").map_err(decode)?;
+    let mut granted = serde_json::Map::new();
+    if state == "active" {
+        for rule in tx.query_all_raw(Statement::from_sql_and_values(DatabaseBackend::Sqlite,
+            "SELECT api,method,effect FROM access_rules WHERE grantee_type=0 AND grantee=? ORDER BY api,effect,method",
+            [applicant.name().into()])).await.map_err(decode)? {
+            let path:String=rule.try_get("","api").map_err(decode)?;
+            let effect:String=rule.try_get("","effect").map_err(decode)?;
+            let method:String=rule.try_get("","method").map_err(decode)?;
+            let methods=granted.entry(path).or_insert_with(||json!({"allow":[],"review":[],"deny":[]}));
+            methods[&effect].as_array_mut().ok_or_else(||fail(500,"invalid ACL effect"))?.push(json!(method));
+        }
+    }
+    tx.commit().await.map_err(decode)?;
+    Ok(
+        json!({"application_id":id,"name":receiver.name(),"subject_id":String::from_utf8_lossy(receiver.subject_id().as_bytes()),
+        "status":state,"received_at":row.try_get::<i64>("","received_at").map_err(decode)?,
+        "valid_before":row.try_get::<i64>("","expired_after").map_err(decode)?,"granted_access":granted}),
+    )
+}
+
 /// Persist only an identity learned through an authenticated peer connection.
 pub(super) async fn record_outbound(
     access: &AccessService,
@@ -131,49 +165,34 @@ pub(super) async fn record_outbound(
         })
 }
 
-// Called only by the owner's submission, before enqueueing. Delivery and
-// acceptance never replay grants or restore permissions the owner revoked.
-pub(super) async fn grant_offered(
+/// Apply an immutable offer only on its first verified local binding.
+pub(super) async fn apply_offered(
     access: &Arc<AccessService>,
     endpoint: &dhttp::Endpoint,
     target: &str,
     subject: &str,
-    requests: &[Value],
-    capabilities: &[Value],
-    valid_before: i64,
+    snapshot: &Value,
 ) -> Result<(), Failure> {
-    let existing = match contact(access, endpoint, target).await {
-        Ok(contact) => contact,
-        Err((404, _)) => {
-            record_outbound(
-                access,
-                target,
-                subject,
-                requested(requests),
-                offered(capabilities),
-                valid_before,
-                super::now(),
-            )
-            .await?;
-            contact(access, endpoint, target).await?
-        }
-        Err(error) => return Err(error),
-    };
-    if existing["subject_id"] != subject
-        || !matches!(existing["status"].as_str(), Some("pending" | "active"))
+    let current = contact(access, endpoint, target).await?;
+    if current["subject_id"] != subject
+        || !matches!(current["status"].as_str(), Some("active" | "pending"))
     {
         return Err(fail(409, "local contact blocks offered capabilities"));
     }
-    for capability in capabilities {
-        for operation in capability["endpoints"].as_array().unwrap() {
+    for (path, rules) in snapshot
+        .as_object()
+        .ok_or_else(|| fail(400, "invalid offer snapshot"))?
+    {
+        for method in rules["allow"]
+            .as_array()
+            .ok_or_else(|| fail(400, "invalid offered methods"))?
+        {
             local_api(
                 access,
                 endpoint,
                 Method::PATCH,
                 &format!("/std/acl/allow?name={}", encoded(target)),
-                Some(
-                    &json!({"api":operation["path"],"method":operation["method"],"effect":"allow"}),
-                ),
+                Some(&json!({"api":path,"method":method,"effect":"allow"})),
             )
             .await?;
         }

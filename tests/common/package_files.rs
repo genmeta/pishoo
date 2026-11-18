@@ -34,7 +34,7 @@ pub(crate) fn install_package(
 ) -> Result<serde_json::Value> {
     use rustix::fs::{FlockOperation, Mode, flock, mkdirat};
     valid_id(id)?;
-    if id.rsplit('/').next() == Some("std") {
+    if package_name(id) == "std" {
         return Err(Error::BadRequest("std is reserved".into()));
     }
     let parent = initialized_profile(profile)?;
@@ -51,7 +51,7 @@ pub(crate) fn install_package(
         format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes)).into();
     metadata["signer_leaf_fingerprint_sha256"] = facts["leaf_fingerprint_sha256"].clone();
     check_resource_identity(&metadata, id)?;
-    if let Some(backend) = package.get("backend.wasm") {
+    if let Some(backend) = super::super::format::waz_backend(&package) {
         runtime.compile(backend)?;
     }
     let mut database = installation_database(profile, true)?;
@@ -74,13 +74,48 @@ pub(crate) fn install_package(
         write_expanded(&dir, &package, id, kind)?;
     }
     let tx = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let previous = registered_packages(&tx, "lib", None)?;
+    let previous = tx
+        .prepare(
+            r#"
+SELECT CASE WHEN p.author IS NULL THEN p.name ELSE p.author||'/'||p.name END,p.version
+FROM pkg_registry.package p
+WHERE ?1 IS NULL OR (CASE WHEN p.author IS NULL THEN p.name ELSE p.author||'/'||p.name END)=?1
+ORDER BY p.name,p.version
+"#,
+        )?
+        .query_map([None::<&str>], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     for kind in ["lib", "app"] {
         if metadata[format!("has_{kind}")] == true {
             check_routes(profile, &tx, id, kind, &package)?;
         }
     }
-    save_registration(&tx, id, &metadata, &package)?;
+    // Fixtures deliberately replace same-version bytes to exercise runtime reloads.
+    // Production installations enforce digest immutability before registration.
+    tx.execute(
+        "UPDATE pkg_registry.package SET package_sha256=NULL WHERE name=?1 AND version=?2",
+        rusqlite::params![package_name(id), metadata["version"].as_str()],
+    )?;
+    save_package_identity(&tx, id, &metadata)?;
+    save_package_relations(&tx, id, &metadata, &package)?;
+    tx.execute(
+        r#"
+INSERT INTO pkg_registry.package_active(name,version) VALUES(?1,?2) ON CONFLICT(name) DO UPDATE
+SET version=excluded.version
+"#,
+        rusqlite::params![package_name(id), metadata["version"].as_str()],
+    )?;
+    tx.execute(
+        r#"
+INSERT INTO pkg_registry.package_root(name,version) VALUES(?1,?2) ON CONFLICT(name) DO UPDATE
+SET version=excluded.version
+"#,
+        rusqlite::params![package_name(id), metadata["version"].as_str()],
+    )?;
+    refresh_capabilities(&tx, package_name(id))?;
+    cache_release(profile, bytes, metadata["package_sha256"].as_str().unwrap())?;
     scopeguard::ScopeGuard::into_inner(cleanup);
     commit_package_files(profile, id, &previous, &parent, &stage, &name, tx)?;
     Ok(lib_metadata(&package, Some(id)))
@@ -109,4 +144,35 @@ pub(crate) fn remove_lib(profile: &IdentityProfile, id: &str) -> Result<()> {
 
 pub(crate) fn remove_app(profile: &IdentityProfile, id: &str) -> Result<()> {
     remove_package(profile, id)
+}
+
+// Single-package fixtures use the same publication and recovery operation.
+fn commit_package_files(
+    profile: &IdentityProfile,
+    id: &str,
+    previous: &[(String, String)],
+    parent: &std::fs::File,
+    stage: &std::fs::File,
+    name: &str,
+    tx: rusqlite::Transaction<'_>,
+) -> Result<()> {
+    let version = registered_metadata(&tx, "pkg", id)
+        .ok()
+        .and_then(|metadata| metadata["version"].as_str().map(str::to_owned))
+        .or_else(|| {
+            previous
+                .iter()
+                .find(|(other, _)| other == id)
+                .map(|(_, version)| version.clone())
+        })
+        .ok_or_else(expanded_error)?;
+    commit_packages_files(
+        profile,
+        &[(id, &version, "", stage)],
+        previous,
+        parent,
+        stage,
+        name,
+        tx,
+    )
 }

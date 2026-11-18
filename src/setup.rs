@@ -1,7 +1,6 @@
 //! Read, validate and manage identity service configuration.
 use std::{collections::HashSet, net::SocketAddr};
 
-use access_control::{SubjectId, Visitor};
 use axum::{
     Json, Router,
     body::Body,
@@ -204,16 +203,25 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
                 return Err(Error::InvalidConfig("incomplete package registry schema".into()));
             }
         }
-        let has_signing_evidence: bool = conn.query_row(
-            include_str!("package/sql/has_signing_evidence.sql"),
-            [],
-            |r| r.get(0),
-        )?;
+        let has_signing_evidence = crate::package::has_signing_evidence(&conn)?;
         if !has_signing_evidence {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(include_str!(
-                "package/sql/migrations/v4_add_signing_evidence.sql"
+                "package/migrations/v4_add_signing_evidence.sql"
             ))?;
+            tx.commit()?;
+        }
+        let multiversion: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pkg_registry.sqlite_master WHERE name='package_active' AND type='table')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !multiversion {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(include_str!(
+                "package/migrations/v5_support_package_versions.sql"
+            ))?;
+            create_package_views(&tx)?;
             tx.commit()?;
         }
         return Ok(());
@@ -230,11 +238,11 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch(include_str!("setup/sql/schema.sql"))?;
-    tx.execute_batch(include_str!("package/sql/schema.sql"))?;
+    tx.execute_batch(include_str!("package/schema.sql"))?;
     let package_version: i64 =
         tx.query_row("PRAGMA pkg_registry.user_version", [], |r| r.get(0))?;
-    if package_version != 4 {
-        tx.execute_batch("PRAGMA pkg_registry.user_version=4")?;
+    if package_version != 5 {
+        tx.execute_batch("PRAGMA pkg_registry.user_version=5")?;
     }
     tx.pragma_update(None, "user_version", 3)?;
     tx.commit()?;
@@ -280,10 +288,42 @@ pub(crate) fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result
         );
         conn.execute(&format!("ATTACH DATABASE ?1 AS {schema}"), [uri])?;
     }
-    if conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE schema='pkg_registry' AND name='package')", [], |r|r.get::<_,bool>(0))? {
-        conn.execute_batch(include_str!("package/sql/runtime_views.sql"))?;
-    }
+    create_package_views(&conn)?;
     Ok(conn)
+}
+
+fn create_package_views(conn: &Connection) -> Result<()> {
+    let package: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pkg_registry.sqlite_master WHERE type='table' AND name='package')",
+        [], |row| row.get(0),
+    )?;
+    let views = if package {
+        let multiversion: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pkg_registry.sqlite_master WHERE name='package_active' AND type='table')", [], |row| row.get(0),
+        )?;
+        if multiversion {
+            r#"
+CREATE TEMP VIEW package_current AS
+SELECT p.* FROM pkg_registry.package p
+JOIN pkg_registry.package_active a ON a.name=p.name AND a.version=p.version;
+CREATE TEMP VIEW lib AS SELECT * FROM package_current WHERE has_lib=1;
+CREATE TEMP VIEW app AS SELECT * FROM package_current WHERE has_app=1;
+CREATE TEMP VIEW installed_lib AS SELECT DISTINCT name,author FROM pkg_registry.package WHERE has_lib=1;
+CREATE TEMP VIEW installed_app AS SELECT DISTINCT name,author FROM pkg_registry.package WHERE has_app=1;
+"#
+        } else {
+            r#"
+CREATE TEMP VIEW lib AS SELECT * FROM pkg_registry.package WHERE has_lib=1;
+CREATE TEMP VIEW app AS SELECT * FROM pkg_registry.package WHERE has_app=1;
+CREATE TEMP VIEW installed_lib AS SELECT * FROM lib;
+CREATE TEMP VIEW installed_app AS SELECT * FROM app;
+"#
+        }
+    } else {
+        "CREATE TEMP VIEW installed_lib AS SELECT * FROM lib; CREATE TEMP VIEW installed_app AS SELECT * FROM app;"
+    };
+    conn.execute_batch(views)?;
+    Ok(())
 }
 
 fn inherit_config_files(profile: &IdentityProfile) -> Result<()> {
@@ -381,12 +421,14 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
     })
 }
 
-// /std is reserved; App and ordinary Lib mounts are checked independently.
+// /std and /sys are reserved; App and ordinary Lib mounts are checked independently.
 fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()> {
     if proxies.iter().any(|proxy| {
         crate::routes::reserved(proxy.location.strip_prefix("= ").unwrap_or(&proxy.location))
     }) {
-        return Err(Error::InvalidConfig("proxy cannot occupy /std".into()));
+        return Err(Error::InvalidConfig(
+            "proxy cannot occupy a reserved system path".into(),
+        ));
     }
     let has_apps: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type IN ('table','view') AND name='app')",
@@ -394,7 +436,7 @@ fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()
         |row| row.get(0),
     )?;
     if has_apps {
-        let mut names = conn.prepare("SELECT name FROM app ORDER BY name")?;
+        let mut names = conn.prepare("SELECT name FROM installed_app ORDER BY name")?;
         for name in names.query_map([], |row| row.get::<_, String>(0))? {
             let mount = format!("/app/{}", name?);
             if let Some(proxy) = proxies.iter().find(|proxy| {
@@ -420,9 +462,9 @@ fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()
             |row| row.get(0),
         )?;
         let mut names = conn.prepare(if has_author {
-            "SELECT name FROM lib WHERE author IS NULL OR author NOT IN ('std.dhttp.net','dev.genmeta.tech.dhttp.net') ORDER BY name"
+            "SELECT name FROM installed_lib WHERE author IS NULL OR author NOT IN ('std.dhttp.net','dev.genmeta.tech.dhttp.net') ORDER BY name"
         } else {
-            "SELECT name FROM lib WHERE substr(id,1,14)<>'std.dhttp.net/' AND id NOT GLOB 'dev.genmeta.tech.dhttp.net/*' ORDER BY name"
+            "SELECT name FROM installed_lib WHERE substr(id,1,14)<>'std.dhttp.net/' AND id NOT GLOB 'dev.genmeta.tech.dhttp.net/*' ORDER BY name"
         })?;
         for name in names.query_map([], |row| row.get::<_, String>(0))? {
             let mount = format!("/{}", name?);
@@ -538,20 +580,9 @@ pub(crate) fn config_router(profile: IdentityProfile, endpoint: dhttp::Endpoint)
 
 async fn config_request(
     profile: IdentityProfile,
-    endpoint: dhttp::Endpoint,
+    _endpoint: dhttp::Endpoint,
     request: Request<Body>,
 ) -> Result<Response> {
-    // authorize removes supplied Visitors and constructs this one from the TLS peer.
-    let visitor = request.extensions().get::<Visitor>().ok_or(Error::Denied)?;
-    let local = endpoint.local_authority()?;
-    let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
-        .map_err(|_| Error::Denied)?;
-    let subject =
-        SubjectId::new(ski.owner_hash().as_str().as_bytes()).map_err(|_| Error::Denied)?;
-    if visitor.name() != endpoint.name() || visitor.subject_id() != &subject {
-        return Err(Error::Denied);
-    }
-
     if request.headers().contains_key("accept-versions") {
         let mut supported = false;
         for versions in request.headers().get_all("accept-versions") {

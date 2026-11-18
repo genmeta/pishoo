@@ -129,7 +129,7 @@ fn snapshot_access(source: &std::path::Path, destination: &std::path::Path) -> R
     Ok(())
 }
 
-pub(super) async fn load_access(
+pub(crate) async fn load_access(
     profile: &IdentityProfile,
     subject: &access_control::SubjectId,
 ) -> Result<Arc<access_control::AccessService>> {
@@ -219,14 +219,26 @@ pub(super) async fn load_access(
                     .ok_or_else(|| Error::InvalidConfig("invalid ACL path".into()))?],
             )?;
             let tx = db.transaction()?;
-            let schema = include_str!("../package/sql/compat/v3/schema.sql")
-                .split("CREATE TABLE IF NOT EXISTS acl.lib_capability (")
-                .nth(1)
-                .unwrap();
-            tx.execute_batch(&format!(
-                "CREATE TABLE IF NOT EXISTS lib_capability ({}",
-                schema.replace("acl.lib_capability_operation", "lib_capability_operation")
-            ))?;
+            tx.execute_batch(
+                r#"
+CREATE TABLE IF NOT EXISTS lib_capability (
+    lib_name TEXT NOT NULL,
+    capability_id TEXT NOT NULL CHECK (length(capability_id) > 0),
+    title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+    PRIMARY KEY (lib_name, capability_id)
+);
+CREATE TABLE IF NOT EXISTS lib_capability_operation (
+    lib_name TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    method TEXT NOT NULL CHECK (length(method) > 0 AND method = upper(method)),
+    path TEXT NOT NULL CHECK (substr(path, 1, 1) = '/' AND length(path) > 1),
+    PRIMARY KEY (lib_name, capability_id, method, path),
+    UNIQUE (method, path),
+    FOREIGN KEY (lib_name, capability_id)
+        REFERENCES lib_capability(lib_name, capability_id) ON DELETE CASCADE
+);
+"#,
+            )?;
             tx.execute_batch("INSERT INTO main.lib_capability SELECT * FROM pending.lib_capability; INSERT INTO main.lib_capability_operation SELECT * FROM pending.lib_capability_operation;")?;
             tx.commit()?;
         }

@@ -73,7 +73,7 @@ fn unified_package_installs_updates_removes_resources_and_preserves_data() {
     assert_eq!(metadata["has_lib"], true);
     assert_eq!(metadata["has_app"], true);
     assert!(metadata.get("kind").is_none());
-    assert!(profile.join("lib/calendar_1.0.0.wasm").is_file());
+    assert!(profile.join("lib/calendar.wasm.1.0.0").is_file());
     assert_eq!(
         std::fs::read(profile.join("app/calendar/index.html")).unwrap(),
         b"1.0.0"
@@ -88,7 +88,7 @@ fn unified_package_installs_updates_removes_resources_and_preserves_data() {
     sandbox.load_libs(&profile).unwrap();
     assert!(!sandbox.apps.contains_key(id));
     install_package(&profile, id, &package("3.0.0", false, true), &runtime).unwrap();
-    assert!(!profile.join("lib/calendar_2.0.0.wasm").exists());
+    assert!(profile.join("lib/calendar.wasm.2.0.0").is_file());
     sandbox.load_libs(&profile).unwrap();
     assert!(!sandbox.libs.contains_key(id));
     assert!(sandbox.apps.contains_key(id));
@@ -116,9 +116,9 @@ fn failed_commits_restore_runtime_registration_and_permission_declarations() {
     let id = "alice.dhttp.net/calendar";
     let db =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    db.execute_batch("CREATE TABLE pkg_registry.fail_commit(name TEXT REFERENCES package(name) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER pkg_registry.reject_install AFTER INSERT ON package BEGIN INSERT INTO fail_commit VALUES('missing'); END;").unwrap();
+    db.execute_batch("CREATE TABLE pkg_registry.fail_commit(name TEXT,version TEXT,FOREIGN KEY(name,version) REFERENCES package(name,version) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER pkg_registry.reject_install AFTER INSERT ON package BEGIN INSERT INTO fail_commit VALUES('missing','0.0.0'); END;").unwrap();
     assert!(install_package(&profile, id, &package("1.0.0", true, true), &runtime).is_err());
-    assert!(!profile.join("lib/calendar_1.0.0.wasm").exists());
+    assert!(!profile.join("lib/calendar.wasm.1.0.0").exists());
     assert!(!profile.join("app/calendar").exists());
     for table in ["package", "lib_capability", "lib_capability_operation"] {
         assert_eq!(
@@ -132,8 +132,8 @@ fn failed_commits_restore_runtime_registration_and_permission_declarations() {
     db.execute_batch("DROP TRIGGER pkg_registry.reject_install;")
         .unwrap();
     install_package(&profile, id, &package("1.0.0", true, true), &runtime).unwrap();
-    let previous = std::fs::read(profile.join("lib/calendar_1.0.0.wasm")).unwrap();
-    db.execute_batch("CREATE TRIGGER pkg_registry.reject_upgrade AFTER UPDATE ON package BEGIN INSERT INTO fail_commit VALUES('missing'); END; CREATE TRIGGER pkg_registry.reject_removal AFTER DELETE ON package BEGIN INSERT INTO fail_commit VALUES('missing'); END;").unwrap();
+    let previous = std::fs::read(profile.join("lib/calendar.wasm.1.0.0")).unwrap();
+    db.execute_batch("CREATE TRIGGER pkg_registry.reject_new_version AFTER INSERT ON package BEGIN INSERT INTO fail_commit VALUES('missing','0.0.0'); END; CREATE TRIGGER pkg_registry.reject_upgrade AFTER UPDATE ON package BEGIN INSERT INTO fail_commit VALUES('missing','0.0.0'); END; CREATE TRIGGER pkg_registry.reject_removal AFTER DELETE ON package BEGIN INSERT INTO fail_commit VALUES('missing','0.0.0'); END;").unwrap();
     for version in [Some("2.0.0"), Some("1.0.0"), None] {
         let result = if let Some(version) = version {
             install_package(&profile, id, &package(version, true, true), &runtime).map(|_| ())
@@ -141,9 +141,9 @@ fn failed_commits_restore_runtime_registration_and_permission_declarations() {
             remove_package(&profile, id)
         };
         assert!(result.is_err(), "commit must fail for {version:?}");
-        assert!(!profile.join("lib/calendar_2.0.0.wasm").exists());
+        assert!(!profile.join("lib/calendar.wasm.2.0.0").exists());
         assert_eq!(
-            std::fs::read(profile.join("lib/calendar_1.0.0.wasm")).unwrap(),
+            std::fs::read(profile.join("lib/calendar.wasm.1.0.0")).unwrap(),
             previous
         );
         assert_eq!(

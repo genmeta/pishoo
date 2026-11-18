@@ -238,10 +238,11 @@ fn recovery_leaf(
     kind: &str,
     short: &str,
 ) -> Result<String> {
+    let encoded = short.replace('/', "%2F");
     let legacy = if kind == "lib" {
-        format!("{short}.wasm")
+        format!("{encoded}.wasm")
     } else {
-        short.to_owned()
+        encoded.clone()
     };
     let Some(value) = resource.get(key) else {
         if resource.get("old_leaf").is_some() || resource.get("new_leaf").is_some() {
@@ -252,10 +253,22 @@ fn recovery_leaf(
     let leaf = value
         .as_str()
         .ok_or_else(|| Error::InvalidConfig("invalid recovery filename".into()))?;
-    let valid = leaf == legacy
-        || kind == "lib"
-            && leaf
-                .strip_prefix(&format!("{short}_"))
+    let valid = [short, encoded.as_str()].iter().any(|base| {
+        if kind == "app" {
+            return leaf == *base;
+        }
+        leaf == format!("{base}.wasm")
+            || leaf
+                .strip_prefix(&format!("{base}.wasm."))
+                .is_some_and(|version| {
+                    !version.is_empty()
+                        && version.len() <= 128
+                        && version
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
+                })
+            || leaf
+                .strip_prefix(&format!("{base}_"))
                 .and_then(|s| s.strip_suffix(".wasm"))
                 .is_some_and(|version| {
                     !version.is_empty()
@@ -263,7 +276,8 @@ fn recovery_leaf(
                         && version
                             .bytes()
                             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
-                });
+                })
+    });
     if !valid {
         return Err(Error::InvalidConfig("invalid recovery filename".into()));
     }
@@ -294,6 +308,10 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
         }
         let journal: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker)?)
             .map_err(|e| Error::InvalidConfig(e.to_string()))?;
+        if journal["format"] == 2 {
+            crate::package::recover_version_publication(profile, &stage, &journal)?;
+            continue;
+        }
         // Old journals describe one package directly. New journals contain the
         // whole dependency update so even a same-version member uses the entire
         // transaction's SQLite decision, never its own possibly unchanged row.
@@ -310,11 +328,7 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
         let tx = db.transaction()?;
         // Recovery runs before schema initialization, so both the database and
         // a journal left by the previous host can still use the v3 projection.
-        let has_signing_evidence: bool = tx.query_row(
-            include_str!("../package/sql/has_signing_evidence.sql"),
-            [],
-            |r| r.get(0),
-        )?;
+        let has_signing_evidence = crate::package::has_signing_evidence(&tx)?;
         let mut committed = true;
         let mut names = std::collections::HashSet::new();
         // Validate every journal entry before restoring any package.
@@ -323,12 +337,14 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                 .as_str()
                 .ok_or_else(|| Error::InvalidConfig("missing recovery identity".into()))?;
             crate::package::valid_id(id)?;
-            let short = id.rsplit('/').next().unwrap();
+            let full_name = id.split_once('/').map_or(id, |(_, name)| name);
+            let encoded_name = full_name.replace('/', "%2F");
+            let short = encoded_name.as_str();
             let directory = package
                 .get("directory")
                 .map_or(Some(""), |v| v.as_str())
                 .ok_or_else(|| Error::InvalidConfig("invalid recovery directory".into()))?;
-            if !names.insert(short)
+            if !names.insert(full_name)
                 || !(directory == short || directory.is_empty() && packages.len() == 1)
             {
                 return Err(Error::InvalidConfig("invalid recovery directory".into()));
@@ -344,38 +360,26 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                 {
                     return Err(Error::InvalidConfig("invalid recovery resource".into()));
                 }
-                recovery_leaf(resource, "old_leaf", kind, short)?;
-                recovery_leaf(resource, "new_leaf", kind, short)?;
+                recovery_leaf(resource, "old_leaf", kind, full_name)?;
+                recovery_leaf(resource, "new_leaf", kind, full_name)?;
             }
             let facts = package["facts"]
                 .as_str()
                 .ok_or_else(|| Error::InvalidConfig("missing recovery facts".into()))?;
-            let current: String = tx.query_row(
-                if has_signing_evidence {
-                    include_str!("../package/sql/registration_facts.sql")
-                } else {
-                    include_str!("../package/sql/compat/v3/registration_facts.sql")
-                },
-                [short],
-                |r| r.get(0),
-            )?;
+            let current =
+                crate::package::registration_snapshot(&tx, full_name, has_signing_evidence)?;
             // Match old journals after a schema upgrade without discarding any
             // signing fields from journals written by the current installer.
             committed &= facts == current
                 || has_signing_evidence
-                    && facts
-                        == tx.query_row(
-                            include_str!("../package/sql/compat/v3/registration_facts.sql"),
-                            [short],
-                            |r| r.get::<_, String>(0),
-                        )?;
+                    && facts == crate::package::registration_snapshot(&tx, full_name, false)?;
         }
         for package in packages {
             if committed {
                 break;
             }
             let id = package["id"].as_str().unwrap();
-            let short = id.rsplit('/').next().unwrap();
+            let full_name = id.split_once('/').map_or(id, |(_, name)| name);
             let package_stage = stage.join(package["directory"].as_str().unwrap_or(""));
             if !package_stage.symlink_metadata()?.file_type().is_dir() {
                 return Err(Error::InvalidConfig("invalid recovery directory".into()));
@@ -388,8 +392,8 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                 {
                     return Err(Error::InvalidConfig("invalid recovery resource".into()));
                 }
-                let old_leaf = recovery_leaf(resource, "old_leaf", kind, short)?;
-                let leaf = recovery_leaf(resource, "new_leaf", kind, short)?;
+                let old_leaf = recovery_leaf(resource, "old_leaf", kind, full_name)?;
+                let leaf = recovery_leaf(resource, "new_leaf", kind, full_name)?;
                 let root = profile.join(
                     if kind == "lib"
                         && crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
@@ -403,6 +407,33 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                     return Err(Error::InvalidConfig(
                         "recovery target must be a real directory".into(),
                     ));
+                }
+                for relative in [&old_leaf, &leaf] {
+                    if let Some((parent, _)) = relative.rsplit_once('/') {
+                        let mut directory = std::fs::File::from(
+                            rustix::fs::open(
+                                &root,
+                                rustix::fs::OFlags::RDONLY
+                                    | rustix::fs::OFlags::DIRECTORY
+                                    | rustix::fs::OFlags::NOFOLLOW,
+                                rustix::fs::Mode::empty(),
+                            )
+                            .map_err(std::io::Error::from)?,
+                        );
+                        for part in parent.split('/') {
+                            directory = std::fs::File::from(
+                                rustix::fs::openat(
+                                    &directory,
+                                    part,
+                                    rustix::fs::OFlags::RDONLY
+                                        | rustix::fs::OFlags::DIRECTORY
+                                        | rustix::fs::OFlags::NOFOLLOW,
+                                    rustix::fs::Mode::empty(),
+                                )
+                                .map_err(std::io::Error::from)?,
+                            );
+                        }
+                    }
                 }
                 let target = root.join(&leaf);
                 let backup = package_stage.join(format!("old-{kind}"));
@@ -435,6 +466,10 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
                     {
                         remove(&target)?;
                     }
+                }
+                for relative in [&old_leaf, &leaf] {
+                    let path = root.join(relative);
+                    std::fs::File::open(path.parent().unwrap())?.sync_all()?;
                 }
                 std::fs::File::open(root)?.sync_all()?;
             }

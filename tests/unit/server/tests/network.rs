@@ -10,7 +10,7 @@ use tokio::time::Instant;
 
 use super::{
     ocsp::renew_ocsp,
-    run::{apply_ocsp, load_profile, reconcile_profiles},
+    run::{apply_ocsp, load_profile},
     *,
 };
 use crate::test_support::credentials;
@@ -26,6 +26,9 @@ mod workspace_split;
 
 #[path = "network/std_workflow.rs"]
 mod std_workflow;
+
+#[path = "network/system.rs"]
+mod system;
 
 #[tokio::test]
 #[ignore = "run alone; requires OpenSSL/local TCP+UDP and owns global TLS/DNS/DHTTP_HOME"]
@@ -398,7 +401,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     let mut chain = std::fs::read(&cert_path).unwrap();
     chain.extend(std::fs::read(root.path().join("ca.crt")).unwrap());
     std::fs::write(cert_path, chain).unwrap();
-    let sign_ocsp = |path: &str| {
+    let sign_ocsp = |path: &str, days: &str| {
         openssl(&[
             "ocsp",
             "-rmd",
@@ -418,19 +421,28 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
             "-respout",
             path,
             "-ndays",
-            "1",
+            days,
         ])
     };
-    sign_ocsp("receiver/ssl/stapling.ocsp");
-    sign_ocsp("renewed.ocsp");
+    sign_ocsp("receiver/ssl/stapling.ocsp", "4");
+    sign_ocsp("shorter.ocsp", "1");
+    sign_ocsp("renewed.ocsp", "6");
+    sign_ocsp("cached.ocsp", "8");
+    let shorter = std::fs::read(root.path().join("shorter.ocsp")).unwrap();
     let renewed = std::fs::read(root.path().join("renewed.ocsp")).unwrap();
+    let cached = std::fs::read(root.path().join("cached.ocsp")).unwrap();
     let before = std::fs::read(root.path().join("receiver/ssl/stapling.ocsp")).unwrap();
     assert_ne!(renewed, before);
 
-    let response_bytes = renewed.clone();
+    let responses = [
+        shorter,
+        before.clone(),
+        renewed.clone(),
+        renewed.clone(),
+        b"invalid OCSP".to_vec(),
+    ];
     let responder_task = tokio::spawn(async move {
-        // First return a signed renewal; then a malformed response to exercise retention.
-        for body in [response_bytes, b"invalid OCSP".to_vec()] {
+        for body in responses {
             let (mut socket, _) = responder.accept().await.unwrap();
             let mut request = Vec::new();
             loop {
@@ -529,6 +541,26 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     // A disk config change must stay unapplied; no identity/Lib reload occurs.
     crate::configure(&server.profile, Some("internal"), true).unwrap();
 
+    // Four days remaining is within the six-day renewal window: fetch even though it is
+    // longer than the 72-hour polling period. Shorter/equal responses must leave bytes intact.
+    let modified = std::fs::metadata(server.profile.ocsp_path())
+        .unwrap()
+        .modified()
+        .unwrap();
+    for _ in 0..2 {
+        let endpoint = renew_ocsp(&server.profile, &server.endpoint).await.unwrap();
+        apply_ocsp(&mut server, endpoint).await.unwrap();
+        assert_eq!(server.endpoint.local_authority().unwrap().ocsp(), before);
+        assert_eq!(std::fs::read(server.profile.ocsp_path()).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(server.profile.ocsp_path())
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
+    }
+
     let endpoint = renew_ocsp(&server.profile, &server.endpoint).await.unwrap();
     apply_ocsp(&mut server, endpoint).await.unwrap();
     assert_eq!(server.endpoint.local_authority().unwrap().ocsp(), renewed);
@@ -565,9 +597,37 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
             .name(),
         server.name()
     );
+    // Equal lifetime after a successful renewal also preserves the selected response.
+    let endpoint = renew_ocsp(&server.profile, &server.endpoint).await.unwrap();
+    apply_ocsp(&mut server, endpoint).await.unwrap();
+    assert_eq!(server.endpoint.local_authority().unwrap().ocsp(), renewed);
+    assert_eq!(std::fs::read(server.profile.ocsp_path()).unwrap(), renewed);
+
     assert!(renew_ocsp(&server.profile, &server.endpoint).await.is_err());
     assert_eq!(server.endpoint.local_authority().unwrap().ocsp(), renewed);
     assert_eq!(std::fs::read(server.profile.ocsp_path()).unwrap(), renewed);
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        scopeguard::ScopeGuard::into_inner(_responder),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // A longer proof installed on disk since startup is loaded without a network fetch.
+    // The responder has closed, so any attempted fetch would fail this renewal.
+    std::fs::write(server.profile.ocsp_path(), &cached).unwrap();
+    let endpoint = renew_ocsp(&server.profile, &server.endpoint).await.unwrap();
+    apply_ocsp(&mut server, endpoint).await.unwrap();
+    assert_eq!(server.endpoint.local_authority().unwrap().ocsp(), cached);
+    assert_eq!(std::fs::read(server.profile.ocsp_path()).unwrap(), cached);
+
+    // A long-lived in-memory proof also skips fetching and repairs an invalid disk cache.
+    std::fs::write(server.profile.ocsp_path(), b"invalid cache").unwrap();
+    let endpoint = renew_ocsp(&server.profile, &server.endpoint).await.unwrap();
+    apply_ocsp(&mut server, endpoint).await.unwrap();
+    assert_eq!(server.endpoint.local_authority().unwrap().ocsp(), cached);
+    assert_eq!(std::fs::read(server.profile.ocsp_path()).unwrap(), cached);
     server.close().await.unwrap();
 }
 
@@ -1018,14 +1078,14 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     assert!(server.sandbox.read().unwrap().libs.is_empty());
     assert!(!server.profile.join("lib/note.wasm").exists());
     assert!(server.profile.join(".volume/note").is_dir());
-    // Even an explicit daccess allow cannot make another TLS identity the profile owner.
+    // An explicit ACL allows a different verified TLS identity to manage the profile.
     server
         .access
         .set_policy(
             access_control::Method::Unspecified,
             "/std/sys",
             access_control::Effect::Allow,
-            access_control::Grantee::All,
+            access_control::Grantee::Named,
         )
         .await
         .unwrap();
@@ -1039,7 +1099,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         .await
         .unwrap();
     assert_eq!(response.version(), http::Version::HTTP_3);
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::OK);
     let response = alice
         .get(
             format!("https://{}/std/sys/pkg/list", server.name())
@@ -1048,7 +1108,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::OK);
 
     let response = dhttp::Anonymous
         .get(

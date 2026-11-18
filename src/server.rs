@@ -14,9 +14,12 @@ use crate::{
 
 mod access;
 mod files;
-mod ocsp;
+pub(crate) mod ocsp;
 mod run;
 
+#[cfg(test)]
+pub(crate) use self::access::load_access as access_for_system;
+pub(crate) use self::run::local_profiles;
 pub use self::run::run;
 use self::{
     access::load_access,
@@ -35,6 +38,7 @@ struct Server {
     sandbox: Arc<RwLock<Sandbox>>,
     publisher: Option<Arc<ddns::H3Resolver>>,
     listener: Option<dhttp::ListenFuture>,
+    system_router: Router,
 }
 
 #[cfg(test)]
@@ -54,6 +58,10 @@ fn native_router(server: &Server) -> Router {
     let local_router = Arc::downgrade(&server.router);
     let profile = server.profile.clone();
     capabilities_router(server.profile.clone())
+        .merge(crate::file::personal_files_router(
+            server.profile.join("file"),
+            server.endpoint.clone(),
+        ))
         .merge(crate::contact::contact_router(
             server.profile.clone(),
             server.endpoint.clone(),
@@ -76,20 +84,37 @@ fn native_router(server: &Server) -> Router {
             let profile = profile.clone();
             async move {
                 let path = request.uri().path();
-                let name = path
+                if path == "/sys" || path.starts_with("/sys/") {
+                    return http::StatusCode::FORBIDDEN.into_response();
+                }
+                let tail = path
                     .strip_prefix("/app/")
-                    .unwrap_or(path.trim_start_matches('/'))
-                    .split('/')
-                    .next()
-                    .unwrap_or("");
-                let local = crate::package::valid_id(name).is_ok()
-                    && profile.join("dev").join(name).exists();
+                    .unwrap_or(path.trim_start_matches('/'));
+                let local = tail
+                    .match_indices('/')
+                    .map(|(end, _)| &tail[..end])
+                    .chain(std::iter::once(tail))
+                    .any(|name| {
+                        crate::package::valid_id(name).is_ok()
+                            && [name.to_owned(), name.replace('/', "%2F")]
+                                .iter()
+                                .any(|directory| {
+                                    profile
+                                        .join("dev")
+                                        .join(directory)
+                                        .join("manifest.json")
+                                        .is_file()
+                                })
+                    });
                 if !local
                     && !path.starts_with("/std/")
                     && !sandbox.read().unwrap().libs.keys().any(|id| {
                         !crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
                             && path
-                                .strip_prefix(&format!("/{}", id.rsplit('/').next().unwrap()))
+                                .strip_prefix(&format!(
+                                    "/{}",
+                                    id.split_once('/').map_or(&id[..], |(_, name)| name)
+                                ))
                                 .is_some_and(|tail| tail.is_empty() || tail.starts_with('/'))
                     })
                 {
@@ -139,7 +164,9 @@ fn current_router(server: &Server) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             server.access.clone(),
             authorize,
-        ));
+        ))
+        .layer(axum::Extension(server.sandbox.clone()))
+        .layer(axum::Extension(server.endpoint.clone()));
     let api = Sandbox::api_router(
         server.sandbox.clone(),
         server.endpoint.clone(),
@@ -151,13 +178,6 @@ fn current_router(server: &Server) -> Router {
         move |request: Request<AxumBody>| {
             let api = api.clone();
             let proxies = proxies.clone();
-            let name = request
-                .uri()
-                .path()
-                .trim_start_matches('/')
-                .split('/')
-                .next()
-                .unwrap_or("");
             let installed = {
                 let sandbox = sandbox.read().unwrap();
                 request
@@ -165,15 +185,22 @@ fn current_router(server: &Server) -> Router {
                     .path()
                     .strip_prefix("/app/")
                     .is_some_and(|tail| {
-                        let app_name = tail.split('/').next().unwrap_or("");
-                        sandbox
-                            .apps
-                            .keys()
-                            .any(|id| id.rsplit('/').next() == Some(app_name))
+                        sandbox.apps.keys().any(|id| {
+                            let name = id.split_once('/').map_or(&id[..], |(_, name)| name);
+                            tail.strip_prefix(name)
+                                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+                        })
                     })
                     || sandbox.libs.keys().any(|id| {
                         !crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
-                            && id.rsplit('/').next() == Some(name)
+                            && request
+                                .uri()
+                                .path()
+                                .strip_prefix(&format!(
+                                    "/{}",
+                                    id.split_once('/').map_or(&id[..], |(_, name)| name)
+                                ))
+                                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
                     })
             };
             async move {
@@ -185,7 +212,9 @@ fn current_router(server: &Server) -> Router {
             }
         },
     ));
-    Router::new()
+    server
+        .system_router
+        .clone()
         .fallback_service(
             crate::development::router(
                 server.profile.clone(),
@@ -200,6 +229,9 @@ fn current_router(server: &Server) -> Router {
                 authorize,
             )),
         )
+        .layer(axum::Extension(server.sandbox.clone()))
+        .layer(axum::Extension(server.profile.clone()))
+        .layer(axum::Extension(server.endpoint.clone()))
         .layer(axum::middleware::from_fn(crate::routes::normalize_method))
 }
 
@@ -329,6 +361,7 @@ impl Server {
             sandbox: Arc::new(RwLock::new(sandbox)),
             publisher,
             listener: None,
+            system_router: Router::new(),
         };
         *server.router.write().unwrap() = current_router(&server);
         Ok(server)

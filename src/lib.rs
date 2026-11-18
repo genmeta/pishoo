@@ -10,6 +10,7 @@ mod sandbox;
 mod server;
 mod setup;
 mod static_files;
+mod system;
 
 #[cfg(test)]
 #[path = "../tests/common/test_support.rs"]

@@ -726,7 +726,7 @@ fn install_signed_workspace_in_isolated_manual_test_profile() {
         "LOCAL APP INSTALL {} {}",
         installed["id"], installed["version"]
     );
-    assert!(profile.join("lib/std/comm/message_0.2.0.wasm").is_file());
+    assert!(profile.join("lib/std/comm/message.wasm.0.2.0").is_file());
     assert!(profile.join("app/workspace/index.html").is_file());
     let db =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();

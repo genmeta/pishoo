@@ -36,7 +36,9 @@ fn migrate_legacy_groups(profile: &IdentityProfile, groups: &serde_json::Value) 
             let mut changes = Vec::new();
             for name in names {
                 let current = tx
-                    .query_row(include_str!("legacy/sql/registration.sql"), [name], |r| {
+                    .query_row(r#"
+SELECT author,version,author_owner_hash,package_sha256,signer_leaf_fingerprint_sha256,has_lib,has_app FROM package WHERE name=?1 AND (SELECT count(*) FROM package WHERE name=?1)=1;
+"#, [name], |r| {
                         Ok((
                             r.get::<_, String>(0)?,
                             r.get::<_, String>(1)?,
@@ -105,7 +107,11 @@ fn migrate_legacy_groups(profile: &IdentityProfile, groups: &serde_json::Value) 
             }
             for (name, target, owner) in changes {
                 tx.execute(
-                    include_str!("legacy/sql/transfer_author.sql"),
+                    r#"
+-- The compiled host release authorizes this exact historical transfer.
+-- Keep all historical signature, digest, timestamp and content facts intact.
+UPDATE package SET author=?2, author_owner_hash=?3 WHERE name=?1;
+"#,
                     rusqlite::params![name, target, owner],
                 )?;
             }

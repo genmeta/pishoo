@@ -15,8 +15,10 @@ async fn guest_http_outgoing_is_denied() {
 
 #[tokio::test]
 async fn identity_signatures_enforce_bounds_and_handshake_scope() {
-    use identity::pishoo::identity::signatures::{Host, SignError, VerifyError};
+    use identity::pishoo::identity0_1_0::signatures::{Host, SignError, VerifyError};
     let mut store = StoreData {
+        caller_service: None,
+        commands: std::sync::Arc::default(),
         table: ResourceTable::new(),
         wasi: WasiCtx::builder().build(),
         http: WasiHttpCtx::new(),

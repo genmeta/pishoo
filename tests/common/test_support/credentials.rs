@@ -3,7 +3,18 @@ use std::{fs, path::Path, process::Command};
 use sha2::{Digest, Sha256};
 
 fn openssl(root: &Path, args: &[&str]) {
-    let executable = std::env::var_os("DHTTP_TEST_OPENSSL").unwrap_or_else(|| "openssl".into());
+    let executable = std::env::var_os("DHTTP_TEST_OPENSSL").unwrap_or_else(|| {
+        #[cfg(target_os = "macos")]
+        for path in [
+            "/opt/homebrew/opt/openssl@3/bin/openssl",
+            "/usr/local/opt/openssl@3/bin/openssl",
+        ] {
+            if Path::new(path).is_file() {
+                return path.into();
+            }
+        }
+        "openssl".into()
+    });
     let output = Command::new(executable)
         .args(args)
         .current_dir(root)

@@ -33,11 +33,9 @@ def main() -> int:
             bundle = stage / archive_name
             sdk = bundle / "sdk"
             sdk.mkdir(parents=True)
-            for filename in ["Cargo.toml", "Cargo.lock", "README.md"]:
+            for filename in ["Cargo.toml", "Cargo.lock", "README.md", "pishoo.wit"]:
                 shutil.copy2(repo / "wit" / filename, sdk / filename)
             shutil.copytree(repo / "wit/src", sdk / "src")
-            for interface in ["pishoo-identity", "pishoo-identity-v2"]:
-                shutil.copytree(repo / "wit" / interface, sdk / interface)
             shutil.copy2(repo / "LICENSE", sdk / "LICENSE")
 
             # Cargo verifies that the crate builds using only its packaged files.

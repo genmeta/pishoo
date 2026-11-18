@@ -20,7 +20,7 @@ pub(crate) use capabilities::{capabilities_router, permissions};
 pub(crate) use outbound::forward_dhttp;
 
 pub(crate) fn reserved(path: &str) -> bool {
-    path == "/std" || path.starts_with("/std/")
+    path == "/std" || path.starts_with("/std/") || path == "/sys" || path.starts_with("/sys/")
 }
 
 /// Normalize before ACL and routing, so authorization observes the effective method.

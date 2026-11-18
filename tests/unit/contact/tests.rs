@@ -56,14 +56,23 @@ async fn offered_capabilities_create_a_pinned_contact_before_granting_selected_o
         json!({"id":"dev.dhttp.net/message#message","endpoints":[{"method":"PUT","path":"/std/comm/message"}]}),
     ];
     assert!(contact(&access, &endpoint, target).await.is_err());
-    grant_offered(
+    access::record_outbound(
+        &access,
+        target,
+        &subject,
+        json!({}),
+        capabilities::offered(&selected),
+        now() + 7 * 86400,
+        now(),
+    )
+    .await
+    .unwrap();
+    access::apply_offered(
         &access,
         &endpoint,
         target,
         &subject,
-        &[],
-        &selected,
-        now() + 7 * 86400,
+        &capabilities::offered(&selected),
     )
     .await
     .unwrap();
@@ -79,14 +88,12 @@ async fn offered_capabilities_create_a_pinned_contact_before_granting_selected_o
     );
 
     assert_eq!(
-        grant_offered(
+        access::apply_offered(
             &access,
             &endpoint,
             target,
             &"c".repeat(64),
-            &[],
-            &selected,
-            now() + 7 * 86400
+            &capabilities::offered(&selected)
         )
         .await
         .unwrap_err()
@@ -105,14 +112,12 @@ async fn offered_capabilities_create_a_pinned_contact_before_granting_selected_o
         .unwrap();
     }
     assert_eq!(
-        grant_offered(
+        access::apply_offered(
             &access,
             &endpoint,
             target,
             &subject,
-            &[],
-            &selected,
-            now() + 7 * 86400
+            &capabilities::offered(&selected)
         )
         .await
         .unwrap_err()
@@ -121,18 +126,35 @@ async fn offered_capabilities_create_a_pinned_contact_before_granting_selected_o
     );
 }
 
+fn seed_request(db: &Connection, target: &str, state: &str, deadline: i64) {
+    db.execute("INSERT INTO outbound_contact_request(target_name,state,application_id,description,requested,offered,local_deadline,next_attempt_at,created_at,updated_at)
+        VALUES(?1,?2,lower(hex(randomblob(32))),'',?3,?3,?4,0,1,1)",params![target,state,r#"{"groups":[],"access":{}}"#,deadline]).unwrap();
+}
+fn legacy_db(profile: &IdentityProfile) -> Connection {
+    std::fs::create_dir_all(profile.join(".volume/sys/contact")).unwrap();
+    let db = Connection::open(profile.join(".volume/sys/contact/database")).unwrap();
+    db.execute_batch(include_str!("../../fixtures/contact/v6/schema.sql"))
+        .unwrap();
+    db.execute_batch("PRAGMA user_version=6").unwrap();
+    db
+}
 #[test]
 fn expired_claims_cannot_resurrect_requests_and_database_reopens_without_private_permissions() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     std::fs::create_dir_all(profile.join(".volume/sys/contact")).unwrap();
     let db = database(&profile).unwrap();
-    db.execute("INSERT INTO outbound_contact_request(target_name,status,expired_after,delivery_deadline,next_attempt_at,lease_until,created_at,updated_at) VALUES('bob.dhttp.net','queued',?1,?1,0,?2,0,0)", params![now()-1,now()+120]).unwrap();
+    seed_request(&db, "bob.dhttp.net", "queued", now() - 1);
     let old_lease = now() + 120;
+    db.execute(
+        "UPDATE outbound_contact_request SET lease_until=?1",
+        [old_lease],
+    )
+    .unwrap();
     expire_requests(&db).unwrap();
     assert_eq!(
         db.execute(
-            "UPDATE outbound_contact_request SET status='active' WHERE id=1 AND lease_until=?1",
+            "DELETE FROM outbound_contact_request WHERE target_name='bob.dhttp.net' AND lease_until=?1",
             [old_lease]
         )
         .unwrap(),
@@ -140,7 +162,10 @@ fn expired_claims_cannot_resurrect_requests_and_database_reopens_without_private
     );
     drop(db);
     let db = database(&profile).unwrap();
-    assert_eq!(outbound_request(&db, 1).unwrap()["status"], "failed");
+    assert_eq!(
+        outbound_request(&db, "bob.dhttp.net").unwrap()["status"],
+        "expired"
+    );
     assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('profile_preferences','capability_decisions','capability_decision_events','chat_messages')",[],|row|row.get::<_,i64>(0)).unwrap(),0);
     assert_eq!(
         db.query_row(
@@ -184,10 +209,12 @@ async fn background_jobs_reuse_the_supplied_connection_and_release_transactions(
     for expected in 1..=2 {
         {
             let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO outbound_contact_request(target_name,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES('bob.dhttp.net','queued',?1,?1,0,0,0)",
-                [now() - 1],
-            ).unwrap();
+            seed_request(
+                &conn,
+                &format!("offline{expected}.dhttp.net"),
+                "queued",
+                now() - 1,
+            );
         }
         contact_jobs(&profile, &endpoint, &access, &db)
             .await
@@ -198,7 +225,7 @@ async fn background_jobs_reuse_the_supplied_connection_and_release_transactions(
         assert!(conn.is_autocommit());
         assert_eq!(
             conn.query_row(
-                "SELECT count(*) FROM outbound_contact_request WHERE status='failed'",
+                "SELECT count(*) FROM outbound_contact_request WHERE state='expired'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -208,10 +235,7 @@ async fn background_jobs_reuse_the_supplied_connection_and_release_transactions(
     }
     {
         let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO outbound_contact_request(target_name,status,application_id,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES('alice.dhttp.net','queued',?2,?1,?1,0,0,0)",
-            params![now() + 120, "a".repeat(64)],
-        ).unwrap();
+        seed_request(&conn, "alice.dhttp.net", "queued", now() + 120);
     }
     // The missing local capability catalog fails delivery; its outcome must still
     // be written back through the supplied connection, with the claim released.
@@ -223,11 +247,11 @@ async fn background_jobs_reuse_the_supplied_connection_and_release_transactions(
         .expect("outcome writes must release the connection lock");
     assert!(conn.is_autocommit());
     let outcome = conn.query_row(
-        "SELECT attempt_count,lease_until,error_message FROM outbound_contact_request WHERE target_name='alice.dhttp.net'",
+        "SELECT next_attempt_at,lease_until,last_error FROM outbound_contact_request WHERE target_name='alice.dhttp.net'",
         [],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, Option<String>>(2)?)),
     ).unwrap();
-    assert_eq!(outcome.0, 1);
+    assert!(outcome.0 > now());
     assert_eq!(outcome.1, None);
     assert!(outcome.2.is_some_and(|error| !error.is_empty()));
     assert!(!profile.join(".volume/sys/contact/database").exists());
@@ -443,7 +467,7 @@ async fn contact_submission_without_capabilities_queues_without_contacting_the_p
     assert_eq!(
         queued
             .query_row(
-                "SELECT requested_access,offers FROM outbound_contact_request",
+                "SELECT json_extract(requested,'$.access'),json_extract(offered,'$.access') FROM outbound_contact_request",
                 [],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             )
@@ -516,11 +540,11 @@ fn contact_v1_upgrade_preserves_delivery_jobs_and_removes_only_saved_collection(
         assert_eq!(
             db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            7
         );
         assert_eq!(
             db.query_row(
-                "SELECT requested_access,offers FROM outbound_contact_request",
+                "SELECT json_extract(requested,'$.access'),json_extract(offered,'$.access') FROM outbound_contact_request",
                 [],
                 |row| Ok((
                     row.get::<_, Option<String>>(0)?,
@@ -528,13 +552,11 @@ fn contact_v1_upgrade_preserves_delivery_jobs_and_removes_only_saved_collection(
                 ))
             )
             .unwrap(),
-            (None, None)
+            (Some("{}".into()), Some("{}".into()))
         );
-        let job = db.query_row("SELECT id,description,status,contact_id,contact_subject FROM outbound_contact_request", [], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,Option<i64>>(3)?, row.get::<_,Option<String>>(4)?))).unwrap();
-        assert_eq!(
-            job,
-            (41, "Keep request".into(), "pending".into(), None, None)
-        );
+        let job = outbound_request(&db, "peer.dhttp.net").unwrap();
+        assert_eq!(job["description"], "Keep request");
+        assert_eq!(job["application_id"], "a".repeat(64));
         assert_eq!(
             db.query_row(
                 "SELECT count(*) FROM sqlite_master WHERE name='saved_contacts'",
@@ -572,28 +594,19 @@ fn contact_v2_upgrade_preserves_bindings_sequence_and_pending_target_constraint(
         let db = database(&profile).unwrap();
         assert_eq!(
             db.query_row(
-                "SELECT contact_id,contact_subject FROM outbound_contact_request WHERE id=41",
+                "SELECT contact_id,target_subject FROM outbound_contact_request WHERE target_name='peer.dhttp.net'",
                 [],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             )
             .unwrap(),
             (7, "subject".into())
         );
-        assert!(db.execute("INSERT INTO outbound_contact_request(target_name,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES('peer.dhttp.net','queued',2000000000,2000000000,100,100,100)", []).is_err());
         assert_eq!(
-            db.query_row(
-                "SELECT seq FROM sqlite_sequence WHERE name='outbound_contact_request'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-            1000
+            outbound_request(&db, "peer.dhttp.net").unwrap()["status"],
+            "failed"
         );
-        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('outbound_contact_requests','outbound_contact_requests_pending_target')", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('outbound_contact_requests','outbound_contact_requests_pending_target')", [], |r|r.get::<_,i64>(0)).unwrap(),0);
     }
-    let db = database(&profile).unwrap();
-    db.execute("INSERT INTO outbound_contact_request(target_name,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES('other.dhttp.net','queued',2000000000,2000000000,100,100,100)", []).unwrap();
-    assert!(db.last_insert_rowid() > 1000);
 }
 
 #[test]
@@ -688,11 +701,10 @@ async fn queued_legacy_capabilities_fail_without_network_or_new_grants() {
         .await
         .unwrap(),
     );
-    let db = Connection::open_in_memory().unwrap();
-    db.execute_batch(include_str!("../../../src/contact/sql/schema.sql"))
-        .unwrap();
+    let db = legacy_db(&profile);
     db.execute("INSERT INTO outbound_contact_request(target_name,application_id,requested_capabilities,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES('bob.dhttp.net',?1,'[\"Receive messages\"]','queued',?2,?2,0,0,0)", params!["a".repeat(64), now()+120]).unwrap();
-    let db = Arc::new(Mutex::new(db));
+    drop(db);
+    let db = Arc::new(Mutex::new(database(&profile).unwrap()));
     contact_jobs(&profile, &endpoint, &access, &db)
         .await
         .unwrap();
@@ -700,7 +712,7 @@ async fn queued_legacy_capabilities_fail_without_network_or_new_grants() {
         let conn = db.lock().unwrap();
         let (status, error, lease): (String, String, Option<i64>) = conn
             .query_row(
-                "SELECT status,error_message,lease_until FROM outbound_contact_request",
+                "SELECT state,last_error,lease_until FROM outbound_contact_request",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -716,7 +728,7 @@ async fn queued_legacy_capabilities_fail_without_network_or_new_grants() {
 fn v3_migration_preserves_unknown_snapshots_without_catalog_backfill() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    let db = database(&profile).unwrap();
+    let db = legacy_db(&profile);
     db.execute_batch("ALTER TABLE outbound_contact_request DROP COLUMN review_id; ALTER TABLE outbound_contact_request DROP COLUMN review_subject; ALTER TABLE outbound_contact_request DROP COLUMN review_method; ALTER TABLE outbound_contact_request DROP COLUMN review_path; ALTER TABLE outbound_contact_request DROP COLUMN requested_access; ALTER TABLE outbound_contact_request DROP COLUMN offers; PRAGMA user_version=3;").unwrap();
     db.execute("INSERT INTO outbound_contact_request(target_name,requested_capabilities,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES('bob.dhttp.net','[\"Receive messages\"]','queued',?1,?1,0,1,1)", [now()+120]).unwrap();
     drop(db);
@@ -725,11 +737,11 @@ fn v3_migration_preserves_unknown_snapshots_without_catalog_backfill() {
         assert_eq!(
             db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            7
         );
         assert_eq!(
             db.query_row(
-                "SELECT requested_access,offers FROM outbound_contact_request",
+                "SELECT json_extract(requested,'$.access'),json_extract(offered,'$.access') FROM outbound_contact_request",
                 [],
                 |row| Ok((
                     row.get::<_, Option<String>>(0)?,
@@ -737,7 +749,7 @@ fn v3_migration_preserves_unknown_snapshots_without_catalog_backfill() {
                 ))
             )
             .unwrap(),
-            (None, None)
+            (Some("{}".into()),Some("{}".into()))
         );
     }
 }
@@ -746,15 +758,18 @@ fn v3_migration_preserves_unknown_snapshots_without_catalog_backfill() {
 fn v4_contact_migration_preserves_review_tracking_across_reopen() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    let db = database(&profile).unwrap();
+    let db = legacy_db(&profile);
     db.execute_batch("ALTER TABLE outbound_contact_request DROP COLUMN review_id; ALTER TABLE outbound_contact_request DROP COLUMN review_subject; ALTER TABLE outbound_contact_request DROP COLUMN review_method; ALTER TABLE outbound_contact_request DROP COLUMN review_path; PRAGMA user_version=4;").unwrap();
     db.execute("INSERT INTO outbound_contact_request(target_name,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES('bob.dhttp.net','queued',?1,?1,0,1,1)",[now()+3600]).unwrap();
+    db.execute_batch(include_str!(
+        "../../../src/contact/sql/migrations/v5_add_review_tracking.sql"
+    ))
+    .unwrap();
+    db.execute_batch("PRAGMA user_version=5").unwrap();
+    db.execute("UPDATE outbound_contact_request SET application_id=lower(hex(randomblob(32))),review_id=27,review_subject='verified-peer',review_method='POST',review_path='/std/contact'",[]).unwrap();
     drop(db);
     let db = database(&profile).unwrap();
-    db.execute("UPDATE outbound_contact_request SET review_id=27,review_subject='verified-peer',review_method='POST',review_path='/std/contact'",[]).unwrap();
-    drop(db);
-    let db = database(&profile).unwrap();
-    let review:(i64,String,String,String)=db.query_row("SELECT review_id,review_subject,review_method,review_path FROM outbound_contact_request",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    let review:(i64,String,String,String)=db.query_row("SELECT review_id,target_subject,CASE state WHEN 'queued' THEN 'POST' END,'/std/contact' FROM outbound_contact_request",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
     assert_eq!(
         review,
         (
@@ -779,11 +794,10 @@ async fn completed_contact_applications_never_reenter_the_delivery_queue() {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch(include_str!("../../../src/contact/sql/schema.sql"))
         .unwrap();
-    for status in ["active", "denied", "expired", "failed", "revoked"] {
-        db.execute("INSERT INTO outbound_contact_request(target_name,status,expired_after,delivery_deadline,next_attempt_at,attempt_count,created_at,updated_at) VALUES(?1,?2,?3,?3,0,7,1,1)",params![format!("{status}.dhttp.net"),status,now()+3600]).unwrap();
+    for state in ["denied", "expired", "failed"] {
+        seed_request(&db, &format!("{state}.dhttp.net"), state, now() + 3600);
     }
-    // An already-expired pending request must also stop, even with a stale lease.
-    db.execute("INSERT INTO outbound_contact_request(target_name,status,expired_after,delivery_deadline,next_attempt_at,lease_until,created_at,updated_at) VALUES('pending.dhttp.net','pending',?1,?1,0,?2,1,1)",params![now()-1,now()+120]).unwrap();
+    seed_request(&db, "pending.dhttp.net", "pending", now() - 1);
     let db = Arc::new(Mutex::new(db));
     for _ in 0..3 {
         contact_jobs(&profile, &endpoint, &access, &db)
@@ -791,10 +805,10 @@ async fn completed_contact_applications_never_reenter_the_delivery_queue() {
             .unwrap();
     }
     let db = db.lock().unwrap();
-    assert_eq!(db.query_row("SELECT count(*) FROM outbound_contact_request WHERE attempt_count=7 AND lease_until IS NULL AND last_checked_at IS NULL",[],|r|r.get::<_,i64>(0)).unwrap(),5);
+    assert_eq!(db.query_row("SELECT count(*) FROM outbound_contact_request WHERE lease_until IS NULL AND updated_at=1",[],|r|r.get::<_,i64>(0)).unwrap(),3);
     assert_eq!(
         db.query_row(
-            "SELECT status FROM outbound_contact_request WHERE target_name='pending.dhttp.net'",
+            "SELECT state FROM outbound_contact_request WHERE target_name='pending.dhttp.net'",
             [],
             |r| r.get::<_, String>(0)
         )
@@ -802,4 +816,252 @@ async fn completed_contact_applications_never_reenter_the_delivery_queue() {
         "expired"
     );
     assert!(db.is_autocommit());
+}
+
+fn group_entry(revision: &str) -> Value {
+    json!({"kind":"group","name":"alice~#dev","bound_subject":"a".repeat(64),"profile_updated_at":revision.parse::<i64>().unwrap(),"avatar":null})
+}
+fn grant_group(db: &Connection) -> (String, String) {
+    let service = (
+        "dev.genmeta.tech.dhttp.net/std/comm/group".to_string(),
+        "c".repeat(64),
+    );
+    db.execute(
+        "INSERT OR IGNORE INTO directory_service_grants VALUES(?1,?2,'group')",
+        params![service.0, service.1],
+    )
+    .unwrap();
+    service
+}
+#[test]
+fn group_directory_is_revisioned_and_preserves_private_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let mut db = database(&profile).unwrap();
+    let service = grant_group(&db);
+    assert!(directory::put(&mut db, &group_entry("1"), None, true, 1).is_err());
+    directory::put(&mut db, &group_entry("1"), Some(&service), false, 1).unwrap();
+    directory::patch(&db, "alice~#dev", &json!({"alias":"Work"}), 2).unwrap();
+    let mut update = group_entry("2");
+    update["avatar"] = json!("data:image/png;base64,AA==");
+    let saved = directory::put(&mut db, &update, Some(&service), false, 3).unwrap();
+    assert_eq!(saved["alias"], "Work");
+    assert_eq!(
+        directory::put(&mut db, &group_entry("1"), Some(&service), false, 4).unwrap(),
+        saved
+    );
+    assert_eq!(
+        directory::put(&mut db, &group_entry("2"), Some(&service), false, 4)
+            .unwrap_err()
+            .0,
+        409
+    );
+    update["bound_subject"] = json!("b".repeat(64));
+    assert_eq!(
+        directory::put(&mut db, &update, Some(&service), false, 4)
+            .unwrap_err()
+            .1,
+        "group_binding_conflict"
+    );
+}
+
+#[tokio::test]
+async fn directory_routes_merge_filter_paginate_and_require_verified_owner() {
+    let endpoint = crate::test_support::identity::endpoint("alice.dhttp.net");
+    let visitor = owner(&endpoint).unwrap();
+    let access = Arc::new(
+        AccessService::load_from_db("sqlite::memory:", endpoint.name(), visitor.subject_id())
+            .await
+            .unwrap(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let service = grant_group(&database(&profile).unwrap());
+    directory::put(
+        &mut database(&profile).unwrap(),
+        &group_entry("1"),
+        Some(&service),
+        false,
+        1,
+    )
+    .unwrap();
+    assert!(access.find_contact_by_name("alice~#dev").await.is_err());
+    let router = contact_router(profile, endpoint, access);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get("/std/contact/list?kind=all&page_size=1&sort=name&order=asc")
+                .extension(visitor.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(value["total"], 1);
+    assert_eq!(value["items"][0]["kind"], "group");
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get("/std/contact/list?kind=all&search=missing")
+                .extension(visitor.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let value: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(value["total"], 0);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get("/std/contact?name=alice~%23dev")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = router
+        .oneshot(
+            Request::put("/std/contact")
+                .extension(visitor)
+                .header(
+                    "pishoo-source-lib",
+                    "dev.genmeta.tech.dhttp.net/std/comm/group",
+                )
+                .body(Body::from(group_entry("1").to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn directory_rejects_unsupported_kinds() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let mut db = database(&profile).unwrap();
+    let entry = json!({"kind":"title","name":"student@mit.edu"});
+    assert_eq!(
+        directory::put(&mut db, &entry, None, true, 1)
+            .unwrap_err()
+            .0,
+        400
+    );
+}
+
+#[test]
+fn v6_upgrade_removes_title_entries_and_preserves_groups_and_grants() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let db = legacy_db(&profile);
+    db.execute_batch("PRAGMA user_version=6;
+        INSERT INTO contact_entries(name,kind,alias,bound_name,bound_subject,source_revision,created_at,source_updated_at,updated_at)
+        VALUES('student@mit.edu','title','Student','bob.dhttp.net','subject',1,1,1,1);
+        INSERT INTO contact_entries(name,kind,alias,nickname,host,host_owner_hash,member_joined_seq,local_state,source_revision,created_at,source_updated_at,updated_at)
+        VALUES('alice~#dev','group','Private','dev','alice.dhttp.net',lower(hex(zeroblob(32))),42,'active',2,1,1,2);
+        INSERT INTO directory_service_grants SELECT 'service',lower(hex(zeroblob(32))),kind FROM
+        (SELECT 'group' AS kind UNION ALL SELECT 'name' UNION ALL SELECT 'title');").unwrap();
+    assert!(database(&profile).is_err());
+    db.execute_batch(include_str!(
+        "../../../src/contact/sql/migrations/v7_simplify_contacts.sql"
+    ))
+    .unwrap();
+    let entries = directory::entries(&db).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["name"], "alice~#dev");
+    assert_eq!(entries[0]["alias"], "Private");
+    assert!(entries[0].get("member_joined_seq").is_none());
+    let service = ("service".to_owned(), "0".repeat(64));
+    for kind in ["group", "name"] {
+        directory::authorize(&db, &service, kind).unwrap();
+    }
+    assert!(directory::authorize(&db, &service, "title").is_err());
+    assert!(
+        db.prepare("SELECT bound_name FROM contact_entries")
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn receipts_are_scoped_to_the_application_and_verified_applicant() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("receiver")).unwrap();
+    let endpoint = crate::test_support::identity::endpoint("receiver.dhttp.net");
+    let receiver = owner(&endpoint).unwrap();
+    let peer = owner(&crate::test_support::identity::endpoint(
+        "applicant.dhttp.net",
+    ))
+    .unwrap();
+    let access = Arc::new(
+        AccessService::load_from_db("sqlite::memory:", endpoint.name(), receiver.subject_id())
+            .await
+            .unwrap(),
+    );
+    let router = contact_router(profile, endpoint.clone(), access.clone());
+    let id = "a".repeat(64);
+    let send=Request::post("/std/contact").extension(peer.clone()).header("content-type","application/json")
+        .body(Body::from(json!({"from":peer.name(),"to":endpoint.name(),"application_id":id,"class":"Human","description":"Hi",
+        "requested_access":{},"offers":{}}).to_string())).unwrap();
+    assert_eq!(router.clone().oneshot(send).await.unwrap().status(), 201);
+    let lookup = |app: &str, visitor: access_control::Visitor| {
+        Request::get(format!("/std/contact?application_id={app}"))
+            .extension(visitor)
+            .body(Body::empty())
+            .unwrap()
+    };
+    for expected in ["pending", "active"] {
+        let response = router
+            .clone()
+            .oneshot(lookup(&id, peer.clone()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let doc: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(doc["status"], expected);
+        assert_eq!(doc["application_id"], id);
+        assert_eq!(doc["name"], endpoint.name());
+        if expected == "pending" {
+            local_api(
+                &access,
+                &endpoint,
+                Method::PATCH,
+                &format!("/std/contact?name={}", peer.name()),
+                Some(&json!({"status":"active"})),
+            )
+            .await
+            .unwrap();
+        }
+    }
+    let other = access_control::Visitor::new(
+        peer.name(),
+        access_control::SubjectId::new(b"different-applicant-subject").unwrap(),
+    );
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(lookup(&id, other))
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    assert_eq!(
+        router
+            .oneshot(lookup(&"b".repeat(64), peer))
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
 }

@@ -79,12 +79,17 @@ pub fn validate_openapi(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec> {
         .as_ref()
         .ok_or_else(|| invalid("missing OpenAPI paths"))?;
     let mut ids = HashSet::new();
+    let mut declared = Vec::<&str>::new();
     for (path, item) in paths {
         // These paths are relative to the authenticated package's mount.
         // Native namespace checks require that publisher, supplied at install.
-        if !valid_path(path) || path.contains(['{', '}']) {
+        if !valid_path(path) {
             return Err(invalid("unsupported API path"));
         }
+        if declared.iter().any(|other| api_paths_overlap(other, path)) {
+            return Err(invalid("overlapping API paths"));
+        }
+        declared.push(path);
         if item.reference.is_some() {
             return Err(invalid("path-level references are unsupported"));
         }
@@ -181,4 +186,61 @@ fn valid_path(path: &str) -> bool {
         && !path.contains(['?', '#', '%', '\\'])
         && !path.split('/').any(|p| p == "." || p == "..")
         && !path.chars().any(|c| c.is_whitespace() || c.is_control())
+        && !path
+            .trim_start_matches('/')
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .contains(['{', '}'])
+        && {
+            let mut names = HashSet::new();
+            path.split('/').all(|segment| {
+                if !segment.contains(['{', '}']) {
+                    return true;
+                }
+                let Some(name) = segment.strip_prefix('{').and_then(|v| v.strip_suffix('}')) else {
+                    return false;
+                };
+                !name.is_empty()
+                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    && names.insert(name)
+            })
+        }
+}
+
+/// Parameters consume one nonempty path segment, never a subtree.
+pub(crate) fn api_path_matches(pattern: &str, path: &str) -> bool {
+    let mut target = path.split('/');
+    for segment in pattern.split('/') {
+        let Some(actual) = target.next() else {
+            return false;
+        };
+        if segment.starts_with('{') {
+            if actual.is_empty() || matches!(actual, "." | "..") {
+                return false;
+            }
+        } else if segment != actual {
+            return false;
+        }
+    }
+    target.next().is_none()
+}
+/// Reject intersecting declarations before installing two providers.
+pub(crate) fn api_paths_overlap(left: &str, right: &str) -> bool {
+    let mut right = right.split('/');
+    for left in left.split('/') {
+        let Some(right) = right.next() else {
+            return false;
+        };
+        if left == right {
+            continue;
+        }
+        if left.is_empty() || right.is_empty() {
+            return false;
+        }
+        if !left.starts_with('{') && !right.starts_with('{') {
+            return false;
+        }
+    }
+    right.next().is_none()
 }

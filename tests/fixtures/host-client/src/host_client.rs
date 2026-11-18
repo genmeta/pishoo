@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+
 use wasip2::http::{outgoing_handler, types::*};
 
 struct Handler;
@@ -27,7 +28,9 @@ fn call(target: &str, path: &str) -> Result<Vec<u8>, String> {
 
 impl wasip2::exports::http::incoming_handler::Guest for Handler {
     fn handle(request: IncomingRequest, out: ResponseOutparam) {
-        let document = if request
+        let document = if request.path_with_query().as_deref() == Some("/source") {
+            serde_json::json!({"source":request.headers().get("pishoo-source-lib").first().map(|value|String::from_utf8_lossy(value).into_owned())})
+        } else if request
             .path_with_query()
             .unwrap_or_default()
             .starts_with("/identity")

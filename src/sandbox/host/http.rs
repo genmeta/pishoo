@@ -38,11 +38,17 @@ impl WasiHttpHooks for Outgoing {
                 endpoint,
                 access,
                 api,
-            } => Some((endpoint.clone(), access.clone(), api.clone())),
+                source,
+            } => Some((
+                endpoint.clone(),
+                access.clone(),
+                api.clone(),
+                source.clone(),
+            )),
             Self::Denied => None,
         };
         Box::new(async move {
-            let (endpoint, access, api) = resources.ok_or(HttpError::HttpRequestDenied)?;
+            let (endpoint, access, api, source) = resources.ok_or(HttpError::HttpRequestDenied)?;
             let config = options.unwrap_or_default();
             if request.uri().scheme_str() != Some("https") {
                 return Err(HttpError::HttpRequestDenied);
@@ -94,7 +100,18 @@ impl WasiHttpHooks for Outgoing {
                 return Err(HttpError::HttpProtocolError);
             }
             clean_headers(request.headers_mut());
+            let stream_requested = request
+                .headers()
+                .get_all(header::ACCEPT)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .any(accepts_events);
             request.extensions_mut().clear();
+            if target == endpoint.name()
+                && let Some(source) = source
+            {
+                request.extensions_mut().insert(source);
+            }
             let waiting = request
                 .headers()
                 .get("if-reviewed")
@@ -226,18 +243,36 @@ impl WasiHttpHooks for Outgoing {
                     Some(upload),
                 )
             };
+            let streaming = stream_requested
+                && response.status().is_success()
+                && response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| {
+                        value
+                            .split(';')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .eq_ignore_ascii_case("text/event-stream")
+                    });
             let (mut parts, mut body) = response.into_parts();
             clean_headers(&mut parts.headers);
             let frames = async_stream::try_stream! {
                 let mut bytes = 0usize;
                 while let Some(frame) = tokio::time::timeout_at(
-                    deadline.min(tokio::time::Instant::now() + config.between_bytes_timeout.unwrap_or(Duration::from_secs(15)).min(Duration::from_secs(15))),
+                    if streaming {
+                        tokio::time::Instant::now() + config.between_bytes_timeout.unwrap_or(Duration::from_secs(45)).min(Duration::from_secs(60))
+                    } else {
+                        deadline.min(tokio::time::Instant::now() + config.between_bytes_timeout.unwrap_or(Duration::from_secs(15)).min(Duration::from_secs(15)))
+                    },
                     body.frame()).await
                     .map_err(|_| HttpError::HttpResponseTimeout)? {
                     let frame = frame?;
                     if let Some(data) = frame.data_ref() {
                         bytes = bytes.saturating_add(data.len());
-                        if bytes > 20 * 1024 * 1024 {
+                        if !streaming && bytes > 20 * 1024 * 1024 {
                             Err(HttpError::HttpResponseBodySize(None))?;
                         }
                     }
@@ -260,6 +295,27 @@ impl WasiHttpHooks for Outgoing {
     }
 }
 
+fn accepts_events(value: &str) -> bool {
+    value.split(',').any(|range| {
+        let mut parts = range.split(';');
+        parts
+            .next()
+            .unwrap_or("")
+            .trim()
+            .eq_ignore_ascii_case("text/event-stream")
+            && parts.all(|parameter| {
+                let Some((name, value)) = parameter.trim().split_once('=') else {
+                    return false;
+                };
+                !name.trim().eq_ignore_ascii_case("q")
+                    || value
+                        .trim()
+                        .parse::<f64>()
+                        .is_ok_and(|quality| quality > 0.0 && quality <= 1.0)
+            })
+    })
+}
+
 fn network_error(error: dhttp::Error) -> HttpError {
     if matches!(error, dhttp::Error::RemoteIdentityChanged) {
         HttpError::HttpRequestDenied
@@ -280,6 +336,7 @@ fn clean_headers(headers: &mut ::http::HeaderMap) {
         headers.remove(name);
     }
     for name in [
+        "pishoo-source-lib",
         "connection",
         "keep-alive",
         "proxy-connection",

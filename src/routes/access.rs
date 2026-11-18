@@ -26,6 +26,7 @@ pub(crate) async fn authorize(
     mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    request.headers_mut().remove("pishoo-source-lib");
     request.extensions_mut().remove::<Visitor>();
     let visitor = if let Some(handshake) = request.extensions().get::<dhttp::HandshakeSummary>() {
         if handshake.local.is_none() {
@@ -57,13 +58,92 @@ pub(crate) async fn authorize(
     if let Some(visitor) = &visitor {
         request.extensions_mut().insert(visitor.clone());
     }
+    // A provider explicitly declaring local service authorization checks the
+    // direct Lib's fine-grained grants itself. Network requests keep path ACLs.
+    let service_authorized_provider = request
+        .extensions()
+        .get::<Arc<crate::sandbox::Lib>>()
+        .and_then(|_| {
+            request
+                .extensions()
+                .get::<Arc<std::sync::RwLock<crate::sandbox::Sandbox>>>()
+        })
+        .zip(request.extensions().get::<dhttp::Endpoint>())
+        .is_some_and(|(sandbox, endpoint)| {
+            crate::sandbox::select_library(&sandbox.read().unwrap(), endpoint, &request)
+                .ok()
+                .is_some_and(|(lib, _)| {
+                    lib.openapi
+                        .extensions
+                        .get("pishoo-service-authorization")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                })
+        });
+    if service_authorized_provider {
+        return next.run(request).await;
+    }
+    // Directory services enforce their own persisted operation grants.
+    if request
+        .extensions()
+        .get::<Arc<crate::sandbox::Lib>>()
+        .is_some()
+        && matches!(*request.method(), http::Method::PUT | http::Method::GET)
+        && request.uri().path() == "/std/contact"
+    {
+        return next.run(request).await;
+    }
     // A frontend is one read-only resource. Keep the original URI for routing,
     // while pages, assets and deep links share its root GET authorization.
     let app = matches!(request.method(), &http::Method::GET | &http::Method::HEAD)
         .then(|| request.uri().path().strip_prefix("/app/"))
         .flatten()
-        .and_then(|tail| tail.split('/').next())
-        .filter(|name| !name.is_empty())
+        .and_then(|tail| {
+            let installed = request
+                .extensions()
+                .get::<Arc<std::sync::RwLock<crate::sandbox::Sandbox>>>()
+                .and_then(|sandbox| {
+                    sandbox
+                        .read()
+                        .unwrap()
+                        .apps
+                        .keys()
+                        .map(|id| id.split_once('/').map_or(&id[..], |(_, name)| name))
+                        .filter(|name| {
+                            tail.strip_prefix(name)
+                                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+                        })
+                        .max_by_key(|name| name.len())
+                        .map(str::to_owned)
+                });
+            let local = request
+                .extensions()
+                .get::<dhttp_home::identity::IdentityProfile>()
+                .and_then(|profile| {
+                    tail.match_indices('/')
+                        .map(|(end, _)| &tail[..end])
+                        .chain(std::iter::once(tail))
+                        .rfind(|name| {
+                            crate::package::valid_id(name).is_ok()
+                                && profile
+                                    .join("dev")
+                                    .join(name)
+                                    .join("manifest.json")
+                                    .is_file()
+                        })
+                        .map(str::to_owned)
+                });
+            installed
+                .into_iter()
+                .chain(local)
+                .max_by_key(String::len)
+                .or_else(|| {
+                    tail.split('/')
+                        .next()
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned)
+                })
+        })
         .map(|name| format!("/app/{name}"));
     let app_head = app.is_some() && request.method() == http::Method::HEAD;
     let headers = Headers {
