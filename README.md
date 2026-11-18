@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.9.1-1f6feb?style=flat-square" alt="Version 0.9.1">
+  <img src="https://img.shields.io/badge/version-0.9.2-preview.1-1f6feb?style=flat-square" alt="Version 0.9.2-preview.1">
   <img src="https://img.shields.io/badge/Rust-2024-dea584?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-4c956c?style=flat-square" alt="Apache-2.0 license"></a>
 </p>
@@ -28,10 +28,9 @@ Pishoo takes its name from Pixiu (貔貅), an auspicious creature in ancient Chi
 Pishoo 0.9 uses per-identity SQLite configuration, name-based access control,
 and WASM components. See the [Pishoo documentation](https://docs.dhttp.net/en/docs/core-components/pishoo) for configuration and usage.
 
-The current stable release is **0.9.1**, based on 0.9.0. It adds
-offline developer-signature verification, local Jade development and the official
-author transition, and preserves identity ACL rules across reinstallation. See
-the [release notes](CHANGELOG.md#091---2026-11-09) for upgrade limits.
+The next preview is **0.9.2-preview.1**, based on 0.9.1. See the
+[preview release notes](CHANGELOG.md#092-preview1---unreleased) for package, routing,
+Contact migration and device administration changes.
 
 ### Local development build
 

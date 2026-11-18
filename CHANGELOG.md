@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.2-preview.1] - Unreleased
+
+- Install signed WAZ v2 packages with hierarchical names and select among installed versions.
+- Route standard Lib requests using the paths and methods declared in each component’s OpenAPI document.
+- Run sandboxed command components for the Command and Python Libs.
+- Add native device administration and check service identities for scoped Contact and file access.
+- Migrate Contact storage to v7 for group profiles, personal aliases, outbound friend requests and independent service grants. Remove title contacts.
+- Preserve longer-lived OCSP proofs during refresh.
+
 ## [0.9.1] - 2026-11-09
 
 - Rename the forwarding entry to `/std/forward/*` and route Message through `/std/comm/message`; remove the old external Message/file routes.
