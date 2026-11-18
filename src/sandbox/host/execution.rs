@@ -36,6 +36,10 @@ use bindings::pishoo::execution::runtime::{
 
 const OUTPUT_LIMIT: usize = 1024 * 1024;
 
+#[cfg(test)]
+#[path = "../../../tests/unit/sandbox/host/execution.rs"]
+mod tests;
+
 pub(in crate::sandbox) fn valid_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
