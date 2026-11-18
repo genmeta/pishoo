@@ -16,8 +16,9 @@ pub(super) fn canonical_name<'a>(author: &str, name: &'a str) -> &'a str {
     }
 }
 
-use super::*;
 use std::collections::BTreeSet;
+
+use super::*;
 
 // Retire old identities and dependent historical releases together. An active
 // dependent must have a replacement in this installation; signed dependency
