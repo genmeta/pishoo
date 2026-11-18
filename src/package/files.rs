@@ -744,11 +744,10 @@ fn installed_routes(
     package_routes(&files, id, kind)
 }
 
-fn save_registration(
+fn save_package_identity(
     conn: &rusqlite::Transaction<'_>,
     id: &str,
     api: &serde_json::Value,
-    package: &super::PackageFiles,
 ) -> Result<()> {
     check_name(conn, id, "pkg")?;
     let name = package_name(id);
@@ -799,6 +798,18 @@ SET author=excluded.author,title=excluded.title,description=excluded.description
         ],
     )?;
     conn.execute("INSERT INTO pkg_registry.package_active(name,version) VALUES(?1,?2) ON CONFLICT(name) DO NOTHING", rusqlite::params![name, version])?;
+    Ok(())
+}
+
+fn save_package_relations(
+    conn: &rusqlite::Transaction<'_>,
+    id: &str,
+    api: &serde_json::Value,
+    package: &super::PackageFiles,
+) -> Result<()> {
+    let name = package_name(id);
+    let author = id.split_once('/').map(|(author, _)| author);
+    let version = api["version"].as_str().ok_or_else(expanded_error)?;
     conn.execute(
         "DELETE FROM pkg_registry.package_dependency WHERE package_name=?1 AND package_version=?2",
         rusqlite::params![name, version],
@@ -821,7 +832,6 @@ SET author=excluded.author,title=excluded.title,description=excluded.description
                 format!("dependency {dependency} {dependency_version} is not installed"),
             )));
         }
-        check_dependency_cycle(conn, name, version, dependency_name, &dependency_version)?;
         conn.execute(
             "INSERT INTO pkg_registry.package_dependency(package_name,package_version,dependency_name,version,expected_author) VALUES(?1,?2,?3,?4,?5)",
             rusqlite::params![
@@ -960,35 +970,6 @@ fn declared_dependencies(api: &serde_json::Value) -> Vec<(String, String)> {
             )
         })
         .collect()
-}
-
-fn check_dependency_cycle(
-    conn: &rusqlite::Connection,
-    name: &str,
-    version: &str,
-    dependency: &str,
-    dependency_version: &str,
-) -> Result<()> {
-    let mut pending = vec![(dependency.to_owned(), dependency_version.to_owned())];
-    let mut seen = std::collections::HashSet::new();
-    while let Some(current) = pending.pop() {
-        if current.0 == name && current.1 == version {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("cyclic dependency involving {name} {version}"),
-            )));
-        }
-        if seen.insert(current.clone()) {
-            pending.extend(
-                conn.prepare("SELECT dependency_name,version FROM pkg_registry.package_dependency WHERE package_name=?1 AND package_version=?2")?
-                    .query_map(rusqlite::params![current.0, current.1], |r| {
-                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?,
-            );
-        }
-    }
-    Ok(())
 }
 
 fn expanded_error() -> Error {
@@ -1489,7 +1470,7 @@ fn write_component(dir: &std::fs::File, name: &str, bytes: &[u8]) -> Result<()> 
     Ok(())
 }
 
-/// Install a verified dependency closure in dependency order, with its requested
+/// Install a verified dependency closure, with its requested
 /// root last. The caller holds the existing Sandbox write lock throughout.
 pub(super) fn install_packages(
     profile: &IdentityProfile,
@@ -1668,8 +1649,12 @@ ORDER BY p.name,p.version
             }
         }
     }
+    // Register every identity before inserting edges, including cycles.
+    for (id, _, _, metadata) in &changed {
+        save_package_identity(&tx, id, metadata)?;
+    }
     for (id, _, package, metadata) in &changed {
-        save_registration(&tx, id, metadata, package)?;
+        save_package_relations(&tx, id, metadata, package)?;
     }
     let (root_id, _, root_proof) = packages.last().ok_or_else(expanded_error)?;
     let root_version = root_proof["version"].as_str().ok_or_else(expanded_error)?;
@@ -1753,19 +1738,16 @@ SET version=excluded.version
                 {
                     return Err(expanded_error());
                 }
-                for (dependency, dependency_version) in declared_dependencies(metadata) {
-                    let target = libs
-                        .iter()
-                        .chain(sandbox.versions.iter())
-                        .find(|((candidate, candidate_version), _)| {
-                            package_name(candidate) == package_name(&dependency)
-                                && candidate_version == &dependency_version
-                        })
-                        .map(|(_, lib)| Arc::clone(lib));
-                    if let Some(target) = target {
-                        lib.dependencies
-                            .insert(package_name(&dependency).to_owned(), target);
-                    }
+                let registered = version_metadata(&tx, id, metadata["version"].as_str())?;
+                for dependency in registered["dependencies"].as_array().unwrap() {
+                    let name = dependency["name"].as_str().unwrap();
+                    let target = dependency["publisher"]
+                        .as_str()
+                        .map_or_else(|| name.to_owned(), |author| format!("{author}/{name}"));
+                    lib.dependencies.insert(
+                        name.to_owned(),
+                        (target, dependency["version"].as_str().unwrap().to_owned()),
+                    );
                 }
                 libs.insert(
                     (
@@ -1965,14 +1947,16 @@ ORDER BY p.name,p.version
                 &profile.join(".volume").join(data),
             )?;
             loaded.author_owner_hash = metadata["author_owner_hash"].as_str().map(str::to_owned);
-            for (dependency, dependency_version) in declared_dependencies(&metadata) {
-                if let Some((_, target)) = sandbox.versions.iter().find(|((id, version), _)| {
-                    package_name(id) == package_name(&dependency) && version == &dependency_version
-                }) {
-                    loaded
-                        .dependencies
-                        .insert(package_name(&dependency).to_owned(), Arc::clone(target));
-                }
+            for dependency in document["dependencies"].as_array().unwrap() {
+                let name = dependency["name"].as_str().unwrap();
+                let version = dependency["version"].as_str().unwrap();
+                let target: String = tx.query_row(
+                    "SELECT CASE WHEN author IS NULL THEN name ELSE author||'/'||name END FROM pkg_registry.package WHERE name=?1 AND version=?2",
+                    rusqlite::params![name, version], |row| row.get(0),
+                )?;
+                loaded
+                    .dependencies
+                    .insert(name.to_owned(), (target, version.to_owned()));
             }
             lib = Some(Arc::new(loaded));
         }

@@ -64,7 +64,8 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
                 let package = read_package(&bytes).unwrap();
                 let metadata = package_metadata(&package).unwrap();
                 let tx = db.transaction().unwrap();
-                save_registration(&tx, &format!("{publisher}/message"), &metadata, &package)
+                save_package_identity(&tx, &format!("{publisher}/message"), &metadata).unwrap();
+                save_package_relations(&tx, &format!("{publisher}/message"), &metadata, &package)
                     .unwrap();
                 tx.commit().unwrap();
                 let path = if crate::package::is_standard_author(publisher) {

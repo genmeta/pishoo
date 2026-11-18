@@ -654,7 +654,7 @@ async fn frontend_updates_switch_directories_and_open_responses_survive_removal(
 }
 
 #[test]
-fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
+fn backend_dependencies_are_multiple_pinned_persistent_and_allow_cycles() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     std::fs::create_dir_all(profile.join("lib")).unwrap();
@@ -768,8 +768,13 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
         [],
     )
     .unwrap();
-    // A cyclic graph cannot produce an immutable execution snapshot.
-    assert!(sandbox.load_libs(&profile).is_err());
+    // Runtime bindings use exact identities and can represent cycles.
+    sandbox.load_libs(&profile).unwrap();
+    assert_eq!(
+        sandbox.versions[&("alice.dhttp.net/second".into(), "1.0.0".into())].dependencies["first"]
+            .1,
+        "1.0.0"
+    );
     db.execute(
         "DELETE FROM package_dependency WHERE package_name='second'",
         [],

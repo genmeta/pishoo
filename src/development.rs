@@ -123,7 +123,7 @@ pub(crate) fn router(
                     .extensions()
                     .get::<Arc<Lib>>()
                     .and_then(|source| source.dependencies.get(&name))
-                    .map(|lib| lib.openapi.info.version.as_str());
+                    .map(|(_, version)| version.as_str());
                 let use_formal = selected
                     .or(source_version)
                     .is_some_and(|version| version != local_version);
@@ -542,11 +542,7 @@ fn load_dependencies(
     name: &str,
     visiting: &mut HashSet<String>,
 ) -> Result<Arc<Lib>> {
-    if !visiting.insert(name.to_owned()) {
-        return Err(Error::InvalidComponent(format!(
-            "cyclic local dependency involving {name}"
-        )));
-    }
+    visiting.insert(name.to_owned());
     let declared = {
         let root = root(profile)?;
         let directory = project_directory(&root, name)?;
@@ -595,9 +591,12 @@ fn load_dependencies(
             }
         };
         if let Some(author) = local_author {
+            if !visiting.contains(dependency_name) {
+                load_dependencies(profile, sandbox, &author, dependency_name, visiting)?;
+            }
             dependencies.insert(
                 dependency_name.to_owned(),
-                load_dependencies(profile, sandbox, &author, dependency_name, visiting)?,
+                (format!("{author}/{dependency_name}"), version.to_owned()),
             );
         } else {
             let target = sandbox
@@ -611,7 +610,10 @@ fn load_dependencies(
                 })
                 .map(|(_, lib)| Arc::clone(lib));
             if let Some(target) = target {
-                dependencies.insert(dependency_name.to_owned(), target);
+                dependencies.insert(
+                    dependency_name.to_owned(),
+                    (target.id.clone(), target.openapi.info.version.clone()),
+                );
             } else if !local_frontend {
                 let installed = if profile.join(".volume/sys/setting/database").is_file() {
                     package::installed_package_versions(profile, None)?
@@ -639,7 +641,7 @@ fn load_library(
     sandbox: &Arc<RwLock<Sandbox>>,
     expected_author: &str,
     name: &str,
-    dependencies: std::collections::HashMap<String, Arc<Lib>>,
+    dependencies: std::collections::HashMap<String, (String, String)>,
 ) -> Result<Arc<Lib>> {
     // Installation takes the Sandbox lock before the identity directory lock.
     let mut state = sandbox.write().unwrap();
@@ -678,7 +680,7 @@ fn load_library(
         && dependencies.iter().all(|(name, target)| {
             lib.dependencies
                 .get(name)
-                .is_some_and(|previous| Arc::ptr_eq(previous, target))
+                .is_some_and(|previous| previous == target)
         })
     {
         return Ok(lib.clone());

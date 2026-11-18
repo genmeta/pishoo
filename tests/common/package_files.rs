@@ -98,7 +98,8 @@ ORDER BY p.name,p.version
         "UPDATE pkg_registry.package SET package_sha256=NULL WHERE name=?1 AND version=?2",
         rusqlite::params![package_name(id), metadata["version"].as_str()],
     )?;
-    save_registration(&tx, id, &metadata, &package)?;
+    save_package_identity(&tx, id, &metadata)?;
+    save_package_relations(&tx, id, &metadata, &package)?;
     tx.execute(
         r#"
 INSERT INTO pkg_registry.package_active(name,version) VALUES(?1,?2) ON CONFLICT(name) DO UPDATE

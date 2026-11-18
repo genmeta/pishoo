@@ -912,3 +912,42 @@ async fn frontend_fallback_keeps_a_backend_only_preview_running() {
             .contains_key(&format!("{}/hello", profile.name()))
     );
 }
+
+#[test]
+fn local_runtime_dependencies_allow_cycles_and_release_all_instances() {
+    let (_root, profile, sandbox) = environment();
+    for (name, dependency) in [("hello", "peer"), ("peer", "hello")] {
+        std::fs::create_dir_all(profile.join(format!("lib/{name}.preview"))).unwrap();
+        std::fs::write(
+            profile.join(format!("lib/{name}.preview/manifest.json")),
+            serde_json::to_vec(&serde_json::json!({
+                "package":{"author":profile.name(),"name":name,"version":"1.0.0"},
+                "dependencies":[{"name":dependency,"version":"1.0.0"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            profile.join(format!("lib/{name}.wasm.1.0.0")),
+            wasm("1.0.0"),
+        )
+        .unwrap();
+    }
+    load(&profile, &sandbox, profile.name(), "hello").unwrap();
+    let state = sandbox.read().unwrap();
+    assert_eq!(state.dev_libs.len(), 2);
+    let hello = &state.dev_libs[&format!("{}/hello", profile.name())].1;
+    let peer = &state.dev_libs[&format!("{}/peer", profile.name())].1;
+    assert_eq!(
+        hello.dependencies["peer"],
+        (peer.id.clone(), "1.0.0".into())
+    );
+    assert_eq!(
+        peer.dependencies["hello"],
+        (hello.id.clone(), "1.0.0".into())
+    );
+    let weak = Arc::downgrade(hello);
+    drop(state);
+    drop(sandbox);
+    assert!(weak.upgrade().is_none());
+}

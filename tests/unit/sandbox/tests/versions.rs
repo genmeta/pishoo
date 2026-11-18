@@ -65,10 +65,10 @@ async fn exact_http_versions_and_trusted_dependency_context_select_distinct_libr
         })
     ));
     let mut caller = library(&sandbox, directory.path(), "alice.dhttp.net/a", "1.0.0");
-    Arc::get_mut(&mut caller)
-        .unwrap()
-        .dependencies
-        .insert("std/comm/message".to_owned(), old.clone());
+    Arc::get_mut(&mut caller).unwrap().dependencies.insert(
+        "std/comm/message".to_owned(),
+        (old.id.clone(), old.openapi.info.version.clone()),
+    );
     let mut pinned = request(None);
     pinned.extensions_mut().insert(caller.clone());
     assert!(Arc::ptr_eq(

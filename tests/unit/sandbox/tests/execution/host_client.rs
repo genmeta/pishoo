@@ -160,10 +160,10 @@ async fn local_service_admission_uses_the_bound_provider_authorization_declarati
         if let Some(provider) = provider {
             let mut source = host_lib(&root.path().join(format!("source-{expected}")));
             Arc::get_mut(&mut source).unwrap().id = "dev.example.dhttp.net/example/source".into();
-            Arc::get_mut(&mut source)
-                .unwrap()
-                .dependencies
-                .insert("std/comm/message".into(), provider);
+            Arc::get_mut(&mut source).unwrap().dependencies.insert(
+                "std/comm/message".into(),
+                (provider.id.clone(), provider.openapi.info.version.clone()),
+            );
             request.extensions_mut().insert(source);
         }
         let response = router.clone().oneshot(request).await.unwrap();

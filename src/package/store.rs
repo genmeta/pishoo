@@ -167,6 +167,8 @@ pub(crate) async fn install_store_package(
     let root_id = format!("{publisher}/{name}");
     super::valid_id(&root_id)?;
     let installed = installed_packages(profile, None)?;
+    let installed_versions = super::files::installed_package_versions(profile, None)?;
+    let version_requested = version;
     let mut pending = vec![(publisher.to_owned(), name.to_owned(), version.to_owned())];
     let mut resources: Vec<(String, Vec<u8>, Value)> = Vec::new();
     while let Some((publisher, name, version)) = pending.pop() {
@@ -174,6 +176,13 @@ pub(crate) async fn install_store_package(
         if resources
             .iter()
             .any(|(key, _, proof)| key == &id && proof["version"] == version)
+        {
+            continue;
+        }
+        if (id != root_id || version != version_requested)
+            && installed_versions
+                .iter()
+                .any(|entry| entry["id"] == id && entry["version"] == version)
         {
             continue;
         }
@@ -235,14 +244,23 @@ pub(crate) async fn install_store_package(
         for dep in document["dependencies"].as_array().unwrap() {
             let author = match dep["publisher"].as_str() {
                 Some(author) => author.to_owned(),
-                None => {
-                    resolve_author(
-                        endpoint,
-                        dep["name"].as_str().unwrap(),
-                        dep["version"].as_str().unwrap(),
-                    )
-                    .await?
-                }
+                None => match installed_versions
+                    .iter()
+                    .find(|entry| {
+                        entry["name"] == dep["name"] && entry["version"] == dep["version"]
+                    })
+                    .and_then(|entry| entry["author"].as_str())
+                {
+                    Some(author) => author.to_owned(),
+                    None => {
+                        resolve_author(
+                            endpoint,
+                            dep["name"].as_str().unwrap(),
+                            dep["version"].as_str().unwrap(),
+                        )
+                        .await?
+                    }
+                },
             };
             pending.push((
                 author,
@@ -252,13 +270,13 @@ pub(crate) async fn install_store_package(
         }
         resources.push((id, bytes, proof));
     }
-    let ordered = order_packages(resources)?;
+    let ordered = order_packages(resources, &installed_versions)?;
     tokio::task::block_in_place(|| {
         let mut sandbox = sandbox.write().unwrap();
         if sandbox.tasks.is_closed() {
             return Err(Error::Denied);
         }
-        // The root is last in dependency order. Prepare its response before the
+        // The requested root is last in the verified closure. Prepare its response before the
         // commit so no fallible work follows the durable/runtime switch.
         let result = super::lib_metadata(
             &super::format::read_package_at(
@@ -276,38 +294,42 @@ pub(crate) async fn install_store_package(
 
 fn order_packages(
     mut resources: Vec<(String, Vec<u8>, Value)>,
+    installed: &[Value],
 ) -> Result<Vec<(String, Vec<u8>, Value)>> {
-    let mut ordered: Vec<(String, Vec<u8>, Value)> = Vec::new();
-    while !resources.is_empty() {
-        let mut ready = None;
-        for (index, (_, bytes, proof)) in resources.iter().enumerate() {
-            let doc = package_metadata(&super::format::read_package_at(
-                bytes,
-                proof["signature"]["verified_at"].as_i64().ok_or_else(|| {
-                    super::signing::policy(
-                        "package_policy_upgrade_required",
-                        http::StatusCode::UNPROCESSABLE_ENTITY,
-                    )
-                })?,
-            )?)?;
-            if doc["dependencies"].as_array().unwrap().iter().all(|dep| {
-                ordered.iter().any(|(id, _, proof)| {
-                    proof["version"] == dep["version"]
-                        && id.split_once('/').map(|(_, name)| name).or(Some(&id[..]))
-                            == dep["name"].as_str()
-                        && dep["publisher"].as_str().is_none_or(|author| {
-                            id.split_once('/')
-                                .is_some_and(|(publisher, _)| publisher == author)
-                        })
-                })
-            }) {
-                ready = Some(index);
-                break;
-            }
+    // Runtime packages need no build order. Validate the complete closure before
+    // registration; keep the requested root last for activation and its response.
+    for (_, bytes, proof) in &resources {
+        let doc = package_metadata(&super::format::read_package_at(
+            bytes,
+            proof["signature"]["verified_at"].as_i64().ok_or_else(|| {
+                super::signing::policy(
+                    "package_policy_upgrade_required",
+                    http::StatusCode::UNPROCESSABLE_ENTITY,
+                )
+            })?,
+        )?)?;
+        if !doc["dependencies"].as_array().unwrap().iter().all(|dep| {
+            resources.iter().any(|(id, _, proof)| {
+                proof["version"] == dep["version"]
+                    && id.split_once('/').map_or(id.as_str(), |(_, name)| name)
+                        == dep["name"].as_str().unwrap()
+                    && dep["publisher"].as_str().is_none_or(|author| {
+                        id.split_once('/')
+                            .is_some_and(|(publisher, _)| publisher == author)
+                    })
+            }) || installed.iter().any(|entry| {
+                entry["name"] == dep["name"]
+                    && entry["version"] == dep["version"]
+                    && dep["publisher"]
+                        .as_str()
+                        .is_none_or(|author| entry["author"] == author)
+            })
+        }) {
+            return Err(Error::BadRequest("missing exact package dependency".into()));
         }
-        let index = ready.ok_or_else(|| Error::BadRequest("cyclic package dependencies".into()))?;
-        ordered.push(resources.remove(index));
     }
+    resources.reverse();
+    let ordered = resources;
     Ok(ordered)
 }
 

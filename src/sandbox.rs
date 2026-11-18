@@ -41,7 +41,7 @@ pub struct WasmRuntime {
 pub(crate) struct Lib {
     pub(crate) id: String,
     pub(crate) author_owner_hash: Option<String>,
-    pub(crate) dependencies: HashMap<String, Arc<Lib>>,
+    pub(crate) dependencies: HashMap<String, (String, String)>,
     commands: Arc<HashMap<String, Component>>,
     pub(crate) stream_retired: tokio_util::sync::CancellationToken,
     pub(crate) openapi: oas3::OpenApiV3Spec,
@@ -160,24 +160,7 @@ impl Sandbox {
             Some(lib_root(profile)?)
         };
         while !pending.is_empty() {
-            let ready = pending
-                .iter()
-                .position(|entry| {
-                    entry["dependencies"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .all(|dependency| {
-                            !pending.iter().any(|candidate| {
-                                candidate["name"] == dependency["name"]
-                                    && candidate["version"] == dependency["version"]
-                            })
-                        })
-                })
-                .ok_or_else(|| {
-                    Error::InvalidConfig("cyclic installed package dependencies".into())
-                })?;
-            let entry = pending.remove(ready);
+            let entry = pending.pop().unwrap();
             let id = entry["id"]
                 .as_str()
                 .ok_or_else(|| Error::InvalidConfig("missing installed identity".into()))?;
@@ -220,11 +203,13 @@ impl Sandbox {
             }
             for dependency in entry["dependencies"].as_array().unwrap() {
                 let name = dependency["name"].as_str().unwrap();
-                if let Some((_, target)) = versions.iter().find(|((id, version), _)| {
-                    package_name(id) == name && version == dependency["version"].as_str().unwrap()
-                }) {
-                    lib.dependencies.insert(name.to_owned(), Arc::clone(target));
-                }
+                let id = dependency["publisher"]
+                    .as_str()
+                    .map_or_else(|| name.to_owned(), |author| format!("{author}/{name}"));
+                lib.dependencies.insert(
+                    name.to_owned(),
+                    (id, dependency["version"].as_str().unwrap().to_owned()),
+                );
             }
             versions.insert((id.to_owned(), version.to_owned()), Arc::new(lib));
         }
@@ -440,13 +425,7 @@ pub(crate) fn select_library(
                 .iter()
                 .map(|(id, (_, lib))| (id.as_str(), lib)),
         )
-        .chain(source.into_iter().map(|lib| (lib.id.as_str(), lib)))
-        .chain(
-            source
-                .into_iter()
-                .flat_map(|source| source.dependencies.values())
-                .map(|lib| (lib.id.as_str(), lib)),
-        );
+        .chain(source.into_iter().map(|lib| (lib.id.as_str(), lib)));
     let mut providers = std::collections::BTreeSet::new();
     for (id, lib) in candidates {
         let matches = if standard {
@@ -484,13 +463,36 @@ pub(crate) fn select_library(
         if source.id == id {
             Some(Arc::clone(source))
         } else {
-            source
-                .dependencies
-                .get(package_name(&id))
-                .filter(|lib| lib.id == id)
-                .cloned()
+            source.dependencies.get(package_name(&id)).and_then(|key| {
+                sandbox
+                    .versions
+                    .get(key)
+                    .or_else(|| {
+                        sandbox
+                            .libs
+                            .get(&key.0)
+                            .filter(|lib| lib.openapi.info.version == key.1)
+                    })
+                    .or_else(|| {
+                        sandbox
+                            .dev_libs
+                            .get(&key.0)
+                            .map(|(_, lib)| lib)
+                            .filter(|lib| lib.openapi.info.version == key.1)
+                    })
+                    .filter(|lib| lib.id == id)
+                    .cloned()
+            })
         }
     });
+    if bound.is_none()
+        && source.is_some_and(|source| source.dependencies.contains_key(package_name(&id)))
+    {
+        return Err(Error::PackagePolicy {
+            code: "package_version_unavailable",
+            status: http::StatusCode::NOT_ACCEPTABLE,
+        });
+    }
     if let Some(bound) = &bound
         && requested.is_some_and(|version| version != bound.openapi.info.version)
     {
