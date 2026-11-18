@@ -569,7 +569,9 @@ ORDER BY p.name,p.version
             }
             let root = child_dir(&profile_dir(profile)?, std::ffi::OsStr::new(other_kind))?;
             for (path, methods) in installed_routes(&root, &other, other_kind, &metadata)? {
-                if let Some(ours) = routes.get(&path)
+                if let Some((_, ours)) = routes
+                    .iter()
+                    .find(|(ours, _)| super::api_paths_overlap(ours, &path))
                     && ((kind == "lib" && other_kind == "lib")
                         || methods.iter().any(|method| ours.contains(method)))
                 {
@@ -1650,18 +1652,19 @@ ORDER BY p.name,p.version
         }
         changed.push((id, bytes, package, metadata));
     }
-    let mut providers = std::collections::BTreeMap::new();
+    let mut providers = std::collections::BTreeMap::<String, &str>::new();
     for (id, _, package, metadata) in &changed {
         if metadata["has_lib"] == true {
             for path in package_routes(package, id, "lib")?.keys() {
-                if let Some(previous) = providers.insert(path.clone(), id.as_str())
-                    && previous != id.as_str()
-                {
+                if let Some((_, previous)) = providers.iter().find(|(existing, previous)| {
+                    super::api_paths_overlap(existing, path) && **previous != id.as_str()
+                }) {
                     return Err(Error::Io(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
                         format!("route {path} conflicts between {previous} and {id}"),
                     )));
                 }
+                providers.insert(path.clone(), id.as_str());
             }
         }
     }

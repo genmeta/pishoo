@@ -227,7 +227,13 @@ async fn reconcile_device(
         reconcile_profiles(mdns, home, user_homes, servers, runtime.clone(), system_db).await?;
     for server in servers.values_mut() {
         server.system_router =
-            crate::system::router(home.clone(), system_db.clone(), commands.clone());
+            crate::system::router(home.clone(), system_db.clone(), commands.clone()).merge(
+                crate::system::permissions_router(
+                    server.profile.clone(),
+                    server.access.clone(),
+                    system_db.clone(),
+                ),
+            );
         *server.router.write().unwrap() = current_router(server);
     }
     Ok(changed)

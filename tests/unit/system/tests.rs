@@ -95,6 +95,7 @@ async fn http_routes_require_a_registered_administrator_and_validate_native_requ
         .unwrap();
     for (method, path, anonymous, status) in [
         (Method::GET, "/sys/info", false, StatusCode::OK),
+        (Method::GET, "/sys", false, StatusCode::NOT_FOUND),
         (Method::GET, "/sys/info", true, StatusCode::FORBIDDEN),
         (Method::GET, "/sys/admin", true, StatusCode::FORBIDDEN),
         (Method::POST, "/sys/user", true, StatusCode::FORBIDDEN),
@@ -175,7 +176,7 @@ async fn http_routes_require_a_registered_administrator_and_validate_native_requ
 }
 
 #[tokio::test]
-async fn imported_users_inherit_all_administrators_and_require_explicit_admin_assignment() {
+async fn imported_users_keep_device_administration_separate_from_identity_access() {
     let (root, home, database) = database();
     let fixtures = tempfile::tempdir().unwrap();
     crate::test_support::credentials::generate(
@@ -207,21 +208,12 @@ async fn imported_users_inherit_all_administrators_and_require_explicit_admin_as
     let access = crate::server::access_for_system(&first, owner.subject_id())
         .await
         .unwrap();
-    assert_eq!(
-        access
-            .find_contact_by_name(remote.name())
-            .await
-            .unwrap()
-            .status,
-        2
-    );
-    assert_eq!(
+    assert!(access.find_contact_by_name(remote.name()).await.is_err());
+    assert!(
         access
             .find_contact_by_name("support.name.dhttp.net")
             .await
-            .unwrap()
-            .status,
-        2
+            .is_err()
     );
     assert!(access.find_contact_by_name(owner.name()).await.is_err());
     let authorization = access
@@ -236,7 +228,22 @@ async fn imported_users_inherit_all_administrators_and_require_explicit_admin_as
         )
         .await
         .unwrap();
-    assert!(matches!(authorization, access_control::AuthResult::Allowed));
+    assert!(matches!(authorization, access_control::AuthResult::Denied));
+    assert!(matches!(
+        access
+            .auth(
+                access_control::Headers {
+                    method: Method::DELETE,
+                    path: "/anything".into(),
+                    fields: Default::default(),
+                },
+                Some(owner.name()),
+                Some(owner.subject_id()),
+            )
+            .await
+            .unwrap(),
+        access_control::AuthResult::Allowed
+    ));
     let second_body = imported_body(fixtures.path(), "second.name");
     users::create(&home, &mut db, second_body.clone(), &trust)
         .await
@@ -252,21 +259,17 @@ async fn imported_users_inherit_all_administrators_and_require_explicit_admin_as
     let second_access = crate::server::access_for_system(&second, second_subject.subject_id())
         .await
         .unwrap();
-    assert_eq!(
+    assert!(
         second_access
             .find_contact_by_name(owner.name())
             .await
-            .unwrap()
-            .status,
-        2
+            .is_err()
     );
-    assert_eq!(
+    assert!(
         second_access
             .find_contact_by_name(remote.name())
             .await
-            .unwrap()
-            .status,
-        2
+            .is_err()
     );
     assert!(!storage::administrator(&db, &second_subject).unwrap());
     let key_before = std::fs::read(second.key_path()).unwrap();
@@ -282,7 +285,7 @@ async fn imported_users_inherit_all_administrators_and_require_explicit_admin_as
 }
 
 #[tokio::test]
-async fn importing_an_existing_administrator_deduplicates_and_excludes_self_guardianship() {
+async fn importing_an_existing_administrator_preserves_membership_without_creating_contacts() {
     let (_root, home, database) = database();
     let fixtures = tempfile::tempdir().unwrap();
     crate::test_support::credentials::generate(

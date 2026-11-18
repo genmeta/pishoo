@@ -17,11 +17,19 @@ pub(super) fn storage(error: rusqlite::Error) -> Failure {
     fail(status, format!("contact storage: {error}"))
 }
 
-pub(super) fn outbound_request(db: &Connection, id: i64) -> Result<Value, Failure> {
-    db.query_row("SELECT id,target_name,description,requested_capabilities,offered_capabilities,status,expired_after,delivery_deadline,remote_expired_after,last_checked_at,error_message,created_at,updated_at FROM outbound_contact_request WHERE id=?1",[id],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"target_name":r.get::<_,String>(1)?,"description":r.get::<_,String>(2)?,"requested_capabilities":serde_json::from_str::<Value>(&r.get::<_,String>(3)?).unwrap_or(Value::Null),"offered_capabilities":serde_json::from_str::<Value>(&r.get::<_,String>(4)?).unwrap_or(Value::Null),"status":r.get::<_,String>(5)?,"valid_before":r.get::<_,i64>(6)?,"delivery_deadline":r.get::<_,i64>(7)?,"remote_valid_before":r.get::<_,Option<i64>>(8)?,"last_checked_at":r.get::<_,Option<i64>>(9)?,"error_message":r.get::<_,Option<String>>(10)?,"created_at":r.get::<_,i64>(11)?,"updated_at":r.get::<_,i64>(12)?}))).optional().map_err(storage)?.ok_or_else(||fail(404,"contact request not found"))
+pub(super) fn outbound_request(db: &Connection, target: &str) -> Result<Value, Failure> {
+    db.query_row("SELECT application_id, description, state, min(local_deadline,coalesce(remote_deadline,local_deadline)),
+            last_error, created_at, updated_at, contact_id, target_subject
+        FROM outbound_contact_request WHERE target_name=?1", [target], |row| Ok(json!({
+        "target_name":target, "application_id":row.get::<_,String>(0)?, "description":row.get::<_,String>(1)?,
+        "status":row.get::<_,String>(2)?, "valid_before":row.get::<_,i64>(3)?, "error_message":row.get::<_,Option<String>>(4)?,
+        "created_at":row.get::<_,i64>(5)?, "updated_at":row.get::<_,i64>(6)?,
+        "_contact_id":row.get::<_,Option<i64>>(7)?, "_contact_subject":row.get::<_,Option<String>>(8)?
+    }))).optional().map_err(storage)?.ok_or_else(||fail(404,"contact request not found"))
 }
 pub(super) fn expire_requests(db: &Connection) -> Result<(), Failure> {
-    db.execute("UPDATE outbound_contact_request SET status=CASE WHEN status='queued' THEN 'failed' ELSE 'expired' END,lease_until=NULL,updated_at=?1,error_message='contact request expired' WHERE status IN ('queued','pending') AND expired_after<=?1",[now()]).map_err(storage)?;
+    db.execute("UPDATE outbound_contact_request SET state='expired',lease_until=NULL,review_id=NULL,updated_at=?1,last_error='contact request expired'
+        WHERE state IN ('queued','pending') AND min(local_deadline,coalesce(remote_deadline,local_deadline))<=?1",[now()]).map_err(storage)?;
     Ok(())
 }
 
@@ -119,14 +127,14 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
         }
         tx.execute_batch(include_str!("sql/schema.sql"))
             .map_err(storage)?;
-        tx.pragma_update(None, "user_version", 6).map_err(storage)?;
+        tx.pragma_update(None, "user_version", 7).map_err(storage)?;
     } else if version == 1 {
         tx.execute_batch(include_str!(
             "sql/migrations/v2_bind_contact_generation.sql"
         ))
         .map_err(storage)?;
         tx.pragma_update(None, "user_version", 2).map_err(storage)?;
-    } else if !(2..=6).contains(&version) {
+    } else if !(2..=7).contains(&version) {
         return Err(fail(500, "unsupported contact database version"));
     }
     if version == 1 || version == 2 {
@@ -153,7 +161,25 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
             .map_err(storage)?;
         tx.pragma_update(None, "user_version", 6).map_err(storage)?;
     }
-    tx.prepare("SELECT id,target_name,description,requested_capabilities,offered_capabilities,application_id,status,expired_after,delivery_deadline,remote_expired_after,next_attempt_at,attempt_count,lease_until,last_checked_at,error_message,created_at,updated_at,contact_id,contact_subject,requested_access,offers,review_id,review_subject,review_method,review_path FROM outbound_contact_request LIMIT 0").map_err(storage)?;
+    if (1..=6).contains(&version) {
+        if tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM contact_entries WHERE kind='group')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(storage)?
+        {
+            return Err(fail(
+                409,
+                "existing group memberships require offline Contact migration",
+            ));
+        }
+        tx.execute_batch(include_str!("sql/migrations/v7_simplify_contacts.sql"))
+            .map_err(storage)?;
+        tx.pragma_update(None, "user_version", 7).map_err(storage)?;
+    }
+    tx.prepare("SELECT target_name,application_id,contact_id,target_subject,description,requested,offered,state,local_deadline,remote_deadline,review_id,next_attempt_at,lease_until,last_error,created_at,updated_at FROM outbound_contact_request LIMIT 0").map_err(storage)?;
     tx.commit().map_err(storage)?;
     if rustix::process::geteuid().is_root() {
         use std::os::unix::fs::MetadataExt;

@@ -1,7 +1,6 @@
 //! Read, validate and manage identity service configuration.
 use std::{collections::HashSet, net::SocketAddr};
 
-use access_control::{SubjectId, Visitor};
 use axum::{
     Json, Router,
     body::Body,
@@ -581,20 +580,9 @@ pub(crate) fn config_router(profile: IdentityProfile, endpoint: dhttp::Endpoint)
 
 async fn config_request(
     profile: IdentityProfile,
-    endpoint: dhttp::Endpoint,
+    _endpoint: dhttp::Endpoint,
     request: Request<Body>,
 ) -> Result<Response> {
-    // authorize removes supplied Visitors and constructs this one from the TLS peer.
-    let visitor = request.extensions().get::<Visitor>().ok_or(Error::Denied)?;
-    let local = endpoint.local_authority()?;
-    let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
-        .map_err(|_| Error::Denied)?;
-    let subject =
-        SubjectId::new(ski.owner_hash().as_str().as_bytes()).map_err(|_| Error::Denied)?;
-    if visitor.name() != endpoint.name() || visitor.subject_id() != &subject {
-        return Err(Error::Denied);
-    }
-
     if request.headers().contains_key("accept-versions") {
         let mut supported = false;
         for versions in request.headers().get_all("accept-versions") {

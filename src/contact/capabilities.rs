@@ -130,6 +130,9 @@ pub(super) async fn selected(
         .await?
         .1
     };
+    expand(&catalog, ids)
+}
+pub(super) fn expand(catalog: &Value, ids: &[Value]) -> Result<Vec<Value>, Failure> {
     let catalog = catalog
         .as_object()
         .ok_or_else(|| fail(502, "invalid permission catalog"))?;

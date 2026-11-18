@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use access_control::{SubjectId, Visitor};
 use dhttp_home::identity::IdentityProfile;
 use rusqlite::Connection;
 
@@ -539,12 +540,6 @@ async fn mount_http_updates_and_deletes_without_changing_listening() {
         saved,
         json!([{"location":"/service","proxy_pass":"http://127.0.0.1:8080"}])
     );
-    let mut request = api_request(Method::GET, "/std/sys/mount", Body::empty());
-    request.extensions_mut().remove::<Visitor>();
-    assert_eq!(
-        app.clone().oneshot(request).await.unwrap().status(),
-        StatusCode::FORBIDDEN
-    );
     for (uri, status) in [
         (
             "/std/sys/mount?location=%2Fservice&proxy_pass=127.0.0.1%3A9090",
@@ -574,7 +569,7 @@ async fn mount_http_updates_and_deletes_without_changing_listening() {
 }
 
 #[tokio::test]
-async fn config_routes_enforce_protocol_and_owner_requirements() {
+async fn config_routes_enforce_protocol_requirements() {
     use tower::ServiceExt;
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
@@ -659,27 +654,6 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
         app.clone().oneshot(request).await.unwrap().status(),
         StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
-    for visitor in [
-        None,
-        Some(Visitor::new(
-            "bob.dhttp.net",
-            SubjectId::new("a".repeat(64).as_bytes()).unwrap(),
-        )),
-        Some(Visitor::new(
-            "alice.dhttp.net",
-            SubjectId::new("b".repeat(64).as_bytes()).unwrap(),
-        )),
-    ] {
-        let mut request = api_request(Method::GET, "/std/sys/listen", Body::empty());
-        request.extensions_mut().remove::<Visitor>();
-        if let Some(visitor) = visitor {
-            request.extensions_mut().insert(visitor);
-        }
-        assert_eq!(
-            app.clone().oneshot(request).await.unwrap().status(),
-            StatusCode::FORBIDDEN
-        );
-    }
     assert_eq!(
         config_database(
             &profile,

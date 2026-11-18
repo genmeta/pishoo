@@ -34,6 +34,7 @@ pub(crate) use files::{
 )]
 pub(crate) use format::read_package;
 pub(crate) use format::{PackageFiles, package_metadata, package_openapi};
+pub(crate) use manifest::{api_path_matches, api_paths_overlap};
 pub use manifest::{validate_lib, validate_openapi};
 pub(crate) use store::install_store_package;
 #[cfg(test)]
@@ -217,7 +218,6 @@ async fn pkg_management_request(
 ) -> Result<axum::response::Response> {
     use axum::response::IntoResponse;
     use http::{Method, StatusCode, header};
-    require_owner(&endpoint, &request)?;
     if request.headers().contains_key("accept-versions") {
         let mut supported = false;
         for value in request.headers().get_all("accept-versions") {

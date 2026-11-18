@@ -1610,10 +1610,14 @@ async fn reconciliation_isolates_bad_profiles_and_preserves_current_with_legacy_
     servers.get_mut(&name).unwrap().close().await.unwrap();
 }
 
+#[path = "tests/administrator_permissions.rs"]
+mod administrator_permissions;
 #[path = "tests/initialization.rs"]
 mod initialization;
 #[path = "tests/logging.rs"]
 mod logging;
+#[path = "tests/management_permissions.rs"]
+mod management_permissions;
 #[path = "tests/network.rs"]
 mod network;
 #[path = "tests/review.rs"]

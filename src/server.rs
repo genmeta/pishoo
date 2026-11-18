@@ -17,6 +17,7 @@ mod files;
 pub(crate) mod ocsp;
 mod run;
 
+#[cfg(test)]
 pub(crate) use self::access::load_access as access_for_system;
 pub(crate) use self::run::local_profiles;
 pub use self::run::run;

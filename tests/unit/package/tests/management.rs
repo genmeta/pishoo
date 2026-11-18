@@ -617,7 +617,7 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
 }
 
 #[tokio::test]
-async fn management_protocol_preserves_owner_version_headers_body_limits_and_closed_lifecycle() {
+async fn management_protocol_preserves_version_headers_body_limits_and_closed_lifecycle() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     let sandbox = Arc::new(RwLock::new(Sandbox::new(Arc::new(
@@ -650,37 +650,6 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
                 StatusCode::OK
             }
         );
-    }
-    for visitor in [
-        None,
-        Some(access_control::Visitor::new(
-            "bob.dhttp.net",
-            access_control::SubjectId::new("a".repeat(64).as_bytes()).unwrap(),
-        )),
-        Some(access_control::Visitor::new(
-            "alice.dhttp.net",
-            access_control::SubjectId::new("b".repeat(64).as_bytes()).unwrap(),
-        )),
-    ] {
-        for method in [Method::GET, Method::POST] {
-            let mut req = request(
-                method.clone(),
-                if method == Method::POST {
-                    "/std/sys/pkg/install"
-                } else {
-                    "/std/sys/pkg?name=note"
-                },
-                AxumBody::from("{}"),
-            );
-            req.extensions_mut().remove::<access_control::Visitor>();
-            if let Some(visitor) = &visitor {
-                req.extensions_mut().insert(visitor.clone());
-            }
-            assert_eq!(
-                router.clone().oneshot(req).await.unwrap().status(),
-                StatusCode::FORBIDDEN
-            );
-        }
     }
     for method in [Method::GET, Method::POST] {
         let mut req = request(

@@ -39,7 +39,13 @@ async fn device_admin_registration_and_authorization_over_h3() {
     let mut server = Server::load(profile(home.as_path(), "receiver"), runtime)
         .await
         .unwrap();
-    server.system_router = crate::system::router(home.clone(), database.clone(), commands);
+    server.system_router = crate::system::router(home.clone(), database.clone(), commands).merge(
+        crate::system::permissions_router(
+            server.profile.clone(),
+            server.access.clone(),
+            database.clone(),
+        ),
+    );
     *server.router.write().unwrap() = current_router(&server);
     let app = server.router.clone();
     let listener = server
@@ -74,6 +80,29 @@ async fn device_admin_registration_and_authorization_over_h3() {
         status
     };
     assert_eq!(get(alice.clone()).await, StatusCode::FORBIDDEN);
+    let catalog = |client: dhttp::Endpoint| async move {
+        let response = client
+            .get(
+                "https://receiver.dhttp.net/std/acl/permissions?details=1"
+                    .parse()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice::<serde_json::Value>(
+            &response.into_body().collect().await.unwrap().to_bytes(),
+        )
+        .unwrap()
+    };
+    let permission = "pishoo · 系统管理 / System administration";
+    assert!(catalog(alice.clone()).await.get(permission).is_none());
+    assert!(
+        catalog(server.endpoint.clone())
+            .await
+            .get(permission)
+            .is_none()
+    );
     assert_eq!(
         database
             .lock()
@@ -87,6 +116,12 @@ async fn device_admin_registration_and_authorization_over_h3() {
         .await
         .unwrap();
     assert_eq!(get(server.endpoint.clone()).await, StatusCode::OK);
+    assert!(
+        catalog(server.endpoint.clone())
+            .await
+            .get(permission)
+            .is_some()
+    );
     assert_eq!(get(alice.clone()).await, StatusCode::FORBIDDEN);
     let local = alice.local_authority().unwrap();
     let owner = dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
@@ -100,7 +135,12 @@ async fn device_admin_registration_and_authorization_over_h3() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(get(alice.clone()).await, StatusCode::OK);
-    assert_eq!(get(bob).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        catalog(alice.clone()).await[permission]["management"],
+        "administrator"
+    );
+    assert_eq!(get(bob.clone()).await, StatusCode::FORBIDDEN);
+    assert!(catalog(bob).await.get(permission).is_none());
     let (status, administrators) =
         owner_request(&server, Method::GET, "/sys/admin", serde_json::Value::Null).await;
     assert_eq!(status, StatusCode::OK);
@@ -123,6 +163,7 @@ async fn device_admin_registration_and_authorization_over_h3() {
         .0,
         StatusCode::OK
     );
-    assert_eq!(get(alice).await, StatusCode::FORBIDDEN);
+    assert_eq!(get(alice.clone()).await, StatusCode::FORBIDDEN);
+    assert!(catalog(alice).await.get(permission).is_none());
     server.close().await.unwrap();
 }

@@ -81,3 +81,29 @@ fn independent_openapi_uses_the_same_rules_as_component_documents() {
     assert!(crate::validate_openapi(&vec![b' '; 1024 * 1024 + 1]).is_err());
     assert!(validate_lib(b"\0asm\x0d\0\x01\0").is_err());
 }
+
+#[test]
+fn namespaced_path_parameters_match_one_segment_and_detect_overlap() {
+    let raw=br#"{"openapi":"3.1.0","info":{"title":"Group","version":"1"},"paths":{"/comm/group/{topic}/member/{name}/avatar":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#;
+    assert!(validate_openapi(raw).is_ok());
+    assert!(api_path_matches(
+        "/comm/group/{topic}/member/{name}/avatar",
+        "/comm/group/dev.test/member/alice~/avatar"
+    ));
+    assert!(!api_path_matches("/comm/group/{topic}", "/comm/group/"));
+    assert!(!api_path_matches(
+        "/comm/group/{topic}",
+        "/comm/group/dev/extra"
+    ));
+    assert!(api_paths_overlap("/comm/group/{topic}", "/comm/group/team"));
+    assert!(api_paths_overlap(
+        "/comm/group/{topic}",
+        "/comm/group/{name}"
+    ));
+    assert!(!api_paths_overlap(
+        "/comm/group/{topic}/avatar",
+        "/comm/group/{topic}/nickname"
+    ));
+    let overlapping=br#"{"openapi":"3.1.0","info":{"title":"Group","version":"1"},"paths":{"/comm/group/{topic}":{},"/comm/group/list":{}}}"#;
+    assert!(validate_openapi(overlapping).is_err());
+}

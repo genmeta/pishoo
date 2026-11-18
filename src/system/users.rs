@@ -1,7 +1,6 @@
 //! Import into a private staging profile, then durably publish a managed identity.
 use std::{io::Write, path::Path};
 
-use access_control::{ContactPatch, ContactStatus, Effect, Grantee, Method, NewContact, SubjectId};
 use dhttp_home::{DhttpHome, identity::IdentityProfile};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -58,53 +57,6 @@ pub(super) fn verify_chain(
         return Err(bad());
     }
     Ok(ski.owner_hash().as_str().as_bytes().to_vec())
-}
-
-async fn inherit_guardians(
-    db: &mut Connection,
-    profile: &IdentityProfile,
-    subject: &[u8],
-) -> Result<()> {
-    let guardians = db
-        .prepare("SELECT name,subject_id FROM administrator WHERE name<>?1 ORDER BY name")?
-        .query_map([profile.name()], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let access = super::super::server::access_for_system(
-        profile,
-        &SubjectId::new(subject).map_err(|_| Error::BadRequest("invalid owner hash".into()))?,
-    )
-    .await?;
-    for (name, subject) in guardians {
-        let now = chrono::Utc::now().timestamp();
-        access
-            .create_contact(NewContact {
-                name: name.clone(),
-                subject_id: SubjectId::new(subject).map_err(|_| Error::Denied)?,
-                class: "Guardian".into(),
-                description: "Device administrator".into(),
-                requested_access: Default::default(),
-                offers: Default::default(),
-                created_at: now,
-                updated_at: now,
-                expired_after: i64::MAX,
-            })
-            .await?;
-        access
-            .patch_contact(
-                &name,
-                ContactPatch::LocalUpdate {
-                    status: Some(ContactStatus::Active),
-                    alias: None,
-                },
-            )
-            .await?;
-        access
-            .set_policy(Method::Unspecified, "/", Effect::Allow, Grantee::One(name))
-            .await?;
-    }
-    Ok(())
 }
 
 pub(super) async fn create(
@@ -209,7 +161,6 @@ pub(super) async fn create(
         .map_err(|_| Error::BadRequest("invalid OCSP response".into()))?;
     write_private(&staged.ocsp_path(), &ocsp)?;
     crate::configure(&staged, Some("all"), true)?;
-    inherit_guardians(db, &staged, &subject).await?;
     let pending = home.join(".system/pending");
     private_directory(&pending)?;
     let pending_profile = profile(&DhttpHome::new(pending.clone()), &name);

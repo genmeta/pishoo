@@ -274,7 +274,15 @@ impl Sandbox {
                     };
                     let version = lib.openapi.info.version.clone();
                     if request.uri().path().starts_with("/std/") {
-                        let methods = lib.openapi.paths.as_ref().unwrap()[&path]
+                        let methods = lib
+                            .openapi
+                            .paths
+                            .as_ref()
+                            .unwrap()
+                            .iter()
+                            .find(|(pattern, _)| crate::package::api_path_matches(pattern, &path))
+                            .ok_or(Error::RouteNotFound)?
+                            .1
                             .methods()
                             .into_iter()
                             .map(|(method, _)| method.as_str().to_owned())
@@ -443,11 +451,11 @@ pub(crate) fn select_library(
     for (id, lib) in candidates {
         let matches = if standard {
             crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
-                && lib
-                    .openapi
-                    .paths
-                    .as_ref()
-                    .is_some_and(|paths| paths.contains_key(standard_path))
+                && lib.openapi.paths.as_ref().is_some_and(|paths| {
+                    paths
+                        .keys()
+                        .any(|pattern| crate::package::api_path_matches(pattern, standard_path))
+                })
         } else {
             !crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
                 && tail
@@ -531,12 +539,11 @@ pub(crate) fn select_library(
         })?
     };
     let path = if standard {
-        if !lib
-            .openapi
-            .paths
-            .as_ref()
-            .is_some_and(|paths| paths.contains_key(standard_path))
-        {
+        if !lib.openapi.paths.as_ref().is_some_and(|paths| {
+            paths
+                .keys()
+                .any(|pattern| crate::package::api_path_matches(pattern, standard_path))
+        }) {
             return Err(Error::RouteNotFound);
         }
         standard_path.to_owned()

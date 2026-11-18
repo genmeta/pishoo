@@ -57,6 +57,98 @@ pub(crate) fn router(
         .route("/sys/{*path}", any(handler))
 }
 
+/// Project device authority into the existing permission catalog for administrators.
+pub(crate) fn permissions_router(
+    profile: dhttp_home::identity::IdentityProfile,
+    access: Arc<access_control::AccessService>,
+    database: Arc<Mutex<Connection>>,
+) -> Router {
+    use tower::ServiceExt;
+
+    let catalog = crate::routes::capabilities_router(profile).layer(
+        axum::middleware::from_fn_with_state(access, crate::routes::authorize),
+    );
+    Router::new().route(
+        "/std/acl/permissions",
+        any(move |request: Request<Body>| {
+            let (catalog, database) = (catalog.clone(), database.clone());
+            async move {
+                let result: Result<Response> = async {
+                    if request.method() != Method::GET {
+                        return Ok(catalog
+                            .oneshot(request)
+                            .await
+                            .expect("Router is infallible"));
+                    }
+                    let details =
+                        form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes())
+                            .any(|(key, value)| key == "details" && value == "1");
+                    let endpoint = request
+                        .extensions()
+                        .get::<dhttp::Endpoint>()
+                        .ok_or(Error::MissingHandshake)?;
+                    let (target, visitor) = caller(&request, endpoint)?;
+                    let response = catalog
+                        .oneshot(request)
+                        .await
+                        .expect("Router is infallible");
+                    if !response.status().is_success() {
+                        return Ok(response);
+                    }
+                    let Some(visitor) = visitor else {
+                        return Ok(response);
+                    };
+                    let group = {
+                        let db = database.lock().await;
+                        if !storage::administrator(&db, &target)?
+                            || !storage::administrator(&db, &visitor)?
+                        {
+                            return Ok(response);
+                        }
+                        let endpoints = json!({
+                            "/sys/version": ["GET"],
+                            "/sys/info": ["GET"],
+                            "/sys/admin": ["GET", "POST", "DELETE"],
+                            "/sys/user": ["GET", "POST", "DELETE"],
+                            "/sys/reload": ["POST"],
+                            "/sys/restart": ["POST"]
+                        });
+                        if details {
+                            let members = db
+                                .prepare("SELECT name FROM administrator ORDER BY name")?
+                                .query_map([], |row| row.get::<_, String>(0))?
+                                .collect::<std::result::Result<Vec<_>, _>>()?;
+                            json!({"title":{"en":"System administration","zh-CN":"系统管理"},
+                            "endpoints":endpoints,"management":"administrator","members":members})
+                        } else {
+                            endpoints
+                        }
+                    };
+                    let (mut parts, body) = response.into_parts();
+                    let bytes = axum::body::to_bytes(body, usize::MAX)
+                        .await
+                        .map_err(|error| Error::InvalidConfig(error.to_string()))?;
+                    let mut value: Value = serde_json::from_slice(&bytes)
+                        .map_err(|error| Error::InvalidConfig(error.to_string()))?;
+                    value
+                        .as_object_mut()
+                        .ok_or_else(|| Error::InvalidConfig("invalid permission catalog".into()))?
+                        .insert("pishoo · 系统管理 / System administration".into(), group);
+                    parts.headers.remove(header::CONTENT_LENGTH);
+                    Ok(Response::from_parts(parts, Body::from(value.to_string())))
+                }
+                .await;
+                let mut response = result
+                    .unwrap_or_else(|error| (error.status(), error.to_string()).into_response());
+                response
+                    .headers_mut()
+                    .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+                response
+            }
+        }),
+    )
+}
+
 pub(crate) async fn register_host(
     database: &Arc<Mutex<Connection>>,
     profile: &dhttp_home::identity::IdentityProfile,
@@ -140,13 +232,7 @@ async fn handle(
     let path = request.uri().path().to_owned();
     let builtin = matches!(
         path.as_str(),
-        "/sys"
-            | "/sys/version"
-            | "/sys/info"
-            | "/sys/admin"
-            | "/sys/user"
-            | "/sys/reload"
-            | "/sys/restart"
+        "/sys/version" | "/sys/info" | "/sys/admin" | "/sys/user" | "/sys/reload" | "/sys/restart"
     );
     if !builtin {
         return Err(Error::RouteNotFound);
@@ -177,12 +263,6 @@ async fn handle(
         serde_json::from_slice(&bytes).map_err(|_| Error::BadRequest("invalid JSON".into()))?
     };
     let value = match path.as_str() {
-        "/sys" => {
-            if method != Method::GET {
-                return Ok(allow("GET"));
-            }
-            json!({"version":env!("CARGO_PKG_VERSION"),"identity":target.name()})
-        }
         "/sys/version" => {
             if method != Method::GET {
                 return Ok(allow("GET"));

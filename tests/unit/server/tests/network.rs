@@ -1078,14 +1078,14 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     assert!(server.sandbox.read().unwrap().libs.is_empty());
     assert!(!server.profile.join("lib/note.wasm").exists());
     assert!(server.profile.join(".volume/note").is_dir());
-    // Even an explicit daccess allow cannot make another TLS identity the profile owner.
+    // An explicit ACL allows a different verified TLS identity to manage the profile.
     server
         .access
         .set_policy(
             access_control::Method::Unspecified,
             "/std/sys",
             access_control::Effect::Allow,
-            access_control::Grantee::All,
+            access_control::Grantee::Named,
         )
         .await
         .unwrap();
@@ -1099,7 +1099,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         .await
         .unwrap();
     assert_eq!(response.version(), http::Version::HTTP_3);
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::OK);
     let response = alice
         .get(
             format!("https://{}/std/sys/pkg/list", server.name())
@@ -1108,7 +1108,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::OK);
 
     let response = dhttp::Anonymous
         .get(

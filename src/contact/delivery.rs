@@ -14,7 +14,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::{
     Failure,
-    access::{contact, encoded, local_api, record_outbound},
+    access::{contact, record_outbound},
     fail, now,
     storage::{expire_requests, storage},
     string,
@@ -121,14 +121,6 @@ pub(super) async fn remote(
     Ok(response)
 }
 
-#[derive(Clone)]
-struct PendingReview {
-    id: i64,
-    subject: String,
-    method: String,
-    path: String,
-}
-
 fn pending_review(code: u16, body: &Value) -> Result<Option<i64>, Failure> {
     if !((code == 202 && body["status"] == "pending_review")
         || (code == 400 && body["error"] == "need_review"))
@@ -161,197 +153,166 @@ fn review_progress(code: u16, body: &Value) -> Result<bool, Failure> {
     }
 }
 
-fn operation_snapshot(snapshot: Option<&str>, capabilities: &str) -> Result<Value, Failure> {
-    if let Some(snapshot) = snapshot {
-        let value: Value = serde_json::from_str(snapshot)
-            .map_err(|_| fail(500, "invalid stored operation snapshot"))?;
-        if !value.is_object() {
-            return Err(fail(500, "invalid stored operation snapshot"));
-        }
-        return Ok(value);
-    }
-    let groups: Vec<String> =
-        serde_json::from_str(capabilities).map_err(|_| fail(500, "invalid stored capabilities"))?;
-    if !groups.is_empty() {
-        return Err(fail(
-            400,
-            "legacy contact request has no operation snapshot; submit a new request",
-        ));
-    }
-    Ok(json!({}))
-}
-
 struct DeliveryJob {
-    id: i64,
     target: String,
     application_id: String,
     description: String,
-    requested_caps: String,
-    offered_caps: String,
-    status: String,
+    requested: Value,
+    offered: Value,
+    state: String,
     contact_id: Option<i64>,
-    contact_subject: Option<String>,
-    requested_access: Option<String>,
-    offered_access: Option<String>,
-    started_at: i64,
-    review: Option<PendingReview>,
+    subject: Option<String>,
+    created_at: i64,
+    review: Option<i64>,
 }
 
 pub(crate) async fn contact_jobs(
-    _profile: &IdentityProfile,
+    profile: &IdentityProfile,
     endpoint: &dhttp::Endpoint,
     access: &Arc<AccessService>,
     db: &Arc<Mutex<Connection>>,
 ) -> crate::Result<()> {
-    let result = deliver(endpoint, access, db).await;
-    result.map_err(|(_, message)| crate::Error::InvalidConfig(message))
+    deliver(profile, endpoint, access, db)
+        .await
+        .map_err(|(_, message)| crate::Error::InvalidConfig(message))
 }
+
 async fn deliver(
+    profile: &IdentityProfile,
     endpoint: &dhttp::Endpoint,
     access: &Arc<AccessService>,
     db: &Arc<Mutex<Connection>>,
 ) -> Result<(), Failure> {
     let job_db = db.clone();
-    let (job, lease) = tokio::task::spawn_blocking(move || {
-        let mut db = job_db.lock().map_err(|_| fail(500, "contact database lock poisoned"))?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+    let (job,lease)=tokio::task::spawn_blocking(move||{
+        let mut db=job_db.lock().map_err(|_|fail(500,"contact database lock poisoned"))?;
+        let tx=db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
         expire_requests(&tx)?;
-        // An active receipt completes this application. Existing active rows
-        // are terminal too; no migration or perpetual relationship polling.
-        let job = tx.query_row(
-            "SELECT id,target_name,application_id,description,requested_capabilities,offered_capabilities,status,contact_id,contact_subject,requested_access,offers,created_at,review_id,review_subject,review_method,review_path \
-             FROM outbound_contact_request WHERE status IN ('queued','pending') AND next_attempt_at<=?1 AND expired_after>?1 \
-             AND (lease_until IS NULL OR lease_until<=?1) ORDER BY next_attempt_at,id LIMIT 1",
-            [now()],
-            |row| Ok(DeliveryJob {
-                id: row.get(0)?, target: row.get(1)?, application_id: row.get(2)?, description: row.get(3)?,
-                requested_caps: row.get(4)?, offered_caps: row.get(5)?, status: row.get(6)?, contact_id: row.get(7)?,
-                contact_subject: row.get(8)?, requested_access: row.get(9)?, offered_access: row.get(10)?, started_at: row.get(11)?,
-                review: match row.get::<_,Option<i64>>(12)? {
-                    Some(id) => Some(PendingReview { id, subject:row.get(13)?, method:row.get(14)?, path:row.get(15)? }),
-                    None => None,
-                },
-            }),
-        ).optional().map_err(storage)?;
-        let lease = now() + 120;
-        if let Some(job) = &job {
-            tx.execute("UPDATE outbound_contact_request SET lease_until=?1 WHERE id=?2", params![lease, job.id]).map_err(storage)?;
+        let job=tx.query_row("SELECT target_name, application_id, description, json_extract(requested,'$.access'),
+            json_extract(offered,'$.access'), state,contact_id,target_subject,created_at,review_id
+            FROM outbound_contact_request WHERE state IN ('queued','pending') AND next_attempt_at<=?1
+            AND (lease_until IS NULL OR lease_until<=?1) ORDER BY next_attempt_at,target_name LIMIT 1",[now()],|r| {
+            let snapshot=|i|serde_json::from_str(&r.get::<_,String>(i)?).map_err(|e|rusqlite::Error::FromSqlConversionFailure(i,rusqlite::types::Type::Text,Box::new(e)));
+            Ok(DeliveryJob{target:r.get(0)?,application_id:r.get(1)?,description:r.get(2)?,requested:snapshot(3)?,offered:snapshot(4)?,
+                state:r.get(5)?,contact_id:r.get(6)?,subject:r.get(7)?,created_at:r.get(8)?,review:r.get(9)?})
+        }).optional().map_err(storage)?;
+        let lease=now()+120;
+        if let Some(job)=&job {
+            tx.execute("UPDATE outbound_contact_request SET lease_until=?1 WHERE application_id=?2",params![lease,job.application_id]).map_err(storage)?;
         }
         tx.commit().map_err(storage)?;
-        Ok::<_, Failure>((job, lease))
-    }).await.map_err(|e| fail(500, e.to_string()))??;
-    let Some(DeliveryJob {
-        id,
-        target,
-        application_id,
-        description,
-        requested_caps,
-        offered_caps,
-        status,
-        contact_id,
-        contact_subject,
-        requested_access,
-        offered_access,
-        started_at,
-        review,
-    }) = job
-    else {
-        return Ok(());
-    };
-    let mut next_review = review;
-    let outcome=async {
-        let (requests, offers) = if status == "queued" {
-            (operation_snapshot(requested_access.as_deref(), &requested_caps)?, operation_snapshot(offered_access.as_deref(), &offered_caps)?)
-        } else { (json!({}), json!({})) };
-        let existing=match contact(access,endpoint,&target).await {Ok(c)=>Some(c),Err((404,_))=>None,Err(e)=>return Err(e)};
-        if let Some(id) = contact_id
-            && existing.as_ref().is_none_or(|c| c["id"] != id || c["subject_id"].as_str() != contact_subject.as_deref()
-                || matches!(c["status"].as_str(), Some("blocked" | "expired"))) {
-                return Err(fail(410, "local contact was removed, replaced or blocked"));
-            }
-        let expected=existing.as_ref().and_then(|c|c["subject_id"].as_str());
-        let (method,path,body)=if status=="queued" {
-            (Method::POST,"/std/contact".to_owned(),Some(json!({"from":endpoint.name(),"to":target,"application_id":application_id,"description":description,"class":"Human","requested_access":requests,"offers":offers})))
-        } else {(Method::GET,format!("/std/contact?name={}",encoded(endpoint.name())),None)};
-        let reviewed_subject = next_review.as_ref().map(|review| review.subject.clone());
-        if let Some(review) = &next_review {
-            if review.method != method.as_str() || review.path != path
-                || expected.is_some_and(|sid| sid != review.subject) {
-                return Err(fail(409, "review target or operation changed"));
-            }
-            let (code, result, _) = remote_response(endpoint, &target, Method::GET,
-                &format!("/std/acl/status?id={}",review.id), None, Some(&review.subject)).await?;
-            if !review_progress(code, &result)? { return Err(fail(400,"need_review")); }
+        Ok::<_,Failure>((job,lease))
+    }).await.map_err(|e|fail(500,e.to_string()))??;
+    let Some(job) = job else { return Ok(()) };
+    let mut review = job.review;
+    let mut subject = job.subject.clone();
+    let result=async {
+        let existing=match contact(access,endpoint,&job.target).await {
+            Ok(c)=>Some(c),Err((404,_))=>None,Err(e)=>return Err(e)
+        };
+        if existing.as_ref().is_some_and(|c|subject.as_deref().is_some_and(|s|c["subject_id"]!=s)
+            || matches!(c["status"].as_str(),Some("blocked"|"expired")))
+            || job.contact_id.is_some_and(|id|existing.as_ref().is_none_or(|c|c["id"]!=id)) {
+            return Err(fail(409,"local contact removed, replaced or blocked"));
         }
-        let pinned = reviewed_subject.as_deref().or(expected);
-        let (code,mut receipt,sid)=remote_response(endpoint,&target,method.clone(),&path,body.as_ref(),pinned).await?;
-        if let Some(review_id) = pending_review(code, &receipt)? {
-            next_review = Some(PendingReview {id:review_id,subject:sid,method:method.to_string(),path});
-            return Err(fail(400,"need_review"));
+        let expected=subject.as_deref().or_else(||existing.as_ref().and_then(|c|c["subject_id"].as_str()));
+        if let Some(id)=review {
+            let (code,doc,_)=remote_response(endpoint,&job.target,Method::GET,&format!("/std/acl/status?id={id}"),None,expected).await?;
+            if !review_progress(code,&doc)? {return Err(fail(202,"need_review"));}
         }
-        if !matches!(code,200|201) {return Err(fail(code,"remote contact operation rejected"));}
-        next_review = None;
-        if status != "queued" {
-            let visitor=super::access::owner(endpoint)?;
-            if receipt["name"]!=endpoint.name() || receipt["subject_id"].as_str()!=std::str::from_utf8(visitor.subject_id().as_bytes()).ok() {
-                return Err(fail(502,"remote contact state belongs to a different subject"));
-            }
-            receipt["application_id"]=application_id.clone().into();
-            receipt["name"]=target.clone().into();
-            receipt["subject_id"]=sid.clone().into();
-            if receipt["status"]=="blocked" {receipt["status"]="revoked".into();}
-            if receipt["status"]=="transfered" {receipt["status"]="pending".into();}
+        let (method,path,body)=if job.state=="queued" {
+            (Method::POST,"/std/contact".into(),Some(json!({"from":endpoint.name(),"to":job.target,"application_id":job.application_id,"description":job.description,"class":"Human","requested_access":job.requested,"offers":job.offered})))
+        } else {
+            (Method::GET,format!("/std/contact?application_id={}",job.application_id),None)
+        };
+        let (status,receipt,sid)=remote_response(endpoint,&job.target,method,&path,body.as_ref(),expected).await?;
+        if let Some(id)=pending_review(status,&receipt)? {
+            review=Some(id);
+            subject=Some(sid);
+            return Err(fail(202,"need_review"));
         }
-        if receipt["application_id"]!=application_id || receipt["name"]!=target || receipt["subject_id"]!=sid {return Err(fail(502,"contact receipt identity does not match authenticated peer"));}
-        if contact_id.is_none() && existing.is_none() && matches!(receipt["status"].as_str(), Some("pending" | "active")) {
-            let valid_before = receipt["valid_before"].as_i64().filter(|expiry| *expiry > now()).unwrap_or_else(|| now() + 7 * 86400);
-            record_outbound(access, &target, &sid, requests, offers, valid_before, started_at).await?;
+        if !matches!(status,200|201){return Err(fail(status,"remote contact operation rejected"));}
+        if receipt["application_id"]!=job.application_id || receipt["name"]!=job.target || receipt["subject_id"]!=sid {
+            return Err(fail(409,"receipt does not match authenticated application"));
         }
-        let current = contact(access, endpoint, &target).await?;
-        if let Some(id) = contact_id
-            && (current["id"] != id || current["subject_id"].as_str() != contact_subject.as_deref()) {
-                return Err(fail(410, "local contact changed during delivery"));
-            }
-        let binding_db = db.clone();
-        let local_id = current["id"].as_i64().ok_or_else(|| fail(502, "missing contact ID"))?;
-        let local_subject = string(&current, "subject_id")?.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let db = binding_db.lock().map_err(|_| fail(500, "contact database lock poisoned"))?;
-            db.execute("UPDATE outbound_contact_request SET contact_id=?1,contact_subject=?2 WHERE id=?3 AND lease_until=?4 AND contact_id IS NULL",params![local_id,local_subject,id,lease]).map_err(storage)?;
-            Ok::<_, Failure>(())
-        }).await.map_err(|e| fail(500, e.to_string()))??;
-        if receipt["status"]=="active" {
-            let c=match contact(access,endpoint,&target).await {
-                Ok(c)=>c,
-                Err((404,_))=> return Err(fail(410,"local contact was removed")),
-                Err(e)=>return Err(e),
-            };
-            if c["subject_id"]!=sid || matches!(c["status"].as_str(),Some("blocked"|"expired")) {return Err(fail(409,"local contact blocks reconciliation"));}
-            if matches!(c["status"].as_str(),Some("pending"|"transfered")) {local_api(access,endpoint,Method::PATCH,&format!("/std/contact?name={}",encoded(&target)),Some(&json!({"status":"active"}))).await?;}
-        }
-        if receipt["status"]=="pending" && receipt["valid_before"].as_i64().is_none_or(|expires|expires<=now()) {return Err(fail(410,"remote contact request expired"));}
+        let remote_deadline=receipt["valid_before"].as_i64().ok_or_else(||fail(400,"missing receipt deadline"))?;
         let state=string(&receipt,"status")?;
-        if !matches!(state,"pending"|"active"|"denied"|"expired"|"revoked") {return Err(fail(502,"unknown contact status"));}
-        if receipt["valid_before"].as_i64().is_none() {return Err(fail(502,"missing contact expiry"));}
-        Ok(receipt)
-    }.await;
-    let db = db.clone();
-    tokio::task::spawn_blocking(move|| {
-        let mut db=db.lock().map_err(|_|fail(500,"contact database lock poisoned"))?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
-        let db = &tx;
-        db.execute("UPDATE outbound_contact_request SET review_id=?1,review_subject=?2,review_method=?3,review_path=?4 WHERE id=?5 AND lease_until=?6",
-            params![next_review.as_ref().map(|r|r.id), next_review.as_ref().map(|r|r.subject.as_str()), next_review.as_ref().map(|r|r.method.as_str()), next_review.as_ref().map(|r|r.path.as_str()), id,lease]).map_err(storage)?;
-        match outcome {
-            Ok(receipt)=> {
-                db.execute("UPDATE outbound_contact_request SET status=?1,remote_expired_after=?2,expired_after=CASE WHEN ?1='pending' THEN min(delivery_deadline,?2) ELSE expired_after END,last_checked_at=?3,next_attempt_at=?4,attempt_count=attempt_count+1,error_message=NULL,lease_until=NULL,updated_at=?3 WHERE id=?5 AND lease_until=?6",params![string(&receipt,"status")?,receipt["valid_before"].as_i64().unwrap(),now(),now()+if receipt["status"]=="pending" {3}else{0},id,lease]).map_err(storage)?;
+        if !matches!(state,"pending"|"active"|"expired"|"denied"|"revoked"){return Err(fail(400,"invalid application state"));}
+        review=None;
+        subject=Some(sid.clone());
+        // Serialize local changes after network I/O. Dropping this connection rolls back an unfinished transaction.
+        let locked=super::database(profile)?;
+        locked.execute_batch("BEGIN IMMEDIATE").map_err(storage)?;
+        let local_deadline:Option<i64>=locked.query_row("SELECT local_deadline FROM outbound_contact_request
+            WHERE target_name=?1 AND application_id=?2 AND state=?3 AND lease_until=?4 AND lease_until>?5",
+            params![job.target,job.application_id,job.state,lease,now()],|r|r.get(0)).optional().map_err(storage)?;
+        let Some(deadline)=local_deadline else{return Ok(())};
+        if deadline.min(remote_deadline)<=now(){return Err(fail(410,"contact request expired"));}
+        let mut id=job.contact_id;
+        if matches!(state,"pending"|"active"){
+            if id.is_none(){
+                let previous=match contact(access,endpoint,&job.target).await {Ok(c)=>Some(c),Err((404,_))=>None,Err(e)=>return Err(e)};
+                record_outbound(access,&job.target,&sid,job.requested.clone(),job.offered.clone(),deadline.min(remote_deadline),job.created_at).await?;
+                if !job.offered.as_object().is_some_and(|o|o.is_empty()){
+                    if let Some(previous)=previous {
+                        if previous["created_at"]!=job.created_at || previous["offers"]!=job.offered {
+                            return Err(fail(409,"contact generation changed during offer"));
+                        }
+                        let rules=super::access::local_api(access,endpoint,Method::GET,"/std/acl/allow",None).await?;
+                        for (path,ops) in job.offered.as_object().unwrap(){
+                            let granted=rules[&job.target][path]["allow"].as_array();
+                            if ops["allow"].as_array().is_none_or(|methods|methods.iter().any(|m|granted.is_none_or(|a|!a.contains(m)))) {
+                                return Err(fail(409,"offered permission was changed; submit a new request"));
+                            }
+                        }
+                    }else{
+                        super::access::apply_offered(access,endpoint,&job.target,&sid,&job.offered).await?;
+                    }
+                }
             }
-            Err((code,error))=> {
-                db.execute("UPDATE outbound_contact_request SET status=CASE WHEN ?1 THEN 'failed' ELSE status END,attempt_count=attempt_count+CASE WHEN ?2='need_review' THEN 0 ELSE 1 END,error_message=?2,next_attempt_at=?3,lease_until=NULL,last_checked_at=?4,updated_at=?4 WHERE id=?5 AND lease_until=?6",params![error != "need_review" && matches!(code,400|403|404|409|410),error,now()+if error == "need_review" {30} else {5},now(),id,lease]).map_err(storage)?;
+            let current=contact(access,endpoint,&job.target).await?;
+            if current["subject_id"]!=sid || id.is_some_and(|i|current["id"]!=i) || matches!(current["status"].as_str(),Some("expired"|"blocked")){
+                return Err(fail(409,"contact generation changed"));
             }
+            id=Some(current["id"].as_i64().ok_or_else(||fail(502,"missing contact generation"))?);
         }
-        tx.commit().map_err(storage)
-    }).await.map_err(|e|fail(500,e.to_string()))?
+        if state=="active" {
+            let owner=super::access::owner(endpoint)?;
+            let headers=access_control::Headers{method:Method::PATCH,path:"/std/contact".into(),fields:http::HeaderMap::new()};
+            if !matches!(access.auth(headers,Some(owner.name()),Some(owner.subject_id())).await.map_err(|e|fail(500,e.to_string()))?,access_control::AuthResult::Allowed) {
+                return Err(fail(403,"contact activation denied by ACL"));
+            }
+            use sea_orm::{ConnectionTrait,DatabaseBackend,Statement};
+            // Guard the daccess write itself against concurrent deletion, blocking or replacement.
+            let updated=access.database().execute_raw(Statement::from_sql_and_values(DatabaseBackend::Sqlite,
+                "UPDATE contacts SET status=2,updated_at=? WHERE id=? AND name=? AND subject_id=? AND status IN (0,2,3) AND expired_after>?",
+                [now().into(),id.into(),job.target.as_str().into(),sid.as_bytes().to_vec().into(),now().into()]
+            )).await.map_err(|e|fail(500,e.to_string()))?;
+            if updated.rows_affected()!=1{return Err(fail(409,"contact generation changed"));}
+            locked.execute("DELETE FROM outbound_contact_request WHERE application_id=?1 AND lease_until=?2",params![job.application_id,lease]).map_err(storage)?;
+        }else{
+            locked.execute("UPDATE outbound_contact_request SET state=?1,remote_deadline=?2,contact_id=?3,target_subject=?4,
+                review_id=NULL,lease_until=NULL,last_error=?5,next_attempt_at=?6,updated_at=?7 WHERE application_id=?8 AND lease_until=?9",
+                params![if state=="revoked"{"failed"}else{state},remote_deadline,id,sid,(state=="revoked").then_some("remote application revoked"),now()+3,now(),job.application_id,lease]).map_err(storage)?;
+        }
+        locked.execute_batch("COMMIT").map_err(storage)?;
+        Ok(())
+    }.await;
+    if let Err((code, error)) = result {
+        let state = match (code, error.as_str()) {
+            (_, "review_denied") => "denied",
+            (410, _) => "expired",
+            (400 | 403 | 404 | 409, _) => "failed",
+            _ => job.state.as_str(),
+        };
+        let conn = db
+            .lock()
+            .map_err(|_| fail(500, "contact database lock poisoned"))?;
+        conn.execute("UPDATE outbound_contact_request SET state=?1,review_id=?2,target_subject=coalesce(target_subject,?3),last_error=?4,
+            next_attempt_at=?5,updated_at=?6,lease_until=NULL WHERE application_id=?7 AND lease_until=?8 AND state=?9",
+            params![state,review,subject,error,now()+if review.is_some(){30}else{5},now(),job.application_id,lease,job.state]).map_err(storage)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
