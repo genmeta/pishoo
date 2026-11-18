@@ -1,7 +1,9 @@
-use super::*;
-use http::StatusCode;
 use std::os::unix::fs::MetadataExt;
+
+use http::StatusCode;
 use tower::ServiceExt;
+
+use super::*;
 
 fn library(sandbox: &Sandbox, directory: &Path, id: &str, version: &str) -> Arc<Lib> {
     let mut lib = super::api::load(sandbox, directory, r#"{"/comm/message":{"post":{}}}"#);

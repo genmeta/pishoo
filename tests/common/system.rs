@@ -1,5 +1,6 @@
 //! Fixtures shared by device administration regression tests.
-use super::super::{open, storage};
+use std::{path::Path, sync::Arc};
+
 use access_control::{SubjectId, Visitor};
 use axum::body::Body;
 use base64::Engine;
@@ -7,8 +8,9 @@ use dhttp_home::DhttpHome;
 use http::{Method, Request};
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc};
 use tokio::sync::Mutex;
+
+use super::super::{open, storage};
 
 pub(super) fn visitor(name: &str, owner: u8) -> Visitor {
     Visitor::new(

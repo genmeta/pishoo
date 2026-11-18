@@ -597,7 +597,11 @@ async fn verify_message_delivery(large_image: bool, cancel_early: bool) {
                 "fast.dhttp.net"
             };
             db.execute("INSERT INTO chat_messages(id,contact_name,client_message_id,direction,state,sender_name,recipient_name,text,sender_subject,recipient_subject,created_at,updated_at) VALUES(?1,?2,?1,'outgoing','queued','alice.dhttp.net',?2,?5,?3,?4,1,1)",rusqlite::params![id,target,local_hash,peers[target],"你".repeat(4000)]).unwrap();
-            db.execute("UPDATE chat_messages SET delivery_target=?2,next_attempt_at=1 WHERE id=?1",rusqlite::params![id,target]).unwrap();
+            db.execute(
+                "UPDATE chat_messages SET delivery_target=?2,next_attempt_at=1 WHERE id=?1",
+                rusqlite::params![id, target],
+            )
+            .unwrap();
             if large_image {
                 let mut image = vec![0; 512 * 1024];
                 image[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
@@ -826,7 +830,11 @@ async fn verify_message_delivery(large_image: bool, cancel_early: bool) {
     );
     // New queue work remains untouched after the last connection closes.
     db.execute("INSERT INTO chat_messages(id,contact_name,client_message_id,direction,state,sender_name,recipient_name,text,sender_subject,recipient_subject,created_at,updated_at) VALUES(100,'fast.dhttp.net','resume','outgoing','queued','alice.dhttp.net','fast.dhttp.net','after closing',?1,?2,1,1)",rusqlite::params![local_hash,peers["fast.dhttp.net"]]).unwrap();
-    db.execute("UPDATE chat_messages SET delivery_target=recipient_name,next_attempt_at=1 WHERE id=100",[]).unwrap();
+    db.execute(
+        "UPDATE chat_messages SET delivery_target=recipient_name,next_attempt_at=1 WHERE id=100",
+        [],
+    )
+    .unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(received.try_recv().is_err());
     assert_eq!(
