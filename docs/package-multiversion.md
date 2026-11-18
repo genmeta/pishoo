@@ -537,3 +537,49 @@ Workspace 的包管理页提供版本列表、依赖者、切换活动版本和�
 启动读取每个精确版本的 WASM，并核对其 OpenAPI 版本与安装登记一致。构建调用图发生错误时保留当前完整运行集合。业务 volume 的挂载按完整包名解析。
 
 正式请求在预览期间读取归属记录中保留的正式资源。watcher 在身份目录锁内核对上次发布的文件身份，资源被接管后报告 `E_DEV_REPLACED`，由显式新建的 `jade run` 启动新预览。
+
+## Package-name transition and atomic updates (2026-11-18)
+
+Temporary compatibility is isolated in `src/package/renames.rs`. Only the exact
+`dev.genmeta.tech.dhttp.net` author is eligible; `std.dhttp.net` is excluded.
+The explicit mappings are profile → std/profile, message or comm/message →
+std/comm/message, comm/group → std/comm/group, calendar → std/calendar,
+medical → std/medical, command → std/command, and python → std/python.
+There is no generic prefix stripping or cross-author transfer.
+
+The installation endpoint additionally accepts a batch of roots:
+
+```json
+{"packages":[{"author":"dev.genmeta.tech.dhttp.net","name":"workspace","version":"0.3.13"},{"author":"dev.genmeta.tech.dhttp.net","name":"std/calendar","version":"0.1.5"}]}
+```
+
+`POST /std/sys/pkg/install` accepts 1–100 distinct roots within a 64 KiB JSON
+body. The complete exact dependency closure remains bounded to 100 releases.
+It returns `{"packages":[...]}` in root request order. Every explicitly requested
+root becomes active, and all downloads, signatures, owner checks, compilation,
+route checks and dependency validation precede the existing atomic publication.
+Single-root requests retain their existing response and cached activation path.
+Example versions are illustrative and must be checked before publication.
+
+A renamed package retires all installed predecessor versions only after owner
+continuity is verified. Historical dependent releases are retired together;
+an active or explicitly installed dependent must be replaced in the same batch,
+otherwise `package_in_use` reports the package that also needs updating. Exact
+signed dependencies are never rewritten to satisfy a rename. Retired runtime
+calls are cancelled only after commit. Original signed WAZ caches are retained.
+
+Program replacement and the Message volume move share the existing recovery
+journal. Compilation opens the old volume handle; publication moves the
+`std/message` directory to `std/comm/message`, retaining the inode, database,
+attachments and native file index. Failed compilation does not move data;
+failed commit and interrupted publication restore the old location. If both
+directories exist, installation fails for explicit reconciliation. Other
+standard package renames already use the same volume directory. ACL rules are
+not broadened, and moved App entry paths must be reviewed when sharing access.
+Business database migrations remain the responsibility of their package;
+package transaction rollback does not roll back later business writes.
+
+After the transition window, remove the isolated rename module and its call
+sites in package acquisition/installation/publication recovery. Finish pending
+publication recovery before removing compatibility. Generic batch installation
+remains supported; no alias table or schema migration needs removing.

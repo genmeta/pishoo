@@ -468,6 +468,14 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
         json!({}),
         json!(null),
         json!([]),
+        json!({"packages":[]}),
+        json!({"packages":null}),
+        json!({"packages":[{"name":"note"}]}),
+        json!({"packages":[{"name":"note","version":"1.0.0","author":7}]}),
+        json!({"packages":[{"name":"alice.dhttp.net/note","version":"1.0.0"}]}),
+        json!({"packages":[{"author":"alice.dhttp.net","name":"note","version":"1.0.0"},{"author":"alice.dhttp.net","name":"note","version":"2.0.0"}]}),
+        json!({"packages":[{"author":"dev.genmeta.tech.dhttp.net","name":"profile","version":"1.0.0"},{"author":"dev.genmeta.tech.dhttp.net","name":"std/profile","version":"2.0.0"}]}),
+        json!({"packages":vec![json!({"name":"note","version":"1.0.0"});101]}),
         json!({"kind":"lib","publisher":"alice.dhttp.net","name":"note","version":"1.0.0"}),
         json!({"kind":"invalid","author":"alice.dhttp.net","name":"note","version":"1.0.0"}),
         json!({"kind":"lib","author":1,"name":"note","version":"1.0.0"}),
@@ -564,7 +572,7 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
             .oneshot(request(
                 Method::POST,
                 "/std/sys/pkg/install",
-                AxumBody::from(" ".repeat(4097))
+                AxumBody::from(" ".repeat(64 * 1024 + 1))
             ))
             .await
             .unwrap()

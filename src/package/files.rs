@@ -1623,15 +1623,20 @@ ORDER BY p.name,p.version
             cache_release(profile, bytes, metadata["package_sha256"].as_str().unwrap())?;
             continue;
         }
-        // All route checks see the old, consistent installation. No files
-        // or registrations have been switched while examining another package.
-        // Path-based ACLs are independent of the installed provider.
+        changed.push((id, bytes, package, metadata));
+    }
+    // Temporary rename compatibility retires verified same-owner predecessors
+    // inside this transaction, before the ordinary route/dependency checks.
+    let (retired, renamed_roots, renamed_active) = super::renames::retire(&tx, packages)?;
+    for (id, _) in &retired {
+        refresh_capabilities(&tx, package_name(id))?;
+    }
+    for (id, _, package, metadata) in &changed {
         for kind in ["lib", "app"] {
             if metadata[format!("has_{kind}")] == true {
-                check_routes(profile, &tx, id, kind, &package)?;
+                check_routes(profile, &tx, id, kind, package)?;
             }
         }
-        changed.push((id, bytes, package, metadata));
     }
     let mut providers = std::collections::BTreeMap::<String, &str>::new();
     for (id, _, package, metadata) in &changed {
@@ -1656,22 +1661,26 @@ ORDER BY p.name,p.version
     for (id, _, package, metadata) in &changed {
         save_package_relations(&tx, id, metadata, package)?;
     }
-    let (root_id, _, root_proof) = packages.last().ok_or_else(expanded_error)?;
-    let root_version = root_proof["version"].as_str().ok_or_else(expanded_error)?;
-    tx.execute(
-        r#"
-INSERT INTO pkg_registry.package_active(name,version) VALUES(?1,?2) ON CONFLICT(name) DO UPDATE
-SET version=excluded.version
-"#,
-        rusqlite::params![package_name(root_id), root_version],
-    )?;
-    tx.execute(
-        r#"
-INSERT INTO pkg_registry.package_root(name,version) VALUES(?1,?2) ON CONFLICT(name) DO UPDATE
-SET version=excluded.version
-"#,
-        rusqlite::params![package_name(root_id), root_version],
-    )?;
+    for id in &renamed_roots {
+        let version = packages.iter().find(|(key, _, _)| key == id).unwrap().2["version"]
+            .as_str()
+            .unwrap();
+        tx.execute("INSERT INTO pkg_registry.package_root(name,version) VALUES(?1,?2) ON CONFLICT(name) DO UPDATE SET version=excluded.version", rusqlite::params![package_name(id),version])?;
+    }
+    for id in &renamed_active {
+        let version = packages.iter().find(|(key, _, _)| key == id).unwrap().2["version"]
+            .as_str()
+            .unwrap();
+        tx.execute("INSERT INTO pkg_registry.package_active(name,version) VALUES(?1,?2) ON CONFLICT(name) DO UPDATE SET version=excluded.version", rusqlite::params![package_name(id),version])?;
+    }
+    for (index, (root_id, _, root_proof)) in packages.iter().enumerate() {
+        if root_proof["_requested"] != true && index + 1 != packages.len() {
+            continue;
+        }
+        let root_version = root_proof["version"].as_str().ok_or_else(expanded_error)?;
+        tx.execute("INSERT INTO pkg_registry.package_active(name,version) VALUES(?1,?2) ON CONFLICT(name) DO UPDATE SET version=excluded.version", rusqlite::params![package_name(root_id),root_version])?;
+        tx.execute("INSERT INTO pkg_registry.package_root(name,version) VALUES(?1,?2) ON CONFLICT(name) DO UPDATE SET version=excluded.version", rusqlite::params![package_name(root_id),root_version])?;
+    }
     for (id, _, _, _) in &changed {
         refresh_capabilities(&tx, package_name(id))?;
     }
@@ -1717,15 +1726,7 @@ SET version=excluded.version
             };
             if kind == "lib" {
                 let wasm = read_runtime_wasm(payload)?;
-                let data = profile.join(".volume").join(
-                    if crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
-                        && !package_name(id).starts_with("std/")
-                    {
-                        format!("std/{}", resource_name(id))
-                    } else {
-                        resource_name(id)
-                    },
-                );
+                let data = super::renames::data_path(profile, id)?;
                 let mut lib = crate::sandbox::Lib::load(
                     sandbox.runtime.clone(),
                     (*id).clone(),
@@ -1797,9 +1798,33 @@ SET version=excluded.version
             )
         })
         .collect::<Vec<_>>();
+    let mut retired_stages = Vec::new();
+    for (id, version) in &retired {
+        if changed
+            .iter()
+            .any(|(new, _, _, meta)| *new == id && meta["version"] == *version)
+        {
+            continue;
+        }
+        let directory = format!("retired-{}", retired_stages.len());
+        mkdirat(&stage, directory.as_str(), Mode::from_raw_mode(0o700)).map_err(layout_error)?;
+        retired_stages.push((
+            id,
+            version,
+            directory.clone(),
+            child_dir(&stage, std::ffi::OsStr::new(&directory))?,
+        ));
+    }
     let entries = entry_names
         .iter()
         .map(|(id, version, directory, stage)| (*id, *version, directory.as_str(), *stage))
+        .chain(
+            retired_stages
+                .iter()
+                .map(|(id, version, directory, stage)| {
+                    (id.as_str(), version.as_str(), directory.as_str(), stage)
+                }),
+        )
         .collect::<Vec<_>>();
     let mut active_libs = std::collections::HashMap::new();
     let mut active_apps = std::collections::HashMap::new();
@@ -1847,6 +1872,11 @@ SET version=excluded.version
     }
     scopeguard::ScopeGuard::into_inner(cleanup);
     commit_packages_files(profile, &entries, &previous, &parent, &stage, &name, tx)?;
+    for key in &retired {
+        if let Some(old) = sandbox.versions.remove(key) {
+            old.stream_retired.cancel();
+        }
+    }
     for (key, lib) in libs {
         if let Some(old) = sandbox.versions.insert(key, lib) {
             old.stream_retired.cancel();
@@ -2020,7 +2050,7 @@ fn publication_resource(
             let file_type = rustix::fs::FileType::from_raw_mode(stat.st_mode);
             let valid = match kind {
                 "lib" => file_type == rustix::fs::FileType::RegularFile && stat.st_nlink == 1,
-                "app" => file_type == rustix::fs::FileType::Directory,
+                "app" | "volume" => file_type == rustix::fs::FileType::Directory,
                 "app_link" => matches!(
                     file_type,
                     rustix::fs::FileType::Symlink | rustix::fs::FileType::Directory
@@ -2045,7 +2075,15 @@ fn publication_resource(
 }
 
 fn publication_root(parent: &std::fs::File, id: &str, kind: &str) -> Result<std::fs::File> {
-    let root = resource_directory(parent, if kind == "lib" { "lib" } else { "app" }, true)?;
+    let root = resource_directory(
+        parent,
+        match kind {
+            "lib" => "lib",
+            "volume" => ".volume",
+            _ => "app",
+        },
+        true,
+    )?;
     if kind == "lib" {
         resource_parent(&root, id, true)
     } else {
@@ -2122,6 +2160,22 @@ fn commit_packages_files(
         let _ = cleanup_dir.remove_dir_all(name);
     });
     let mut resources = Vec::new();
+    for &(id, version, _, _) in entries {
+        if let Some((old, leaf)) = super::renames::volume_move(id) {
+            let root = publication_root(parent, id, "volume")?;
+            if resource_stat(&root, old).is_ok() {
+                resources.push(publication_resource(
+                    parent,
+                    id,
+                    version,
+                    "volume",
+                    (old, leaf),
+                    None,
+                    true,
+                )?);
+            }
+        }
+    }
     let mut active_names = std::collections::HashSet::new();
     for &(id, version, directory, package_stage) in entries {
         let metadata = serde_json::json!({"version":version});
@@ -2190,6 +2244,30 @@ fn commit_packages_files(
                 } else {
                     None
                 };
+            // Implicit-standard and explicit std/ names may address the same
+            // physical file. The new candidate already journals that file.
+            let physical = |identity: &str, path: &str| {
+                if kind == "lib"
+                    && super::is_standard_author(identity.split('/').next().unwrap_or(""))
+                    && !package_name(identity).starts_with("std/")
+                {
+                    format!("std/{path}")
+                } else {
+                    path.to_owned()
+                }
+            };
+            if candidate.is_none()
+                && resources.iter().any(|resource| {
+                    resource["kind"] == kind
+                        && resource["candidate"].is_string()
+                        && physical(
+                            resource["id"].as_str().unwrap(),
+                            resource["leaf"].as_str().unwrap(),
+                        ) == physical(id, &old_leaf)
+                })
+            {
+                continue;
+            }
             resources.push(publication_resource(
                 parent,
                 id,
@@ -2275,7 +2353,7 @@ fn commit_packages_files(
     let journal = serde_json::json!({"format":2,"transaction":name,"resources":resources});
     let bytes =
         serde_json::to_vec(&journal).map_err(|error| Error::InvalidConfig(error.to_string()))?;
-    if bytes.len() > 2 * 1024 * 1024 {
+    if resources.len() > 500 || bytes.len() > 2 * 1024 * 1024 {
         return Err(Error::BadRequest(
             "package recovery journal exceeds 2 MiB".into(),
         ));
@@ -2386,6 +2464,10 @@ pub(crate) fn recover_version_publication(
             "lib" => versioned_wasm_name(id, &metadata)?,
             "app" => versioned_app_name(id, &metadata)?,
             "app_link" => resource_name(id),
+            "volume" => super::renames::volume_move(id)
+                .ok_or_else(expanded_error)?
+                .1
+                .to_owned(),
             _ => return Err(expanded_error()),
         };
         if resource["leaf"] != leaf
@@ -2395,6 +2477,14 @@ pub(crate) fn recover_version_publication(
             return Err(expanded_error());
         }
         let old = resource["old_leaf"].as_str().ok_or_else(expanded_error)?;
+        if kind == "volume"
+            && (!super::renames::volume_move(id).is_some_and(|(source, _)| old == source)
+                || resource["reuse"] != true
+                || resource["candidate"].is_string()
+                || resource["old"] != true)
+        {
+            return Err(expanded_error());
+        }
         let allowed = [
             leaf,
             resource_name(id),
@@ -2404,7 +2494,12 @@ pub(crate) fn recover_version_publication(
             format!("{}.wasm", resource_name(id)),
             format!("{}.wasm", resource_name(id).replace('/', "%2F")),
         ];
-        if !allowed.iter().any(|value| value == old) {
+        if !allowed.iter().any(|value| value == old)
+            && !(kind == "volume"
+                && super::renames::volume_move(id).is_some_and(|(source, _)| old == source)
+                && resource["reuse"] == true
+                && resource["candidate"].is_null())
+        {
             return Err(expanded_error());
         }
         let root = publication_root(&parent, id, kind)?;

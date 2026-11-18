@@ -134,14 +134,24 @@ pub(crate) async fn install_store_package(
     version: &str,
     sandbox: &Arc<RwLock<Sandbox>>,
 ) -> Result<Value> {
-    if let Some(installed) = super::files::installed_package_versions(profile, None)?
-        .iter()
-        .find(|installed| {
-            installed["name"] == name
-                && installed["version"] == version
-                && installed["author"].is_string()
-                && (publisher.is_empty() || installed["author"] == publisher)
-        })
+    let installed_versions = super::files::installed_package_versions(profile, None)?;
+    let has_predecessor = installed_versions.iter().any(|entry| {
+        let author = entry["author"].as_str().unwrap_or("");
+        let old = entry["name"].as_str().unwrap_or("");
+        (publisher.is_empty() || author == publisher)
+            && old != name
+            && super::renames::canonical_name(author, old) == name
+    });
+    if let Some(installed) =
+        installed_versions
+            .iter()
+            .filter(|_| !has_predecessor)
+            .find(|installed| {
+                installed["name"] == name
+                    && installed["version"] == version
+                    && installed["author"].is_string()
+                    && (publisher.is_empty() || installed["author"] == publisher)
+            })
     {
         let id = installed["id"]
             .as_str()
@@ -158,18 +168,50 @@ pub(crate) async fn install_store_package(
             return Ok(activated);
         }
     }
-    let publisher = if publisher.is_empty() {
-        resolve_author(endpoint, name, version).await?
-    } else {
-        publisher.to_owned()
-    };
-    let publisher = publisher.as_str();
-    let root_id = format!("{publisher}/{name}");
-    super::valid_id(&root_id)?;
+    let result = install_store_packages(
+        profile,
+        endpoint,
+        &[(publisher.to_owned(), name.to_owned(), version.to_owned())],
+        sandbox,
+    )
+    .await?;
+    Ok(result[0].clone())
+}
+
+pub(super) async fn install_store_packages(
+    profile: &IdentityProfile,
+    endpoint: &dhttp::Endpoint,
+    requests: &[(String, String, String)],
+    sandbox: &Arc<RwLock<Sandbox>>,
+) -> Result<Value> {
+    if requests.is_empty() || requests.len() > 100 {
+        return Err(Error::BadRequest(
+            "installation requires 1 to 100 roots".into(),
+        ));
+    }
+    let mut roots = Vec::new();
+    let mut unique = std::collections::BTreeSet::new();
+    for (author, name, version) in requests {
+        let author = if author.is_empty() {
+            resolve_author(endpoint, name, version).await?
+        } else {
+            author.clone()
+        };
+        let id = format!("{author}/{name}");
+        super::valid_id(&id)?;
+        let logical = format!("{author}/{}", super::renames::canonical_name(&author, name));
+        if !unique.insert(logical) {
+            return Err(Error::BadRequest("duplicate installation root".into()));
+        }
+        roots.push((id, author, name.clone(), version.clone()));
+    }
     let installed = installed_packages(profile, None)?;
     let installed_versions = super::files::installed_package_versions(profile, None)?;
-    let version_requested = version;
-    let mut pending = vec![(publisher.to_owned(), name.to_owned(), version.to_owned())];
+    let mut pending = roots
+        .iter()
+        .rev()
+        .map(|(_, author, name, version)| (author.clone(), name.clone(), version.clone()))
+        .collect::<Vec<_>>();
     let mut resources: Vec<(String, Vec<u8>, Value)> = Vec::new();
     while let Some((publisher, name, version)) = pending.pop() {
         let id = format!("{publisher}/{name}");
@@ -179,7 +221,9 @@ pub(crate) async fn install_store_package(
         {
             continue;
         }
-        if (id != root_id || version != version_requested)
+        if !roots
+            .iter()
+            .any(|(root, _, _, wanted)| root == &id && wanted == &version)
             && installed_versions
                 .iter()
                 .any(|entry| entry["id"] == id && entry["version"] == version)
@@ -216,6 +260,7 @@ pub(crate) async fn install_store_package(
             )));
         }
         let (bytes, mut proof) = download_release(endpoint, &publisher, &name, &version).await?;
+        proof.as_object_mut().unwrap().remove("_requested");
         if let Some(current) = installed.as_array().unwrap().iter().find(|p| p["id"] == id)
             && current["author_owner_hash"].is_null()
         {
@@ -268,6 +313,12 @@ pub(crate) async fn install_store_package(
                 dep["version"].as_str().unwrap().to_owned(),
             ));
         }
+        if roots
+            .iter()
+            .any(|(root, _, _, wanted)| root == &id && wanted == &version)
+        {
+            proof["_requested"] = true.into();
+        }
         resources.push((id, bytes, proof));
     }
     let ordered = order_packages(resources, &installed_versions)?;
@@ -276,19 +327,25 @@ pub(crate) async fn install_store_package(
         if sandbox.tasks.is_closed() {
             return Err(Error::Denied);
         }
-        // The requested root is last in the verified closure. Prepare its response before the
-        // commit so no fallible work follows the durable/runtime switch.
-        let result = super::lib_metadata(
-            &super::format::read_package_at(
-                &ordered.last().unwrap().1,
-                ordered.last().unwrap().2["signature"]["verified_at"]
-                    .as_i64()
-                    .unwrap(),
-            )?,
-            Some(&root_id),
-        );
+        // Build the complete response before switching durable/runtime state.
+        let result = roots
+            .iter()
+            .map(|(id, _, _, version)| {
+                let (_, bytes, proof) = ordered
+                    .iter()
+                    .find(|(key, _, proof)| key == id && proof["version"] == *version)
+                    .ok_or_else(|| Error::InvalidConfig("missing requested release".into()))?;
+                Ok(super::lib_metadata(
+                    &super::format::read_package_at(
+                        bytes,
+                        proof["signature"]["verified_at"].as_i64().unwrap(),
+                    )?,
+                    Some(id),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
         super::files::install_packages(profile, &ordered, &mut sandbox)?;
-        Ok(result)
+        Ok(Value::Array(result))
     })
 }
 

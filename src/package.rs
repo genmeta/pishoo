@@ -12,6 +12,7 @@ use crate::{Error, Result, sandbox::Sandbox};
 mod files;
 mod format;
 mod manifest;
+mod renames;
 mod signing;
 mod store;
 
@@ -316,7 +317,7 @@ async fn pkg_management_request(
     }
     let bytes = match tokio::time::timeout(
         Duration::from_secs(if installing { 15 } else { 120 }),
-        axum::body::to_bytes(request.into_body(), if installing { 4096 } else { 0 }),
+        axum::body::to_bytes(request.into_body(), if installing { 64 * 1024 } else { 0 }),
     )
     .await
     .map_err(|_| Error::Deadline)?
@@ -343,6 +344,64 @@ async fn pkg_management_request(
     if installing {
         let input: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|_| Error::BadRequest("invalid store installation JSON".into()))?;
+        if input
+            .as_object()
+            .is_some_and(|v| v.len() == 1 && v.contains_key("packages"))
+        {
+            let items = input["packages"]
+                .as_array()
+                .filter(|items| !items.is_empty() && items.len() <= 100)
+                .ok_or_else(|| Error::BadRequest("packages requires 1 to 100 releases".into()))?;
+            let mut roots = Vec::new();
+            for item in items {
+                if item.as_object().is_none_or(|v| {
+                    v.len() != 2 + usize::from(v.contains_key("author"))
+                        || v.keys()
+                            .any(|k| !matches!(k.as_str(), "author" | "name" | "version"))
+                }) {
+                    return Err(Error::BadRequest("invalid installation root".into()));
+                }
+                let name = item["name"]
+                    .as_str()
+                    .ok_or_else(|| Error::BadRequest("missing name".into()))?;
+                valid_id(name)?;
+                if name
+                    .split('/')
+                    .next()
+                    .is_some_and(|part| dhttp_home::normalize_name(part).as_deref() == Some(part))
+                {
+                    return Err(Error::BadRequest("name must be a package name".into()));
+                }
+                let author = match item.get("author") {
+                    None => "",
+                    Some(v) => v
+                        .as_str()
+                        .filter(|v| dhttp_home::normalize_name(v).as_deref() == Some(*v))
+                        .ok_or_else(|| Error::BadRequest("invalid author".into()))?,
+                };
+                let version = item["version"]
+                    .as_str()
+                    .ok_or_else(|| Error::BadRequest("missing version".into()))?;
+                roots.push((author.to_owned(), name.to_owned(), version.to_owned()));
+            }
+            let mut values =
+                store::install_store_packages(&profile, &endpoint, &roots, &sandbox).await?;
+            for value in values.as_array_mut().unwrap() {
+                if let Some(author) = value.as_object_mut().and_then(|v| v.remove("publisher")) {
+                    value["author"] = author;
+                }
+                if let Some(deps) = value["dependencies"].as_array_mut() {
+                    for dep in deps {
+                        if let Some(author) =
+                            dep.as_object_mut().and_then(|d| d.remove("publisher"))
+                        {
+                            dep["author"] = author;
+                        }
+                    }
+                }
+            }
+            return Ok(axum::Json(serde_json::json!({"packages":values})).into_response());
+        }
         if input.as_object().is_none_or(|value| {
             value.len() != 2 + usize::from(value.contains_key("author"))
                 || value
