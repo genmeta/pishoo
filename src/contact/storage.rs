@@ -182,8 +182,20 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
     if version < 7 {
         // Existing entries stay available to the cross-database migration until
         // it has verified their aliases, subject bindings and Profile avatars.
-        let has_entries: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='contact_entries')",[],|r|r.get(0)).map_err(storage)?;
-        if !has_entries || !tx.query_row("SELECT EXISTS(SELECT 1 FROM contact_entries)",[],|r|r.get::<_,bool>(0)).map_err(storage)? {
+        let has_entries: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='contact_entries')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if !has_entries
+            || !tx
+                .query_row("SELECT EXISTS(SELECT 1 FROM contact_entries)", [], |r| {
+                    r.get::<_, bool>(0)
+                })
+                .map_err(storage)?
+        {
             tx.execute_batch("DROP TABLE IF EXISTS contact_entries; DROP TABLE IF EXISTS directory_service_grants; PRAGMA user_version=8;").map_err(storage)?;
         }
     }

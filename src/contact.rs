@@ -281,14 +281,19 @@ async fn dispatch(
     }
     if path == "/std/contact" && method == Method::PUT {
         let doc: Value = serde_json::from_slice(&bytes).map_err(|_| fail(400, "invalid JSON"))?;
-        return Ok((200, directory::put(&access, &doc, service.as_ref(), now()).await?));
+        return Ok((
+            200,
+            directory::put(&access, &doc, service.as_ref(), now()).await?,
+        ));
     }
     if path == "/std/contact"
         && method == Method::GET
         && service.is_some()
         && let Some(target) = parameter(&target, "name")?
         && !target.contains('#')
-        && visitor.as_ref().is_none_or(|person| person.name() != name(&target).unwrap_or_default())
+        && visitor
+            .as_ref()
+            .is_none_or(|person| person.name() != name(&target).unwrap_or_default())
     {
         let target = name(&target)?;
         let contact = access
@@ -313,8 +318,11 @@ async fn dispatch(
             let source = service
                 .as_ref()
                 .ok_or_else(|| fail(403, "verified owner required"))?;
-            if !directory::is_group_provider(&source.0) && !source.0.split_once('/').is_some_and(|(author, package)|
-                crate::package::is_standard_author(author) && package == "std/comm/message") {
+            if !directory::is_group_provider(&source.0)
+                && !source.0.split_once('/').is_some_and(|(author, package)| {
+                    crate::package::is_standard_author(author) && package == "std/comm/message"
+                })
+            {
                 return Err(fail(403, "local group or message service required"));
             }
         }
@@ -327,7 +335,10 @@ async fn dispatch(
             Method::DELETE => return Err(fail(405, "use Group to leave a group")),
             _ => return Err(fail(405, "method not allowed")),
         };
-        if service.as_ref().is_some_and(|(id, _)| !owner || !directory::is_group_provider(id)) {
+        if service
+            .as_ref()
+            .is_some_and(|(id, _)| !owner || !directory::is_group_provider(id))
+        {
             value.as_object_mut().unwrap().remove("alias");
         }
         return Ok((200, value));

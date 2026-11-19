@@ -208,7 +208,11 @@ async fn message_foundation_http_save_receive_and_scoped_replay() {
     let response = invoke(owner.clone()).execute(request).await.unwrap();
     assert_eq!(response.status(), http::StatusCode::OK);
     let mut stream = response.into_body();
-    assert!(event(&mut stream, &mut Vec::new()).await.starts_with("event: ready\n"));
+    assert!(
+        event(&mut stream, &mut Vec::new())
+            .await
+            .starts_with("event: ready\n")
+    );
     drop(stream);
     reaped(&tasks).await;
 }

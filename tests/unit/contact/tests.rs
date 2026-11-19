@@ -821,27 +821,54 @@ async fn completed_contact_applications_never_reenter_the_delivery_queue() {
 fn group_entry() -> Value {
     json!({"kind":"group","name":"alice~#dev","bound_subject":"a".repeat(64)})
 }
-fn group_service() -> (String,String) {
-    ("dev.genmeta.tech.dhttp.net/std/comm/group".into(),"c".repeat(64))
+fn group_service() -> (String, String) {
+    (
+        "dev.genmeta.tech.dhttp.net/std/comm/group".into(),
+        "c".repeat(64),
+    )
 }
 
 #[tokio::test]
 async fn group_directory_binds_the_name_and_preserves_its_alias() {
-    let endpoint=crate::test_support::identity::endpoint("alice.dhttp.net");
-    let visitor=owner(&endpoint).unwrap();
-    let access=AccessService::load_from_db("sqlite::memory:",endpoint.name(),visitor.subject_id()).await.unwrap();
-    let service=group_service();
-    assert!(directory::put(&access,&group_entry(),None,1).await.is_err());
-    directory::put(&access,&group_entry(),Some(&service),1).await.unwrap();
-    directory::patch(&access,"alice~#dev",&json!({"alias":"Work"}),2).await.unwrap();
-    let saved=directory::put(&access,&group_entry(),Some(&service),3).await.unwrap();
-    assert_eq!(saved["alias"],"Work");
-    let mut conflict=group_entry();
-    conflict["bound_subject"]=json!("b".repeat(64));
-    assert_eq!(directory::put(&access,&conflict,Some(&service),4).await.unwrap_err().0,409);
-    conflict["name"]=json!("alice~#other");
-    conflict["bound_subject"]=saved["bound_subject"].clone();
-    assert!(directory::put(&access,&conflict,Some(&service),5).await.unwrap()["alias"].is_null());
+    let endpoint = crate::test_support::identity::endpoint("alice.dhttp.net");
+    let visitor = owner(&endpoint).unwrap();
+    let access =
+        AccessService::load_from_db("sqlite::memory:", endpoint.name(), visitor.subject_id())
+            .await
+            .unwrap();
+    let service = group_service();
+    assert!(
+        directory::put(&access, &group_entry(), None, 1)
+            .await
+            .is_err()
+    );
+    directory::put(&access, &group_entry(), Some(&service), 1)
+        .await
+        .unwrap();
+    directory::patch(&access, "alice~#dev", &json!({"alias":"Work"}), 2)
+        .await
+        .unwrap();
+    let saved = directory::put(&access, &group_entry(), Some(&service), 3)
+        .await
+        .unwrap();
+    assert_eq!(saved["alias"], "Work");
+    let mut conflict = group_entry();
+    conflict["bound_subject"] = json!("b".repeat(64));
+    assert_eq!(
+        directory::put(&access, &conflict, Some(&service), 4)
+            .await
+            .unwrap_err()
+            .0,
+        409
+    );
+    conflict["name"] = json!("alice~#other");
+    conflict["bound_subject"] = saved["bound_subject"].clone();
+    assert!(
+        directory::put(&access, &conflict, Some(&service), 5)
+            .await
+            .unwrap()["alias"]
+            .is_null()
+    );
 }
 
 #[tokio::test]
@@ -856,7 +883,9 @@ async fn directory_routes_merge_filter_paginate_and_require_verified_owner() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     let service = group_service();
-    directory::put(&access,&group_entry(),Some(&service),1).await.unwrap();
+    directory::put(&access, &group_entry(), Some(&service), 1)
+        .await
+        .unwrap();
     assert!(access.find_contact_by_name("alice~#dev").await.is_ok());
     let router = contact_router(profile, endpoint, access);
     let response = router
@@ -930,7 +959,15 @@ fn v6_upgrade_removes_title_entries_and_preserves_groups_and_grants() {
         "../../../src/contact/sql/migrations/v7_simplify_contacts.sql"
     ))
     .unwrap();
-    assert_eq!(db.query_row("SELECT alias FROM contact_entries WHERE name='alice~#dev'",[],|r|r.get::<_,String>(0)).unwrap(),"Private");
+    assert_eq!(
+        db.query_row(
+            "SELECT alias FROM contact_entries WHERE name='alice~#dev'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "Private"
+    );
     assert!(
         db.prepare("SELECT bound_name FROM contact_entries")
             .is_err()
