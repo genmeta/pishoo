@@ -268,7 +268,20 @@ pub(crate) fn router(
 // A shared lock protects file selection from Jade's atomic directory replacement.
 // The file itself is the only lifecycle signal; no process/session registration exists.
 fn root(profile: &IdentityProfile) -> Result<File> {
-    let owner = profile.path().metadata()?;
+    let root = locked_root(profile)?;
+    verify_root(profile, &root)?;
+    Ok(root)
+}
+
+fn verify_root(profile: &IdentityProfile, root: &File) -> Result<()> {
+    let metadata = root.metadata()?;
+    if metadata.uid() != profile.path().metadata()?.uid() || metadata.mode() & 0o022 != 0 {
+        return Err(Error::Denied);
+    }
+    Ok(())
+}
+
+fn locked_root(profile: &IdentityProfile) -> Result<File> {
     let root = File::from(
         rustix::fs::open(
             profile.path(),
@@ -280,10 +293,6 @@ fn root(profile: &IdentityProfile) -> Result<File> {
         )
         .map_err(|_| Error::RouteNotFound)?,
     );
-    let metadata = root.metadata()?;
-    if metadata.uid() != owner.uid() || metadata.mode() & 0o022 != 0 {
-        return Err(Error::Denied);
-    }
     rustix::fs::flock(&root, rustix::fs::FlockOperation::LockShared)
         .map_err(std::io::Error::from)?;
     Ok(root)
@@ -454,14 +463,23 @@ fn load_standard_libraries(
     profile: &IdentityProfile,
     sandbox: &Arc<RwLock<Sandbox>>,
 ) -> Result<()> {
-    let directory = match root(profile) {
-        Ok(root) => match child(&root, "lib", true) {
-            Ok(lib) => Some(lib),
-            Err(Error::RouteNotFound) => None,
-            Err(error) => return Err(error),
-        },
-        Err(Error::RouteNotFound) => None,
-        Err(error) => return Err(error),
+    // Discover marker names under Jade's lock. Only a selected preview needs
+    // trusted ownership and modes along its entire path.
+    let root = locked_root(profile)?;
+    let open_directory = |parent: &File, name: &str| {
+        use rustix::fs::{Mode, OFlags, openat};
+        openat(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+    };
+    let directory = match open_directory(&root, "lib") {
+        Ok(lib) => Some(lib),
+        Err(rustix::io::Errno::NOENT) => None,
+        Err(error) => return Err(std::io::Error::from(error).into()),
     };
     let mut present = HashSet::new();
     let mut pending = directory
@@ -487,11 +505,13 @@ fn load_standard_libraries(
             if package::valid_id(&name).is_err() {
                 continue;
             }
-            let opened = child(&directory, &leaf, true)?;
             if marker.is_none() {
-                pending.push((name, opened));
+                let nested = open_directory(&directory, &leaf).map_err(std::io::Error::from)?;
+                pending.push((name, nested));
                 continue;
             }
+            verify_root(profile, &root)?;
+            let opened = project_directory(&root, &name)?;
             let manifest = manifest(&opened, &name)?;
             let author = manifest["package"]["author"].as_str().unwrap();
             if package::is_standard_author(author) {

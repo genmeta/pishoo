@@ -165,6 +165,52 @@ async fn message_foundation_http_save_receive_and_scoped_replay() {
     drop(stream);
     reaped(&tasks).await;
     assert!(!directory.join("database.lock").exists());
+    let retry =
+        json!({"type":"retry","index":4242,"client_message_id":"missing","to":"bob.dhttp.net"});
+    let response = invoke(owner.clone())
+        .execute(call("POST", "/comm/message", &retry))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({"error":"message_not_found"})
+    );
+    let db = rusqlite::Connection::open(directory.join("database")).unwrap();
+    db.execute("INSERT INTO chat_messages(id,contact_name,client_message_id,direction,state,sender_name,recipient_name,text,created_at,updated_at)
+                VALUES(4242,'bob.dhttp.net','old-message','outgoing','sent','alice.dhttp.net','bob.dhttp.net','saved before deleting Bob',1,1)", []).unwrap();
+    drop(db);
+    let response = invoke(owner.clone())
+        .execute(call("POST", "/comm/message", &retry))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+    response.into_body().collect().await.unwrap();
+    let response = invoke(owner.clone())
+        .execute(call(
+            "GET",
+            "/comm/message/list?name=bob.dhttp.net",
+            &Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["items"][0]["content"],
+        "saved before deleting Bob"
+    );
+    let request = Request::get("https://alice.dhttp.net/comm/message/list?name=bob.dhttp.net")
+        .header("accept", "text/event-stream")
+        .body(empty())
+        .unwrap();
+    let response = invoke(owner.clone()).execute(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let mut stream = response.into_body();
+    assert!(event(&mut stream, &mut Vec::new()).await.starts_with("event: ready\n"));
+    drop(stream);
+    reaped(&tasks).await;
 }
 
 async fn event(body: &mut Body, pending: &mut Vec<u8>) -> String {
@@ -706,7 +752,7 @@ async fn verify_message_delivery(large_image: bool, cancel_early: bool) {
         db.busy_timeout(Duration::ZERO).unwrap();
         assert_eq!(
             db.query_row(
-                "SELECT count(*) FROM chat_messages WHERE lease_token IS NOT NULL",
+                "SELECT count(*) FROM chat_messages WHERE state='sending'",
                 [],
                 |r| r.get::<_, i64>(0)
             )
@@ -821,7 +867,7 @@ async fn verify_message_delivery(large_image: bool, cancel_early: bool) {
     .unwrap();
     assert_eq!(
         db.query_row(
-            "SELECT count(*) FROM chat_messages WHERE lease_token IS NOT NULL",
+            "SELECT count(*) FROM chat_messages WHERE state='sending'",
             [],
             |r| r.get::<_, i64>(0)
         )

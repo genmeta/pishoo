@@ -101,7 +101,7 @@ pub(super) async fn receipt(
     let decode = |error: sea_orm::DbErr| fail(500, error.to_string());
     let tx = access.database().begin().await.map_err(decode)?;
     let row=tx.query_one_raw(Statement::from_sql_and_values(DatabaseBackend::Sqlite,
-        "SELECT CASE WHEN a.status='active' AND (c.id IS NULL OR c.status<>2 OR c.expired_after<=?1) THEN 'revoked'
+        "SELECT CASE WHEN a.status='active' AND (c.id IS NULL OR c.status<>2) THEN 'revoked'
                      WHEN a.status='pending' AND a.expired_after<=?1 THEN 'expired' ELSE a.status END AS state,
                 a.received_at,a.expired_after FROM contact_applications a
          LEFT JOIN contacts c ON c.name=a.applicant_name AND c.subject_id=a.applicant_sid

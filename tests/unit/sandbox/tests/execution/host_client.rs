@@ -59,6 +59,56 @@ async fn native(endpoint: &dhttp::Endpoint) -> (Arc<access_control::AccessServic
 }
 
 #[tokio::test]
+async fn service_can_lookup_a_person_without_a_directory_grant() {
+    use sea_orm::ConnectionTrait;
+    use tower::ServiceExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let endpoint = endpoint();
+    let (access, _) = native(&endpoint).await;
+    access
+        .database()
+        .execute_unprepared(
+            "INSERT INTO contacts(name,subject_id,status,created_at,updated_at,expired_after)
+         VALUES('bob.dhttp.net',X'626F62',2,1,2,3)",
+        )
+        .await
+        .unwrap();
+    let owner = access_control::Visitor::new(
+        endpoint.name(),
+        access_control::SubjectId::new("a".repeat(64).as_bytes()).unwrap(),
+    );
+    let profile =
+        dhttp_home::identity::IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let service = host_lib(&root.path().join("service"));
+    let router = crate::contact::contact_router(profile, endpoint, access);
+    let get = |target: &str| {
+        Request::get(target)
+            .extension(owner.clone())
+            .extension(service.clone())
+            .body(axum::body::Body::empty())
+            .unwrap()
+    };
+
+    let person = router
+        .clone()
+        .oneshot(get("/std/contact?name=bob.dhttp.net"))
+        .await
+        .unwrap();
+    assert_eq!(person.status(), 200);
+    let bytes = person.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap(),
+        json!({"name":"bob.dhttp.net","status":"active","subject_id":"bob"})
+    );
+    let group = router
+        .oneshot(get("/std/contact?name=alice~%23team"))
+        .await
+        .unwrap();
+    assert_eq!(group.status(), 403);
+}
+
+#[tokio::test]
 async fn wasi_outgoing_sse_uses_idle_deadlines_and_keeps_finite_response_limits() {
     use wasmtime_wasi_http::WasiHttpHooks;
     let endpoint = endpoint();

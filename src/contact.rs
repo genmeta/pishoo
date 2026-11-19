@@ -293,7 +293,7 @@ async fn dispatch(
                 });
             return Ok((
                 200,
-                json!({"service":service.0,"author_owner_hash":service.1,"group_read":group_read,"group_write":group_write,"name_read":directory::authorize(&db,service,"name").is_ok()}),
+                json!({"service":service.0,"author_owner_hash":service.1,"group_read":group_read,"group_write":group_write,"name_read":true}),
             ));
         }
         if doc["type"] == "service_grant" || doc["type"] == "service_grants" {
@@ -311,29 +311,24 @@ async fn dispatch(
             directory::put(&mut db, &doc, service.as_ref(), owner, now())?,
         ));
     }
-    if path == "/std/contact" && method == Method::GET {
-        if let Some(service) = &service {
-            if let Some(target) = parameter(&target, "name")? {
-                if !target.contains('#')
-                    && visitor
-                        .as_ref()
-                        .is_none_or(|person| person.name() != name(&target).unwrap_or_default())
-                {
-                    directory::authorize(&database(&profile)?, service, "name")?;
-                    let target = name(&target)?;
-                    let contact = access
-                        .find_contact_by_name(&target)
-                        .await
-                        .map_err(|error| fail(404, error.to_string()))?;
-                    let status = access_control::ContactStatus::try_from(contact.status)
-                        .map_err(|_| fail(500, "invalid contact status"))?;
-                    return Ok((
-                        200,
-                        json!({"name":contact.name,"status":status,"subject_id":String::from_utf8_lossy(contact.subject_id.as_bytes())}),
-                    ));
-                }
-            }
-        }
+    if path == "/std/contact"
+        && method == Method::GET
+        && service.is_some()
+        && let Some(target) = parameter(&target, "name")?
+        && !target.contains('#')
+        && visitor.as_ref().is_none_or(|person| person.name() != name(&target).unwrap_or_default())
+    {
+        let target = name(&target)?;
+        let contact = access
+            .find_contact_by_name(&target)
+            .await
+            .map_err(|error| fail(404, error.to_string()))?;
+        let status = access_control::ContactStatus::try_from(contact.status)
+            .map_err(|_| fail(500, "invalid contact status"))?;
+        return Ok((
+            200,
+            json!({"name":contact.name,"status":status,"subject_id":String::from_utf8_lossy(contact.subject_id.as_bytes())}),
+        ));
     }
     let directory_target = parameter(&target, "name")?.filter(|name| name.contains("~#"));
     if path == "/std/contact"

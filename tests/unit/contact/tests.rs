@@ -1043,6 +1043,30 @@ async fn receipts_are_scoped_to_the_application_and_verified_applicant() {
             .unwrap();
         }
     }
+    // Both the application and its contact row still carry the original deadline.
+    use sea_orm::ConnectionTrait;
+    access
+        .database()
+        .execute_unprepared(
+            "UPDATE contacts SET created_at=1,updated_at=2,expired_after=3;
+         UPDATE contact_applications SET received_at=1,expired_after=3;",
+        )
+        .await
+        .unwrap();
+    let accepted = access::receipt(&access, &receiver, &peer, &id)
+        .await
+        .unwrap();
+    assert_eq!(accepted["status"], "active");
+    assert_eq!(accepted["valid_before"], 3);
+    access
+        .database()
+        .execute_unprepared("DELETE FROM contacts")
+        .await
+        .unwrap();
+    let removed = access::receipt(&access, &receiver, &peer, &id)
+        .await
+        .unwrap();
+    assert_eq!(removed["status"], "revoked");
     let other = access_control::Visitor::new(
         peer.name(),
         access_control::SubjectId::new(b"different-applicant-subject").unwrap(),
