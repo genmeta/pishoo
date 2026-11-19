@@ -300,6 +300,8 @@ readme = "https://example.com/readme"
     let document = waz_manifest(&files).unwrap();
     for (field, value) in [
         ("format", "waz/3"),
+        ("wasm", "wasm/other.wasm"),
+        ("web", "web"), // A legacy frontend declaration already exists.
         ("backend", "wasm/other.wasm"),
         ("frontend", "public"),
     ] {

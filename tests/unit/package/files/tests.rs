@@ -280,8 +280,12 @@ async fn waz_v2_installation_preserves_runtime_files_and_offline_manual() {
         files.remove("signature.json");
         manifest["format"] = "waz/2".into();
         let backend_path = format!("wasm/{name}.wasm");
-        manifest["backend"] = backend_path.clone().into();
-        manifest["frontend"] = "web".into();
+        manifest["package"]["author"] = author.trim_end_matches(".dhttp.net").into();
+        let fields = manifest.as_object_mut().unwrap();
+        fields.remove("backend");
+        fields.remove("frontend");
+        manifest["wasm"] = backend_path.clone().into();
+        manifest["web"] = "web".into();
         manifest["docs"] = json!({"manual":"docs/manual.md","readme":"https://example.com/manual"});
         let backend = files.remove("backend.wasm").unwrap();
         let frontend = files.remove("public/index.html").unwrap();

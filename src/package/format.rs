@@ -291,8 +291,8 @@ pub(crate) fn package_metadata(files: &PackageFiles) -> Result<Value> {
         }
         dependencies_out.push(item);
     }
-    let has_lib = manifest.get("backend").is_some();
-    let has_app = manifest.get("frontend").is_some();
+    let has_lib = manifest.get("wasm").is_some() || manifest.get("backend").is_some();
+    let has_app = manifest.get("web").is_some() || manifest.get("frontend").is_some();
     let mut value = serde_json::json!({"id":id,"publisher":publisher,"name":name,"version":version,
         "title":text(package,"title")?,"description":text(package,"description")?,"license":text(package,"license")?,
         "changelog":text(package,"release-notes")?,"dependencies":dependencies_out,"has_lib":has_lib,"has_app":has_app});
@@ -759,7 +759,14 @@ pub(super) fn waz_manifest(
     files: &std::collections::BTreeMap<String, Vec<u8>>,
 ) -> WazResult<serde_json::Value> {
     if let Some(bytes) = files.get("manifest.toml") {
-        Ok(waz_toml(bytes)?.0)
+        let (mut manifest, _) = waz_toml(bytes)?;
+        let author = manifest["package"]["author"]
+            .as_str()
+            .ok_or("missing package author")?;
+        if !author.ends_with(".dhttp.net") {
+            manifest["package"]["author"] = format!("{author}.dhttp.net").into();
+        }
+        Ok(manifest)
     } else {
         Ok(serde_json::from_slice(
             files
@@ -810,13 +817,19 @@ fn waz_layout(
 ) -> WazResult<()> {
     let modern = files.contains_key("manifest.toml");
     let format = if modern { "waz/2" } else { "waz/1" };
+    let (wasm_key, web_key) =
+        if modern && (document.get("wasm").is_some() || document.get("web").is_some()) {
+            ("wasm", "web")
+        } else {
+            ("backend", "frontend")
+        };
     if document["format"] != format
         || document.as_object().is_none_or(|fields| {
             fields.keys().any(|key| {
-                !(matches!(
-                    key.as_str(),
-                    "format" | "package" | "dependencies" | "backend" | "frontend"
-                ) || modern && matches!(key.as_str(), "docs" | "signature"))
+                !(matches!(key.as_str(), "format" | "package" | "dependencies")
+                    || key == wasm_key
+                    || key == web_key
+                    || modern && matches!(key.as_str(), "docs" | "signature"))
             })
         })
     {
@@ -845,10 +858,10 @@ fn waz_layout(
     };
     let frontend = if modern { "web" } else { "public" };
     let prefix = format!("{frontend}/");
-    let has_frontend = document.get("frontend").is_some();
-    let has_backend = document.get("backend").is_some();
-    if (has_backend && document["backend"] != backend)
-        || (has_frontend && document["frontend"] != frontend)
+    let has_frontend = document.get(web_key).is_some();
+    let has_backend = document.get(wasm_key).is_some();
+    if (has_backend && document[wasm_key] != backend)
+        || (has_frontend && document[web_key] != frontend)
         || has_backend != files.contains_key(&backend)
         || has_frontend != files.keys().any(|name| name.starts_with(&prefix))
         || (has_frontend && !files.contains_key(&format!("{prefix}index.html")))

@@ -23,12 +23,12 @@ directory, respecting project ignore rules. The main manual entry is `docs/manua
 
 ```toml
 format = "waz/2"
-backend = "wasm/std/comm/example.wasm"
-frontend = "web"
+wasm = "wasm/std/comm/example.wasm"
+web = "web"
 dependencies = []
 
 [package]
-author = "dev.genmeta.tech.dhttp.net"
+author = "dev.genmeta.tech"
 name = "std/comm/example"
 version = "0.1.0"
 title = "Example"
@@ -50,11 +50,14 @@ value = "<Base64 signature>"
 
 `format` identifies the release layout and signing rules. `package.version`
 identifies the software release. The package author remains the authenticated
-publisher identity. Package names support slash-separated segments and retain
+publisher identity. New builds use the short author name in the manifest. Readers
+expand it with `.dhttp.net` for identity checks and accept existing full names. Package names support slash-separated segments and retain
 the existing 63-byte total limit and segment validation.
 
-Package fields shown above are required except `repository`. `backend` and
-`frontend` are optional individually and must exactly match the runtime files.
+Package fields shown above are required except `repository`. `wasm` and
+`web` are optional individually and must exactly match the runtime files.
+Readers also accept earlier v2 manifests using `backend` and `frontend`.
+The two naming schemes cannot be mixed in a manifest.
 Unknown manifest, package, and document fields are rejected.
 
 `dependencies` is an explicit array of exact name/version objects, with at most
