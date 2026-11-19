@@ -1,6 +1,11 @@
 # Changelog
 
-## [0.9.2-preview.1] - Unreleased
+## [0.9.2-preview.2] - Unreleased
+
+- Fix installed package routing when scanning development previews.
+- Look up group owner bindings and personal aliases in the local contacts table. Allow authenticated local Group and Message services to read the bindings used by group conversations.
+
+## [0.9.2-preview.1] - 2026-11-18
 
 - Install signed WAZ v2 packages with hierarchical names and select among installed versions.
 - Route standard Lib requests using the paths and methods declared in each component’s OpenAPI document.
