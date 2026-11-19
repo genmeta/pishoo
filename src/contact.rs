@@ -8,7 +8,7 @@ use access_control::AccessService;
 use axum::{Router, body::Body, response::IntoResponse};
 use dhttp_home::identity::IdentityProfile;
 use http::{Method, Request, StatusCode};
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -281,35 +281,7 @@ async fn dispatch(
     }
     if path == "/std/contact" && method == Method::PUT {
         let doc: Value = serde_json::from_slice(&bytes).map_err(|_| fail(400, "invalid JSON"))?;
-        if doc["type"] == "service_identity" {
-            let service = service
-                .as_ref()
-                .ok_or_else(|| fail(403, "authenticated service required"))?;
-            let db = database(&profile)?;
-            let group_read = directory::authorize(&db, service, "group").is_ok();
-            let group_write = group_read
-                && service.0.split_once('/').is_some_and(|(author, name)| {
-                    crate::package::is_standard_author(author) && name == "std/comm/group"
-                });
-            return Ok((
-                200,
-                json!({"service":service.0,"author_owner_hash":service.1,"group_read":group_read,"group_write":group_write,"name_read":true}),
-            ));
-        }
-        if doc["type"] == "service_grant" || doc["type"] == "service_grants" {
-            if !owner || service.is_some() {
-                return Err(fail(403, "direct owner required"));
-            }
-            return Ok((200, directory::grants(&mut database(&profile)?, &doc)?));
-        }
-        if let Some(service) = &service {
-            directory::authorize(&database(&profile)?, service, string(&doc, "kind")?)?;
-        }
-        let mut db = database(&profile)?;
-        return Ok((
-            200,
-            directory::put(&mut db, &doc, service.as_ref(), owner, now())?,
-        ));
+        return Ok((200, directory::put(&access, &doc, service.as_ref(), now()).await?));
     }
     if path == "/std/contact"
         && method == Method::GET
@@ -334,7 +306,6 @@ async fn dispatch(
     if path == "/std/contact"
         && let Some(target) = directory_target
     {
-        let db = database(&profile)?;
         if service.is_some() || !owner {
             if method != Method::GET {
                 return Err(fail(403, "verified owner required"));
@@ -342,23 +313,21 @@ async fn dispatch(
             let source = service
                 .as_ref()
                 .ok_or_else(|| fail(403, "verified owner required"))?;
-            directory::authorize(&db, source, "group")?;
+            if !directory::is_group_provider(&source.0) && !source.0.split_once('/').is_some_and(|(author, package)|
+                crate::package::is_standard_author(author) && package == "std/comm/message") {
+                return Err(fail(403, "local group or message service required"));
+            }
         }
         let mut value = match method {
-            Method::GET => directory::entry(&db, &target)?,
+            Method::GET => directory::entry(access.database(), &target).await?,
             Method::PATCH => {
                 let doc = serde_json::from_slice(&bytes).map_err(|_| fail(400, "invalid JSON"))?;
-                directory::patch(&db, &target, &doc, now())?
+                directory::patch(&access, &target, &doc, now()).await?
             }
             Method::DELETE => return Err(fail(405, "use Group to leave a group")),
             _ => return Err(fail(405, "method not allowed")),
         };
-        if service.as_ref().is_some_and(|(id, _)| {
-            !owner
-                || !id.split_once('/').is_some_and(|(author, name)| {
-                    crate::package::is_standard_author(author) && name == "std/comm/group"
-                })
-        }) {
+        if service.as_ref().is_some_and(|(id, _)| !owner || !directory::is_group_provider(id)) {
             value.as_object_mut().unwrap().remove("alias");
         }
         return Ok((200, value));
@@ -450,9 +419,6 @@ async fn dispatch(
         let mut items = Vec::new();
         let mut current = 1;
         let deleted = loop {
-            if kind == "group" {
-                break json!([]);
-            }
             let uri = {
                 let mut query = form_urlencoded::Serializer::new(String::new());
                 query
@@ -493,10 +459,14 @@ async fn dispatch(
             }
         }
         for item in &mut items {
-            item["kind"] = "name".into();
+            if let Some(group) = item["name"].as_str().filter(|name| name.contains("~#")) {
+                *item = directory::entry(access.database(), group).await?;
+            } else {
+                item["kind"] = "name".into();
+            }
         }
+        items.retain(|item| kind == "all" || item["kind"] == kind);
         if kind != "name" {
-            items.extend(directory::entries(&database(&profile)?)?);
             let search = parameter(&target, "search")?
                 .unwrap_or_default()
                 .to_lowercase();

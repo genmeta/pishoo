@@ -134,7 +134,7 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
         ))
         .map_err(storage)?;
         tx.pragma_update(None, "user_version", 2).map_err(storage)?;
-    } else if !(2..=7).contains(&version) {
+    } else if !(2..=8).contains(&version) {
         return Err(fail(500, "unsupported contact database version"));
     }
     if version == 1 || version == 2 {
@@ -178,6 +178,14 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
         tx.execute_batch(include_str!("sql/migrations/v7_simplify_contacts.sql"))
             .map_err(storage)?;
         tx.pragma_update(None, "user_version", 7).map_err(storage)?;
+    }
+    if version < 7 {
+        // Existing entries stay available to the cross-database migration until
+        // it has verified their aliases, subject bindings and Profile avatars.
+        let has_entries: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='contact_entries')",[],|r|r.get(0)).map_err(storage)?;
+        if !has_entries || !tx.query_row("SELECT EXISTS(SELECT 1 FROM contact_entries)",[],|r|r.get::<_,bool>(0)).map_err(storage)? {
+            tx.execute_batch("DROP TABLE IF EXISTS contact_entries; DROP TABLE IF EXISTS directory_service_grants; PRAGMA user_version=8;").map_err(storage)?;
+        }
     }
     tx.prepare("SELECT target_name,application_id,contact_id,target_subject,description,requested,offered,state,local_deadline,remote_deadline,review_id,next_attempt_at,lease_until,last_error,created_at,updated_at FROM outbound_contact_request LIMIT 0").map_err(storage)?;
     tx.commit().map_err(storage)?;
