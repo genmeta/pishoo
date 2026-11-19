@@ -651,16 +651,8 @@ async fn status(routes: &Router, path: &str, owner: bool) -> StatusCode {
         .status()
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn standard_declarations_select_arbitrary_package_names_and_require_owner() {
-    let (_temp, profile, sandbox) = environment();
-    standard_files(&profile, "comm", "/rooms/send");
-    let routes = app(&profile, &sandbox);
-    assert_eq!(
-        status(&routes, "/std/rooms/send", false).await,
-        StatusCode::FORBIDDEN
-    );
-    let mut call = request("/std/rooms/send?value=a%2Fb", true);
+fn component_request(path: &str) -> Request<Body> {
+    let mut call = request(path, true);
     *call.method_mut() = http::Method::POST;
     let mut trailers = http::HeaderMap::new();
     trailers.insert("x-request-trailer", "preserved".parse().unwrap());
@@ -670,6 +662,19 @@ async fn standard_declarations_select_arbitrary_package_names_and_require_owner(
         ))),
         Ok(http_body::Frame::trailers(trailers)),
     ])));
+    call
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn standard_declarations_select_arbitrary_package_names_and_require_owner() {
+    let (_temp, profile, sandbox) = environment();
+    standard_files(&profile, "comm", "/rooms/send");
+    let routes = app(&profile, &sandbox);
+    assert_eq!(
+        status(&routes, "/std/rooms/send", false).await,
+        StatusCode::FORBIDDEN
+    );
+    let call = component_request("/std/rooms/send?value=a%2Fb");
     let response = routes.clone().oneshot(call).await.unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     assert_eq!(text(response).await, b"world-world-".repeat(64));
@@ -729,11 +734,24 @@ async fn standard_preview_path_changes_retire_code_and_removal_restores_installe
     );
     let second = sandbox.read().unwrap().dev_libs[id].1.clone();
     assert!(!Arc::ptr_eq(&first, &second));
-    std::fs::remove_file(file).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(profile.path(), std::fs::Permissions::from_mode(0o775)).unwrap();
     assert_eq!(
-        status(&routes, "/std/comm/installed", true).await,
-        StatusCode::METHOD_NOT_ALLOWED
+        status(&routes, "/std/rooms/read", true).await,
+        StatusCode::FORBIDDEN
     );
+    std::fs::remove_dir_all(profile.join("lib/conversations.preview")).unwrap();
+    std::fs::remove_dir_all(profile.join("lib/hello.preview")).unwrap();
+    for mode in [0o775, 0o755] {
+        std::fs::set_permissions(profile.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+        let response = routes
+            .clone()
+            .oneshot(component_request("/std/comm/installed"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(text(response).await, b"world-world-".repeat(64));
+    }
     assert!(second.stream_retired.is_cancelled());
     assert!(sandbox.read().unwrap().dev_libs.is_empty());
     assert_eq!(

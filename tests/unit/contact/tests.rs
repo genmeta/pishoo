@@ -540,7 +540,7 @@ fn contact_v1_upgrade_preserves_delivery_jobs_and_removes_only_saved_collection(
         assert_eq!(
             db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            7
+            8
         );
         assert_eq!(
             db.query_row(
@@ -737,7 +737,7 @@ fn v3_migration_preserves_unknown_snapshots_without_catalog_backfill() {
         assert_eq!(
             db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            7
+            8
         );
         assert_eq!(
             db.query_row(
@@ -818,50 +818,56 @@ async fn completed_contact_applications_never_reenter_the_delivery_queue() {
     assert!(db.is_autocommit());
 }
 
-fn group_entry(revision: &str) -> Value {
-    json!({"kind":"group","name":"alice~#dev","bound_subject":"a".repeat(64),"profile_updated_at":revision.parse::<i64>().unwrap(),"avatar":null})
+fn group_entry() -> Value {
+    json!({"kind":"group","name":"alice~#dev","bound_subject":"a".repeat(64)})
 }
-fn grant_group(db: &Connection) -> (String, String) {
-    let service = (
-        "dev.genmeta.tech.dhttp.net/std/comm/group".to_string(),
+fn group_service() -> (String, String) {
+    (
+        "dev.genmeta.tech.dhttp.net/std/comm/group".into(),
         "c".repeat(64),
-    );
-    db.execute(
-        "INSERT OR IGNORE INTO directory_service_grants VALUES(?1,?2,'group')",
-        params![service.0, service.1],
     )
-    .unwrap();
-    service
 }
-#[test]
-fn group_directory_is_revisioned_and_preserves_private_settings() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    let mut db = database(&profile).unwrap();
-    let service = grant_group(&db);
-    assert!(directory::put(&mut db, &group_entry("1"), None, true, 1).is_err());
-    directory::put(&mut db, &group_entry("1"), Some(&service), false, 1).unwrap();
-    directory::patch(&db, "alice~#dev", &json!({"alias":"Work"}), 2).unwrap();
-    let mut update = group_entry("2");
-    update["avatar"] = json!("data:image/png;base64,AA==");
-    let saved = directory::put(&mut db, &update, Some(&service), false, 3).unwrap();
-    assert_eq!(saved["alias"], "Work");
-    assert_eq!(
-        directory::put(&mut db, &group_entry("1"), Some(&service), false, 4).unwrap(),
-        saved
+
+#[tokio::test]
+async fn group_directory_binds_the_name_and_preserves_its_alias() {
+    let endpoint = crate::test_support::identity::endpoint("alice.dhttp.net");
+    let visitor = owner(&endpoint).unwrap();
+    let access =
+        AccessService::load_from_db("sqlite::memory:", endpoint.name(), visitor.subject_id())
+            .await
+            .unwrap();
+    let service = group_service();
+    assert!(
+        directory::put(&access, &group_entry(), None, 1)
+            .await
+            .is_err()
     );
+    directory::put(&access, &group_entry(), Some(&service), 1)
+        .await
+        .unwrap();
+    directory::patch(&access, "alice~#dev", &json!({"alias":"Work"}), 2)
+        .await
+        .unwrap();
+    let saved = directory::put(&access, &group_entry(), Some(&service), 3)
+        .await
+        .unwrap();
+    assert_eq!(saved["alias"], "Work");
+    let mut conflict = group_entry();
+    conflict["bound_subject"] = json!("b".repeat(64));
     assert_eq!(
-        directory::put(&mut db, &group_entry("2"), Some(&service), false, 4)
+        directory::put(&access, &conflict, Some(&service), 4)
+            .await
             .unwrap_err()
             .0,
         409
     );
-    update["bound_subject"] = json!("b".repeat(64));
-    assert_eq!(
-        directory::put(&mut db, &update, Some(&service), false, 4)
-            .unwrap_err()
-            .1,
-        "group_binding_conflict"
+    conflict["name"] = json!("alice~#other");
+    conflict["bound_subject"] = saved["bound_subject"].clone();
+    assert!(
+        directory::put(&access, &conflict, Some(&service), 5)
+            .await
+            .unwrap()["alias"]
+            .is_null()
     );
 }
 
@@ -876,16 +882,11 @@ async fn directory_routes_merge_filter_paginate_and_require_verified_owner() {
     );
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    let service = grant_group(&database(&profile).unwrap());
-    directory::put(
-        &mut database(&profile).unwrap(),
-        &group_entry("1"),
-        Some(&service),
-        false,
-        1,
-    )
-    .unwrap();
-    assert!(access.find_contact_by_name("alice~#dev").await.is_err());
+    let service = group_service();
+    directory::put(&access, &group_entry(), Some(&service), 1)
+        .await
+        .unwrap();
+    assert!(access.find_contact_by_name("alice~#dev").await.is_ok());
     let router = contact_router(profile, endpoint, access);
     let response = router
         .clone()
@@ -933,26 +934,12 @@ async fn directory_routes_merge_filter_paginate_and_require_verified_owner() {
                     "pishoo-source-lib",
                     "dev.genmeta.tech.dhttp.net/std/comm/group",
                 )
-                .body(Body::from(group_entry("1").to_string()))
+                .body(Body::from(group_entry().to_string()))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-}
-
-#[test]
-fn directory_rejects_unsupported_kinds() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    let mut db = database(&profile).unwrap();
-    let entry = json!({"kind":"title","name":"student@mit.edu"});
-    assert_eq!(
-        directory::put(&mut db, &entry, None, true, 1)
-            .unwrap_err()
-            .0,
-        400
-    );
 }
 
 #[test]
@@ -972,16 +959,15 @@ fn v6_upgrade_removes_title_entries_and_preserves_groups_and_grants() {
         "../../../src/contact/sql/migrations/v7_simplify_contacts.sql"
     ))
     .unwrap();
-    let entries = directory::entries(&db).unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["name"], "alice~#dev");
-    assert_eq!(entries[0]["alias"], "Private");
-    assert!(entries[0].get("member_joined_seq").is_none());
-    let service = ("service".to_owned(), "0".repeat(64));
-    for kind in ["group", "name"] {
-        directory::authorize(&db, &service, kind).unwrap();
-    }
-    assert!(directory::authorize(&db, &service, "title").is_err());
+    assert_eq!(
+        db.query_row(
+            "SELECT alias FROM contact_entries WHERE name='alice~#dev'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "Private"
+    );
     assert!(
         db.prepare("SELECT bound_name FROM contact_entries")
             .is_err()
@@ -1043,6 +1029,30 @@ async fn receipts_are_scoped_to_the_application_and_verified_applicant() {
             .unwrap();
         }
     }
+    // Both the application and its contact row still carry the original deadline.
+    use sea_orm::ConnectionTrait;
+    access
+        .database()
+        .execute_unprepared(
+            "UPDATE contacts SET created_at=1,updated_at=2,expired_after=3;
+         UPDATE contact_applications SET received_at=1,expired_after=3;",
+        )
+        .await
+        .unwrap();
+    let accepted = access::receipt(&access, &receiver, &peer, &id)
+        .await
+        .unwrap();
+    assert_eq!(accepted["status"], "active");
+    assert_eq!(accepted["valid_before"], 3);
+    access
+        .database()
+        .execute_unprepared("DELETE FROM contacts")
+        .await
+        .unwrap();
+    let removed = access::receipt(&access, &receiver, &peer, &id)
+        .await
+        .unwrap();
+    assert_eq!(removed["status"], "revoked");
     let other = access_control::Visitor::new(
         peer.name(),
         access_control::SubjectId::new(b"different-applicant-subject").unwrap(),
