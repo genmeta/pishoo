@@ -9,6 +9,7 @@
 - Share the permission catalog between contact requests and the permissions API, and paginate contacts with their outgoing requests.
 - Open personal card reads by default when creating an identity ACL. Existing ACLs retain their saved rules, and saved permission presets have a separate access rule.
 - Refresh due OCSP responses after resuming from system sleep.
+- Raise the initial and maximum WASM HTTP fuel balance to 500 million per call.
 
 ## [0.9.2-preview.2] - 2026-11-19
 

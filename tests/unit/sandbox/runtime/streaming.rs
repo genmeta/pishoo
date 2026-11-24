@@ -4,10 +4,13 @@ use super::*;
 fn fuel_refill_is_bounded_by_time_and_burst() {
     assert_eq!(replenished_fuel(123, Duration::ZERO), 123);
     assert_eq!(replenished_fuel(123, Duration::from_millis(100)), 1_000_123);
-    assert_eq!(replenished_fuel(123, Duration::from_secs(3600)), BURST_FUEL);
     assert_eq!(
-        replenished_fuel(BURST_FUEL, Duration::from_secs(1)),
-        BURST_FUEL
+        replenished_fuel(123, Duration::from_secs(3600)),
+        500_000_000
+    );
+    assert_eq!(
+        replenished_fuel(499_000_000, Duration::from_secs(1)),
+        500_000_000
     );
 }
 
@@ -21,9 +24,10 @@ async fn epoch_refills_http_but_not_cli_after_idle() {
                 (loop $l local.get $n i32.const 1 i32.sub local.tee $n br_if $l)))"#,
     )
     .unwrap();
-    for replenish in [false, true] {
+    for (replenish, initial_fuel) in [(false, 100_000_000), (true, 500_000_000)] {
         let mut store = Store::new(&runtime.engine, ());
         configure_execution(&mut store, replenish).unwrap();
+        assert_eq!(store.get_fuel().unwrap(), initial_fuel);
         let instance = wasmtime::Instance::new_async(&mut store, &module, &[])
             .await
             .unwrap();

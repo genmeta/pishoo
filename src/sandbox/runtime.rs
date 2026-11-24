@@ -894,7 +894,8 @@ pub(super) fn execution_limits() -> wasmtime::StoreLimits {
         .build()
 }
 
-const BURST_FUEL: u64 = 100_000_000;
+const HTTP_BURST_FUEL: u64 = 500_000_000;
+const CLI_FUEL: u64 = 100_000_000;
 const REFILL_FUEL_PER_SECOND: u64 = 10_000_000;
 
 fn replenished_fuel(remaining: u64, elapsed: Duration) -> u64 {
@@ -904,14 +905,14 @@ fn replenished_fuel(remaining: u64, elapsed: Duration) -> u64 {
         / 1_000_000_000;
     u128::from(remaining)
         .saturating_add(refill)
-        .min(u128::from(BURST_FUEL)) as u64
+        .min(u128::from(HTTP_BURST_FUEL)) as u64
 }
 
 fn configure_execution<T: Send + 'static>(
     store: &mut Store<T>,
     replenish: bool,
 ) -> wasmtime::Result<()> {
-    store.set_fuel(BURST_FUEL)?;
+    store.set_fuel(if replenish { HTTP_BURST_FUEL } else { CLI_FUEL })?;
     store.fuel_async_yield_interval(Some(10_000))?;
     store.set_epoch_deadline(1);
     if replenish {
