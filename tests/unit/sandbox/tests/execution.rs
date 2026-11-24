@@ -140,3 +140,6 @@ mod command;
 
 #[path = "execution/python_lib.rs"]
 mod python_lib;
+
+#[path = "execution/sqlite_recovery.rs"]
+mod sqlite_recovery;

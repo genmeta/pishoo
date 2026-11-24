@@ -181,12 +181,16 @@ release. Internal resource projections retain their existing API responsibilitie
 ## Installed manual access
 
 For v2 installations, Pishoo retains the verified original archive in its local
-`.volume/sys/pkg/releases/<package_sha256>.waz` cache. Archive publication is
-atomic and occurs before the installation transaction commits. Package detail
-reads check the retained bytes against the installed digest before returning
-`docs` locations and the English manual text through the existing package detail
-response. Historical installations without a retained archive remain readable.
-The cache may retain earlier downloaded releases.
+`.volume/sys/pkg/<full-package-name>-<version>.waz` cache, following Jade's
+default build filename. For example, `std/comm/message` uses the same directory
+hierarchy under `pkg/`. A leading `database/` or `releases/` package namespace
+uses `database~/` or `releases~/` to avoid collisions with the registry or the
+old cache. Archive publication shares the installation recovery journal.
+Package detail reads check the retained bytes against the installed digest
+before returning `docs` locations and the English manual text. Archives under
+the old cache directory remain readable and move after a package transaction,
+once the original bytes have been verified. Historical installations without an
+archive remain readable.
 
 The store returns `docs` locations and the manual text on exact release details.
 Workspace exposes the README and CHANGELOG links in its existing package views.

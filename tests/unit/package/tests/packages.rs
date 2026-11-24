@@ -348,7 +348,7 @@ fn expanded_app_loads_installed_public_files_without_revalidation_and_rejects_sy
     crate::setup::load_server_config(&profile).unwrap();
     let id = "alice.dhttp.net/hello";
     install_app(&profile, id, &frontend_package("1.0.0", "verified page")).unwrap();
-    let directory = profile.join("app/hello");
+    let directory = profile.join("app/hello.1.0.0");
     assert!(!directory.join("app.waz").exists());
     let index = directory.join("index.html");
     assert_eq!(std::fs::read(&index).unwrap(), b"verified page");
@@ -525,13 +525,8 @@ async fn frontend_updates_switch_directories_and_open_responses_survive_removal(
         old_response.into_body().collect().await.unwrap().to_bytes(),
         "old page"
     );
-    let before = std::fs::read(
-        profile
-            .join("app")
-            .join(id.rsplit('/').next().unwrap())
-            .join("index.html"),
-    )
-    .unwrap();
+    let index = profile.join("app/hello.2.0.0/index.html");
+    let before = std::fs::read(&index).unwrap();
     assert!(
         crate::package::files::install_packages(
             &profile,
@@ -540,16 +535,7 @@ async fn frontend_updates_switch_directories_and_open_responses_survive_removal(
         )
         .is_err()
     );
-    assert_eq!(
-        std::fs::read(
-            profile
-                .join("app")
-                .join(id.rsplit('/').next().unwrap())
-                .join("index.html")
-        )
-        .unwrap(),
-        before
-    );
+    assert_eq!(std::fs::read(&index).unwrap(), before);
     for (router, expected) in [(&new, "new page")] {
         for method in [Method::GET, Method::HEAD] {
             let response = router
@@ -1786,9 +1772,13 @@ fn hierarchical_package_names_keep_complete_identity_and_isolated_files() {
         .map(|dependency| dependency["name"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(names, ["comm/group", "group"]);
-    assert!(profile.join("app/live/dashboard/index.html").is_file());
+    assert!(
+        profile
+            .join("app/live/dashboard.1.0.0/index.html")
+            .is_file()
+    );
     std::fs::rename(
-        profile.join("app/live/dashboard"),
+        profile.join("app/live/dashboard.1.0.0"),
         profile.join("app/live%2Fdashboard"),
     )
     .unwrap();
@@ -1798,7 +1788,11 @@ fn hierarchical_package_names_keep_complete_identity_and_isolated_files() {
             .contains_key("std.dhttp.net/live/dashboard")
     );
     install_app(&profile, "std.dhttp.net/live/dashboard", &app_bytes).unwrap();
-    assert!(profile.join("app/live/dashboard/index.html").is_file());
+    assert!(
+        profile
+            .join("app/live/dashboard.1.0.0/index.html")
+            .is_file()
+    );
     assert!(!profile.join("app/live%2Fdashboard").exists());
 
     remove_app(&profile, "std.dhttp.net/live/dashboard").unwrap();

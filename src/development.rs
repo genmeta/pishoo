@@ -10,13 +10,37 @@ use std::{
 use axum::{Router, body::Body, response::IntoResponse, routing::any};
 use dhttp_home::identity::IdentityProfile;
 use http::Request;
-use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use crate::{
     Error, Result, package,
-    sandbox::{Invocation, Lib, Outgoing, Sandbox},
+    sandbox::{Lib, Sandbox},
 };
+
+pub(crate) fn preview_mount<'a>(
+    profile: &IdentityProfile,
+    tail: &'a str,
+    frontend: bool,
+) -> Option<(String, &'a str)> {
+    std::iter::once(tail)
+        .chain(tail.rmatch_indices('/').map(|(end, _)| &tail[..end]))
+        .find_map(|mount| {
+            [
+                Some(mount.to_owned()),
+                frontend.then(|| format!("std/{mount}")),
+            ]
+            .into_iter()
+            .flatten()
+            .find(|name| {
+                package::valid_id(name).is_ok()
+                    && profile
+                        .join("lib")
+                        .join(format!("{name}.preview/manifest.json"))
+                        .is_file()
+            })
+            .map(|name| (name, &tail[mount.len()..]))
+        })
+}
 
 pub(crate) fn router(
     profile: IdentityProfile,
@@ -26,13 +50,13 @@ pub(crate) fn router(
     native_api: Router,
     fallback: Router,
 ) -> Router {
+    let preview_api = Sandbox::api_router(sandbox.clone(), endpoint.clone(), access, native_api);
     let route = any(move |request: Request<Body>| {
-        let (profile, sandbox, endpoint, access, native_api, fallback) = (
+        let (profile, sandbox, endpoint, preview_api, fallback) = (
             profile.clone(),
             sandbox.clone(),
             endpoint.clone(),
-            access.clone(),
-            native_api.clone(),
+            preview_api.clone(),
             fallback.clone(),
         );
         async move {
@@ -53,10 +77,7 @@ pub(crate) fn router(
                     (false, false, path.trim_start_matches('/'))
                 };
                 if standard {
-                    if !matches!(
-                        tail.split('/').next().unwrap_or(""),
-                        "sys" | "acl" | "contact" | "forward" | "file" | "pishoo" | "contacts"
-                    ) {
+                    if !crate::routes::reserved_standard_path(&path["/std".len()..]) {
                         let profile = profile.clone();
                         let sandbox = sandbox.clone();
                         tokio::task::spawn_blocking(move || {
@@ -69,27 +90,9 @@ pub(crate) fn router(
                         .await
                         .expect("Router is infallible"));
                 }
-                let name = tail
-                    .match_indices('/')
-                    .map(|(end, _)| &tail[..end])
-                    .chain(std::iter::once(tail))
-                    .rfind(|name| {
-                        package::valid_id(name).is_ok()
-                            && profile
-                                .join("lib")
-                                .join(format!("{name}.preview/manifest.json"))
-                                .is_file()
-                    })
-                    .unwrap_or_else(|| tail.split('/').next().unwrap_or(""));
-                let suffix = &tail[name.len()..];
-                let name = name.to_owned();
-                // Local files require the real owner, independently of identity spelling.
-                let local_exists = package::valid_id(&name).is_ok()
-                    && profile
-                        .join("lib")
-                        .join(format!("{name}.preview/manifest.json"))
-                        .is_file();
-                if !local_exists {
+                let local = preview_mount(&profile, tail, frontend);
+                let Some((name, suffix)) = local.filter(|(name, _)| frontend || name != "app")
+                else {
                     sandbox.write().unwrap().dev_libs.retain(|id, (_, lib)| {
                         let package = id.split_once('/').map_or(id.as_str(), |(_, name)| name);
                         let keep = profile
@@ -101,85 +104,14 @@ pub(crate) fn router(
                         }
                         keep
                     });
-                }
-                if package::valid_id(&name).is_err()
-                    || (!frontend && name == "app")
-                    || !local_exists
-                {
                     return Ok(fallback
                         .oneshot(request)
                         .await
                         .expect("Router is infallible"));
-                }
-                let name = name.to_owned();
+                };
                 let suffix = suffix.to_owned();
                 let author = author(&profile, &name)?;
-                let selected = crate::sandbox::requested_version(&request)?;
-                let profile_root = root(&profile)?;
-                let directory = project_directory(&profile_root, &name)?;
-                let local_manifest = manifest(&directory, &name)?;
-                let local_version = local_manifest["package"]["version"].as_str().unwrap();
-                let source_version = request
-                    .extensions()
-                    .get::<Arc<Lib>>()
-                    .and_then(|source| source.dependencies.get(&name))
-                    .map(|(_, version)| version.as_str());
-                let use_formal = selected
-                    .or(source_version)
-                    .is_some_and(|version| version != local_version);
-                drop(directory);
-                drop(profile_root);
-                if use_formal {
-                    return Ok(fallback
-                        .oneshot(request)
-                        .await
-                        .expect("Router is infallible"));
-                }
-                if package::require_owner(&endpoint, &request).is_err() {
-                    let id = format!("{author}/{name}");
-                    let installed = {
-                        let state = sandbox.read().unwrap();
-                        if frontend {
-                            state.apps.contains_key(&id)
-                        } else {
-                            state.libs.contains_key(&id)
-                        }
-                    };
-                    if installed {
-                        return Ok(fallback
-                            .oneshot(request)
-                            .await
-                            .expect("Router is infallible"));
-                    }
-                }
-
                 if !frontend && package::is_standard_author(&author) {
-                    return Ok(fallback
-                        .oneshot(request)
-                        .await
-                        .expect("Router is infallible"));
-                }
-                let replaced = {
-                    let root = root(&profile)?;
-                    let directory = project_directory(&root, &name)?;
-                    let manifest = manifest(&directory, &name)?;
-                    let kind = if frontend { "app" } else { "lib" };
-                    child(&directory, "state.json", false).is_ok()
-                        && matches!(
-                            runtime_file(&root, &directory, &name, &manifest, kind),
-                            Err(Error::RouteNotFound)
-                        )
-                };
-                if replaced {
-                    if !frontend {
-                        sandbox.write().unwrap().dev_libs.retain(|id, (_, lib)| {
-                            let keep = id.split_once('/').map(|(_, name)| name) != Some(&name);
-                            if !keep {
-                                lib.stream_retired.cancel();
-                            }
-                            keep
-                        });
-                    }
                     return Ok(fallback
                         .oneshot(request)
                         .await
@@ -201,45 +133,12 @@ pub(crate) fn router(
                     );
                     return Ok(response);
                 }
-                let (lib, tasks) = tokio::task::spawn_blocking(move || {
-                    let lib = load(&profile, &sandbox, &author, &name)?;
-                    let tasks = sandbox.read().unwrap().tasks.clone();
-                    Ok::<_, Error>((lib, tasks))
-                })
-                .await??;
-                let handshake = request
-                    .extensions()
-                    .get::<dhttp::HandshakeSummary>()
-                    .ok_or(Error::MissingHandshake)?;
-                let version = lib.openapi.info.version.clone();
-                let invocation = Invocation::new(
-                    lib,
-                    endpoint.clone(),
-                    handshake,
-                    tasks,
-                    Outgoing::Granted {
-                        source: None,
-                        endpoint,
-                        access,
-                        api: native_api,
-                    },
-                )?;
-                let mut request = request.map(|body| body.map_err(Into::into).boxed_unsync());
-                let path = if suffix.is_empty() { "/" } else { &suffix };
-                let mut parts = request.uri().clone().into_parts();
-                parts.path_and_query = Some(
-                    match request.uri().query() {
-                        Some(query) => format!("{path}?{query}"),
-                        None => path.to_owned(),
-                    }
-                    .parse()
-                    .map_err(|_| Error::BadRequest("invalid development path".into()))?,
-                );
-                *request.uri_mut() = http::Uri::from_parts(parts)
-                    .map_err(|_| Error::BadRequest("invalid development URI".into()))?;
-                invocation.execute(request).await.map(|response| {
-                    crate::sandbox::version_response(response.map(Body::new), &version)
-                })
+                tokio::task::spawn_blocking(move || load(&profile, &sandbox, &author, &name))
+                    .await??;
+                Ok(preview_api
+                    .oneshot(request)
+                    .await
+                    .expect("Router is infallible"))
             }
             .await;
             result.unwrap_or_else(|error| {
@@ -376,6 +275,14 @@ fn runtime_file(
     manifest: &serde_json::Value,
     kind: &str,
 ) -> Result<File> {
+    let state = match child(directory, "state.json", false) {
+        Ok(file) => Some(
+            serde_json::from_reader::<_, serde_json::Value>(file.take(1024 * 1024))
+                .map_err(|_| Error::Denied)?,
+        ),
+        Err(Error::RouteNotFound) => None,
+        Err(error) => return Err(error),
+    };
     let path = if kind == "lib" {
         let prefix = if package::is_standard_author(manifest["package"]["author"].as_str().unwrap())
             && !name.starts_with("std/")
@@ -389,18 +296,11 @@ fn runtime_file(
             manifest["package"]["version"].as_str().unwrap()
         )
     } else {
+        let name = package::app_name(name);
         format!(
             "app/{name}.{}",
             manifest["package"]["version"].as_str().unwrap()
         )
-    };
-    let state = match child(directory, "state.json", false) {
-        Ok(file) => Some(
-            serde_json::from_reader::<_, serde_json::Value>(file.take(1024 * 1024))
-                .map_err(|_| Error::Denied)?,
-        ),
-        Err(Error::RouteNotFound) => None,
-        Err(error) => return Err(error),
     };
     let open = |path: &str| -> Result<File> {
         let mut parts = path.split('/').peekable();
@@ -410,33 +310,7 @@ fn runtime_file(
         }
         Ok(file)
     };
-    let file = match open(&path) {
-        Ok(file) => file,
-        Err(Error::RouteNotFound)
-            if state
-                .as_ref()
-                .is_none_or(|state| state["layout"] != "versions") =>
-        {
-            let legacy = if kind == "app" {
-                format!("app/{name}")
-            } else {
-                let prefix =
-                    if package::is_standard_author(manifest["package"]["author"].as_str().unwrap())
-                        && !name.starts_with("std/")
-                    {
-                        "lib/std"
-                    } else {
-                        "lib"
-                    };
-                format!(
-                    "{prefix}/{name}_{}.wasm",
-                    manifest["package"]["version"].as_str().unwrap()
-                )
-            };
-            open(&legacy)?
-        }
-        Err(error) => return Err(error),
-    };
+    let file = open(&path)?;
     if let Some(state) = state {
         let metadata = file.metadata()?;
         if state[kind]["dev"].as_u64() != Some(metadata.dev())
@@ -481,7 +355,7 @@ fn load_standard_libraries(
         Err(rustix::io::Errno::NOENT) => None,
         Err(error) => return Err(std::io::Error::from(error).into()),
     };
-    let mut present = HashSet::new();
+    let mut names = Vec::new();
     let mut pending = directory
         .into_iter()
         .map(|directory| (String::new(), directory))
@@ -510,18 +384,20 @@ fn load_standard_libraries(
                 pending.push((name, nested));
                 continue;
             }
-            verify_root(profile, &root)?;
-            let opened = project_directory(&root, &name)?;
-            let manifest = manifest(&opened, &name)?;
-            let author = manifest["package"]["author"].as_str().unwrap();
-            if package::is_standard_author(author) {
-                match load(profile, sandbox, author, &name) {
-                    Ok(_) => {
-                        present.insert(format!("{author}/{name}"));
-                    }
-                    Err(Error::RouteNotFound) => {}
-                    Err(error) => return Err(error),
+            names.push(name);
+        }
+    }
+    drop(root);
+    let mut present = HashSet::new();
+    for name in names {
+        let author = author(profile, &name)?;
+        if package::is_standard_author(&author) {
+            match load(profile, sandbox, &author, &name) {
+                Ok(_) => {
+                    present.insert(format!("{author}/{name}"));
                 }
+                Err(Error::RouteNotFound) => {}
+                Err(error) => return Err(error),
             }
         }
     }

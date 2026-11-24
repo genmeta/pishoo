@@ -1,5 +1,9 @@
 //! Drive the process event loop and serial reconciliation of identity servers.
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use dhttp_home::{DhttpHome, identity::IdentityProfile};
 use futures::{StreamExt, stream::FuturesUnordered};
@@ -12,11 +16,20 @@ use crate::{
     setup::{ServerConfig, read_server_config},
 };
 
+const OCSP_PERIOD: Duration = Duration::from_secs(72 * 60 * 60);
+
 pub(super) fn ocsp_ticks() -> tokio::time::Interval {
-    let period = std::time::Duration::from_secs(3 * 24 * 60 * 60);
-    let mut interval = tokio::time::interval_at(Instant::now() + period, period);
+    let mut interval = tokio::time::interval_at(Instant::now() + OCSP_PERIOD, OCSP_PERIOD);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval
+}
+
+fn wake_due_ocsp(ticks: &mut tokio::time::Interval, now: SystemTime, deadline: SystemTime) -> bool {
+    if now < deadline {
+        return false;
+    }
+    ticks.reset_immediately();
+    true
 }
 
 pub async fn run() -> Result<()> {
@@ -57,6 +70,7 @@ pub async fn run() -> Result<()> {
         contact_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut contact_runs = FuturesUnordered::new();
         let mut ocsp_ticks = ocsp_ticks();
+        let mut ocsp_deadline = SystemTime::now() + OCSP_PERIOD;
         let mut ocsp_updates = FuturesUnordered::new();
         let interrupt = tokio::signal::ctrl_c();
         tokio::pin!(interrupt);
@@ -89,11 +103,9 @@ pub async fn run() -> Result<()> {
                     _ = async { #[cfg(unix)] { terminate.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => return Ok(false),
                     Some(command) = system_control.recv() => {
                         if command == "restart" { return Ok(true); }
-                        for server in servers.values_mut() {
-                            let result = server.sandbox.write().unwrap().load_libs(&server.profile);
-                            match result {
-                                Ok(()) => *server.router.write().unwrap() = current_router(server),
-                                Err(error) => tracing::warn!(identity=server.name(), %error, "System reload failed for identity"),
+                        for server in servers.values() {
+                            if let Err(error) = server.sandbox.write().unwrap().load_libs(&server.profile) {
+                                tracing::warn!(identity=server.name(), %error, "System reload failed for identity");
                             }
                         }
                         config_ticks.reset_immediately();
@@ -127,6 +139,10 @@ pub async fn run() -> Result<()> {
                         config_ticks.reset_immediately();
                     }
                     _ = config_ticks.tick(), if jobs.is_empty() && ocsp_updates.is_empty() => {
+                        // Staple expiry advances during suspension even if the timer clock stops.
+                        if wake_due_ocsp(&mut ocsp_ticks, SystemTime::now(), ocsp_deadline) {
+                            continue;
+                        }
                         let result = async {
                             let user_homes = multiuser.then(account_homes).transpose()?;
                             reconcile_device(&mdns, &home, user_homes.as_deref(), &mut servers, runtime.clone(), &system_db, &system_commands).await
@@ -139,6 +155,7 @@ pub async fn run() -> Result<()> {
                         }
                     }
                     _ = ocsp_ticks.tick(), if ocsp_updates.is_empty() => {
+                        ocsp_deadline = SystemTime::now() + OCSP_PERIOD;
                         for server in servers.values() {
                             let profile = server.profile.clone();
                             let endpoint = server.endpoint.clone();
@@ -213,7 +230,7 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-async fn reconcile_device(
+pub(super) async fn reconcile_device(
     mdns: &ddns::mdns::MdnsResolverSet,
     home: &DhttpHome,
     user_homes: Option<&[std::path::PathBuf]>,
@@ -223,20 +240,26 @@ async fn reconcile_device(
     commands: &tokio::sync::mpsc::Sender<&'static str>,
 ) -> Result<bool> {
     crate::system::recover(home, system_db).await?;
-    let changed =
-        reconcile_profiles(mdns, home, user_homes, servers, runtime.clone(), system_db).await?;
-    for server in servers.values_mut() {
-        server.system_router =
-            crate::system::router(home.clone(), system_db.clone(), commands.clone()).merge(
-                crate::system::permissions_router(
-                    server.profile.clone(),
-                    server.access.clone(),
-                    system_db.clone(),
-                ),
-            );
-        *server.router.write().unwrap() = current_router(server);
-    }
-    Ok(changed)
+    reconcile_profiles(
+        mdns,
+        home,
+        user_homes,
+        servers,
+        runtime,
+        system_db,
+        |server| {
+            server.system_router =
+                crate::system::router(home.clone(), system_db.clone(), commands.clone()).merge(
+                    crate::system::permissions_router(
+                        server.profile.clone(),
+                        server.access.clone(),
+                        system_db.clone(),
+                    ),
+                );
+            *server.router.write().unwrap() = current_router(server);
+        },
+    )
+    .await
 }
 
 pub(super) async fn load_profile(
@@ -380,6 +403,7 @@ pub(super) async fn reconcile_profiles(
     servers: &mut BTreeMap<String, Server>,
     runtime: Arc<WasmRuntime>,
     system_db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    configure_system_router: impl Fn(&mut Server),
 ) -> Result<bool> {
     let profiles = discover_profiles(home, user_homes)?;
     let mut changed = false;
@@ -440,13 +464,12 @@ pub(super) async fn reconcile_profiles(
                     }
                 }
             } else if let Some(mut server) = load_profile(profile, runtime.clone()).await? {
-                if server.config.listen != "off" {
-                    match server.listen().await {
-                        Ok(listener) => server.listener = Some(listener),
-                        Err(error) => {
-                            server.close().await?;
-                            return Err(error);
-                        }
+                configure_system_router(&mut server);
+                match server.listen().await {
+                    Ok(listener) => server.listener = Some(listener),
+                    Err(error) => {
+                        server.close().await?;
+                        return Err(error);
                     }
                 }
                 servers.insert(name.clone(), server);
@@ -484,7 +507,7 @@ fn same_config(a: &ServerConfig, b: &ServerConfig) -> bool {
 
 async fn apply_config(server: &mut Server, config: ServerConfig) -> Result<()> {
     let scope_changed = server.config.listen != config.listen;
-    let publisher = if scope_changed && config.listen != "off" {
+    let publisher = if scope_changed {
         dns::authority(&server.endpoint)
             .map_err(|error| Error::InvalidIdentity(error.to_string()))?;
         if matches!(config.listen.as_str(), "external" | "all") {
@@ -492,8 +515,6 @@ async fn apply_config(server: &mut Server, config: ServerConfig) -> Result<()> {
         } else {
             None
         }
-    } else if scope_changed {
-        None
     } else {
         server.publisher.clone()
     };
@@ -501,20 +522,16 @@ async fn apply_config(server: &mut Server, config: ServerConfig) -> Result<()> {
     if scope_changed {
         // Dropping the resource unregisters this name without closing shared connections.
         server.listener.take();
-        if server.config.listen != "off" {
-            match server.listen().await {
-                Ok(listener) => server.listener = Some(listener),
-                Err(error) => {
-                    server.config = previous;
-                    if server.config.listen != "off" {
-                        match server.listen().await {
-                            Ok(listener) => server.listener = Some(listener),
-                            Err(rollback) => tracing::error!(identity = server.name(), %rollback,
-                                "could not restore previous listener"),
-                        }
-                    }
-                    return Err(error);
+        match server.listen().await {
+            Ok(listener) => server.listener = Some(listener),
+            Err(error) => {
+                server.config = previous;
+                match server.listen().await {
+                    Ok(listener) => server.listener = Some(listener),
+                    Err(rollback) => tracing::error!(identity = server.name(), %rollback,
+                        "could not restore previous listener"),
                 }
+                return Err(error);
             }
         }
     }
@@ -524,6 +541,9 @@ async fn apply_config(server: &mut Server, config: ServerConfig) -> Result<()> {
 }
 
 pub(super) async fn apply_ocsp(server: &mut Server, endpoint: dhttp::Endpoint) -> Result<()> {
+    if server.endpoint.local_authority()?.ocsp() == endpoint.local_authority()?.ocsp() {
+        return Ok(());
+    }
     let publisher = if matches!(server.config.listen.as_str(), "external" | "all") {
         Some(dns::publisher(&endpoint)?)
     } else {
@@ -534,3 +554,7 @@ pub(super) async fn apply_ocsp(server: &mut Server, endpoint: dhttp::Endpoint) -
     *server.router.write().unwrap() = current_router(server);
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/server/tests/ocsp_schedule.rs"]
+mod ocsp_schedule_tests;

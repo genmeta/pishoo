@@ -75,7 +75,7 @@ fn unified_package_installs_updates_removes_resources_and_preserves_data() {
     assert!(metadata.get("kind").is_none());
     assert!(profile.join("lib/calendar.wasm.1.0.0").is_file());
     assert_eq!(
-        std::fs::read(profile.join("app/calendar/index.html")).unwrap(),
+        std::fs::read(profile.join("app/calendar.1.0.0/index.html")).unwrap(),
         b"1.0.0"
     );
     let mut sandbox = Sandbox::new(runtime.clone());
@@ -147,7 +147,7 @@ fn failed_commits_restore_runtime_registration_and_permission_declarations() {
             previous
         );
         assert_eq!(
-            std::fs::read(profile.join("app/calendar/index.html")).unwrap(),
+            std::fs::read(profile.join("app/calendar.1.0.0/index.html")).unwrap(),
             b"1.0.0"
         );
         assert_eq!(

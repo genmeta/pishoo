@@ -3,7 +3,7 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 
 use super::*;
 
-fn group_name(raw: &str) -> Result<String, Failure> {
+pub(super) fn group_name(raw: &str) -> Result<String, Failure> {
     let (host, suffix) = raw
         .split_once("~#")
         .ok_or_else(|| fail(400, "invalid group name"))?;

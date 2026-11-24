@@ -341,7 +341,7 @@ fn actual_jade_signed_bytes_pass_the_same_installation_and_registration_gate() {
     );
     assert!(installed.get("signature_policy_version").is_none());
     assert_eq!(
-        std::fs::read(profile.join("app/developer-jade-smoke/index.html")).unwrap(),
+        std::fs::read(profile.join("app/developer-jade-smoke.0.0.1/index.html")).unwrap(),
         b"<h1>Developer-signed Jade integration</h1>\n"
     );
 }

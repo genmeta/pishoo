@@ -22,7 +22,7 @@ async fn wait_finishes_only_after_the_execution_returns() {
         let _ = released.await;
     });
     sandbox.close();
-    let mut waiting = Box::pin(sandbox.wait());
+    let mut waiting = Box::pin(Sandbox::wait(sandbox.tasks.clone()));
     assert!(futures::poll!(&mut waiting).is_pending());
     assert_eq!(sandbox.tasks.len(), 1);
     release.send(()).unwrap();
@@ -40,10 +40,13 @@ async fn a_shutdown_deadline_preserves_unfinished_execution_ownership() {
         finished.send(()).unwrap();
     });
     sandbox.close();
-    assert!(matches!(sandbox.wait().await, Err(Error::ShutdownDeadline)));
+    assert!(matches!(
+        Sandbox::wait(sandbox.tasks.clone()).await,
+        Err(Error::ShutdownDeadline)
+    ));
     assert_eq!(sandbox.tasks.len(), 1);
     release.send(()).unwrap();
-    sandbox.wait().await.unwrap();
+    Sandbox::wait(sandbox.tasks.clone()).await.unwrap();
     completion.await.unwrap();
     assert!(sandbox.tasks.is_empty());
 }

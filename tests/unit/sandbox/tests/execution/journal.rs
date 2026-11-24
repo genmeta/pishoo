@@ -135,6 +135,7 @@ async fn request_identity_is_derived_from_handshake_and_owner_requires_name_and_
         outgoing: Outgoing::Denied,
         local: local.clone(),
         remote: None,
+        sqlite_locks: Default::default(),
     };
     use crate::sandbox::host::identity_v2::pishoo::identity0_2_0::request_identity::Host as HostV2;
     let verified_local = HostV2::local(&mut state).await.unwrap();
@@ -1149,7 +1150,7 @@ async fn journal_browser_preview() {
     };
     tokio::select! {_ = serving => (),_ = tokio::time::sleep(Duration::from_secs(300))=>()}
     sandbox.close();
-    sandbox.wait().await.unwrap();
+    Sandbox::wait(sandbox.tasks.clone()).await.unwrap();
 }
 
 #[tokio::test]

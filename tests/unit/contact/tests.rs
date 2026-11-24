@@ -24,7 +24,12 @@ async fn contact_router_does_not_expose_a_profile_avatar_proxy() {
     );
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    let router = contact_router(profile, endpoint, access);
+    let router = contact_router(
+        Arc::new(Mutex::new(database(&profile).unwrap())),
+        profile,
+        endpoint,
+        access,
+    );
     for method in [Method::GET, Method::HEAD] {
         let response = router
             .clone()
@@ -163,7 +168,7 @@ fn expired_claims_cannot_resurrect_requests_and_database_reopens_without_private
     drop(db);
     let db = database(&profile).unwrap();
     assert_eq!(
-        outbound_request(&db, "bob.dhttp.net").unwrap()["status"],
+        outbound_request(&db, "bob.dhttp.net").unwrap().unwrap()["status"],
         "expired"
     );
     assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('profile_preferences','capability_decisions','capability_decision_events','chat_messages')",[],|row|row.get::<_,i64>(0)).unwrap(),0);
@@ -351,6 +356,19 @@ async fn selected_permission_titles_resolve_to_actual_operations() {
             .unwrap(),
         operations
     );
+    db.execute_batch("INSERT INTO package (has_lib,has_app,name,author,version)
+        VALUES (1,1,'std/calendar','dev.genmeta.tech.dhttp.net','1.0.0');
+        INSERT INTO lib_capability VALUES ('std/calendar','open','open calendar');
+        INSERT INTO lib_capability_operation VALUES ('std/calendar','open','GET','/app/std/calendar');").unwrap();
+    let calendar = selected(
+        &profile,
+        &endpoint,
+        &json!(["open calendar"]),
+        endpoint.name(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(requested(&calendar), json!({"/app/calendar":["GET"]}));
     use tower::ServiceExt;
     let response = crate::routes::capabilities_router(profile.clone())
         .oneshot(
@@ -372,23 +390,35 @@ async fn selected_permission_titles_resolve_to_actual_operations() {
 
 #[tokio::test]
 async fn contact_routes_follow_acl_and_accept_an_authorized_manager() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join(".volume/sys/contact")).unwrap();
     let endpoint = crate::test_support::identity::endpoint("alice.dhttp.net");
     let manager = crate::test_support::identity::endpoint("bob.dhttp.net");
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    std::fs::create_dir_all(profile.join(".volume/sys/access")).unwrap();
+    let access_uri = format!(
+        "sqlite://{}?mode=rwc",
+        profile.join(".volume/sys/access/database").display()
+    );
     let access = Arc::new(
         AccessService::load_from_db(
-            "sqlite::memory:",
+            &access_uri,
             endpoint.name(),
             owner(&endpoint).unwrap().subject_id(),
         )
         .await
         .unwrap(),
     );
-    let router = contact_router(profile.clone(), endpoint.clone(), access.clone()).layer(
-        axum::middleware::from_fn_with_state(access.clone(), crate::routes::authorize),
-    );
+    let db = database(&profile).unwrap();
+    let router = contact_router(
+        Arc::new(Mutex::new(db)),
+        profile.clone(),
+        endpoint.clone(),
+        access.clone(),
+    )
+    .layer(axum::middleware::from_fn_with_state(
+        access.clone(),
+        crate::routes::authorize,
+    ));
     let request = || {
         let mut request = Request::builder()
             .uri("/std/contact/list")
@@ -403,7 +433,6 @@ async fn contact_routes_follow_acl_and_accept_an_authorized_manager() {
         router.clone().oneshot(request()).await.unwrap().status(),
         StatusCode::FORBIDDEN
     );
-    assert!(!profile.join(".volume/sys/contact/database").exists());
     access
         .set_policy(
             access_control::Method::Specified(Method::GET),
@@ -417,7 +446,6 @@ async fn contact_routes_follow_acl_and_accept_an_authorized_manager() {
         router.clone().oneshot(request()).await.unwrap().status(),
         StatusCode::OK
     );
-    assert!(profile.join(".volume/sys/contact/database").exists());
     let mut cross_site = Request::builder()
         .method(Method::POST)
         .uri("/std/contact")
@@ -435,22 +463,33 @@ async fn contact_routes_follow_acl_and_accept_an_authorized_manager() {
 
 #[tokio::test]
 async fn contact_submission_without_capabilities_queues_without_contacting_the_peer() {
+    let endpoint = crate::test_support::identity::endpoint("alice.dhttp.net");
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join(".volume/sys/contact")).unwrap();
-    let endpoint = crate::test_support::identity::endpoint("alice.dhttp.net");
+    std::fs::create_dir_all(profile.join(".volume/sys/access")).unwrap();
+    let access_uri = format!(
+        "sqlite://{}?mode=rwc",
+        profile.join(".volume/sys/access/database").display()
+    );
     let access = Arc::new(
         AccessService::load_from_db(
-            "sqlite::memory:",
+            &access_uri,
             endpoint.name(),
             owner(&endpoint).unwrap().subject_id(),
         )
         .await
         .unwrap(),
     );
-    let router = contact_router(profile.clone(), endpoint.clone(), access.clone()).layer(
-        axum::middleware::from_fn_with_state(access.clone(), crate::routes::authorize),
-    );
+    let router = contact_router(
+        Arc::new(Mutex::new(database(&profile).unwrap())),
+        profile.clone(),
+        endpoint.clone(),
+        access.clone(),
+    )
+    .layer(axum::middleware::from_fn_with_state(
+        access.clone(),
+        crate::routes::authorize,
+    ));
     let mut request = Request::builder().method(Method::POST).uri("/std/contact")
         .header("content-type", "application/json")
         .body(Body::from(json!({"from":"alice.dhttp.net","to":"offline.dhttp.net","description":"Hello","requested_capabilities":[],"offered_capabilities":[]}).to_string())).unwrap();
@@ -554,7 +593,7 @@ fn contact_v1_upgrade_preserves_delivery_jobs_and_removes_only_saved_collection(
             .unwrap(),
             (Some("{}".into()), Some("{}".into()))
         );
-        let job = outbound_request(&db, "peer.dhttp.net").unwrap();
+        let job = outbound_request(&db, "peer.dhttp.net").unwrap().unwrap();
         assert_eq!(job["description"], "Keep request");
         assert_eq!(job["application_id"], "a".repeat(64));
         assert_eq!(
@@ -602,7 +641,7 @@ fn contact_v2_upgrade_preserves_bindings_sequence_and_pending_target_constraint(
             (7, "subject".into())
         );
         assert_eq!(
-            outbound_request(&db, "peer.dhttp.net").unwrap()["status"],
+            outbound_request(&db, "peer.dhttp.net").unwrap().unwrap()["status"],
             "failed"
         );
         assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('outbound_contact_requests','outbound_contact_requests_pending_target')", [], |r|r.get::<_,i64>(0)).unwrap(),0);
@@ -677,10 +716,16 @@ async fn outbound_submission_requires_both_verified_owner_name_and_subject() {
         let mut request = Request::builder().method(Method::POST).uri("/std/contact").header("content-type", "application/json").body(Body::from(json!({"from":endpoint.name(),"to":"bob.dhttp.net","description":"","requested_capabilities":[],"offered_capabilities":[]}).to_string())).unwrap();
         request.extensions_mut().insert(visitor);
         assert_eq!(
-            dispatch(profile.clone(), endpoint.clone(), access.clone(), request)
-                .await
-                .unwrap_err()
-                .0,
+            dispatch(
+                Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+                profile.clone(),
+                endpoint.clone(),
+                access.clone(),
+                request
+            )
+            .await
+            .unwrap_err()
+            .0,
             403
         );
     }
@@ -875,19 +920,29 @@ async fn group_directory_binds_the_name_and_preserves_its_alias() {
 async fn directory_routes_merge_filter_paginate_and_require_verified_owner() {
     let endpoint = crate::test_support::identity::endpoint("alice.dhttp.net");
     let visitor = owner(&endpoint).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    std::fs::create_dir_all(profile.join(".volume/sys/access")).unwrap();
+    let access_uri = format!(
+        "sqlite://{}?mode=rwc",
+        profile.join(".volume/sys/access/database").display()
+    );
     let access = Arc::new(
-        AccessService::load_from_db("sqlite::memory:", endpoint.name(), visitor.subject_id())
+        AccessService::load_from_db(&access_uri, endpoint.name(), visitor.subject_id())
             .await
             .unwrap(),
     );
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     let service = group_service();
     directory::put(&access, &group_entry(), Some(&service), 1)
         .await
         .unwrap();
     assert!(access.find_contact_by_name("alice~#dev").await.is_ok());
-    let router = contact_router(profile, endpoint, access);
+    let router = contact_router(
+        Arc::new(Mutex::new(database(&profile).unwrap())),
+        profile.clone(),
+        endpoint,
+        access,
+    );
     let response = router
         .clone()
         .oneshot(
@@ -898,9 +953,10 @@ async fn directory_routes_merge_filter_paginate_and_require_verified_owner() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let value: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(status, StatusCode::OK, "{value}");
     assert_eq!(value["total"], 1);
     assert_eq!(value["items"][0]["kind"], "group");
     let response = router
@@ -916,6 +972,74 @@ async fn directory_routes_merge_filter_paginate_and_require_verified_owner() {
     let value: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(value["total"], 0);
+
+    // One group, 101 people and one unbound draft share the same timestamp.
+    let acl = Connection::open(profile.join(".volume/sys/access/database")).unwrap();
+    acl.execute_batch(
+        "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<100)
+        INSERT INTO contacts(name,subject_id,class,status,expired_after,created_at,updated_at)
+        SELECT printf('peer%03d.dhttp.net',x),x'6162','Human',2,9999999999,1,1 FROM n",
+    )
+    .unwrap();
+    let db = database(&profile).unwrap();
+    seed_request(&db, "peer098a.dhttp.net", "queued", now() + 600);
+    seed_request(&db, "peer100.dhttp.net", "pending", now() + 600);
+    acl.execute(
+        "UPDATE contacts SET subject_id=x'00ff' WHERE name='peer100.dhttp.net'",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE outbound_contact_request SET contact_id=?1,target_subject='hex:00ff'
+        WHERE target_name='peer100.dhttp.net'",
+        [acl.query_row(
+            "SELECT id FROM contacts WHERE name='peer100.dhttp.net'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()],
+    )
+    .unwrap();
+    drop(db);
+    drop(acl);
+    let list = |query: &str| {
+        let req = Request::get(format!("/std/contact/list?kind=all&{query}"))
+            .extension(visitor.clone())
+            .body(Body::empty())
+            .unwrap();
+        let service = router.clone();
+        async move {
+            let response = service.oneshot(req).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            serde_json::from_slice::<Value>(
+                &response.into_body().collect().await.unwrap().to_bytes(),
+            )
+            .unwrap()
+        }
+    };
+    let result = list("page=2&page_size=100&sort=updated_at&order=asc").await;
+    assert_eq!(result["total"], 103);
+    let items = result["items"].as_array().unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "peer098a.dhttp.net",
+            "peer099.dhttp.net",
+            "peer100.dhttp.net"
+        ]
+    );
+    assert!(items[0]["id"].is_null());
+    assert_eq!(items[2]["subject_id"], "hex:00ff");
+    assert_eq!(items[2]["delivery_status"], "pending");
+    let reverse = list("page_size=3&sort=updated_at&order=desc").await;
+    assert_eq!(reverse["items"][0], items[2]);
+    assert_eq!(reverse["items"][2], items[0]);
+    let empty = list("page=3&page_size=100").await;
+    assert_eq!(empty["total"], 103);
+    assert_eq!(empty["items"], json!([]));
     let response = router
         .clone()
         .oneshot(
@@ -989,7 +1113,12 @@ async fn receipts_are_scoped_to_the_application_and_verified_applicant() {
             .await
             .unwrap(),
     );
-    let router = contact_router(profile, endpoint.clone(), access.clone());
+    let router = contact_router(
+        Arc::new(Mutex::new(database(&profile).unwrap())),
+        profile,
+        endpoint.clone(),
+        access.clone(),
+    );
     let id = "a".repeat(64);
     let send=Request::post("/std/contact").extension(peer.clone()).header("content-type","application/json")
         .body(Body::from(json!({"from":peer.name(),"to":endpoint.name(),"application_id":id,"class":"Human","description":"Hi",

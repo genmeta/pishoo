@@ -180,16 +180,13 @@ async fn package_upgrades_replace_apis_and_capabilities_without_changing_or_bloc
         let operations = db.prepare("SELECT capability_id,method,path FROM lib_capability_operation ORDER BY capability_id").unwrap()
             .query_map([], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?,r.get::<_, String>(2)?))).unwrap()
             .collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        let mut expected = vec![
-            ("manage".into(), "PUT".into(), format!("{mount}/nickname")),
-            ("public".into(), "GET".into(), format!("{mount}/signature")),
-        ];
-        if !frontend_first {
-            expected.push(("legacy".into(), "POST".into(), format!("{mount}/obsolete")));
-            expected.push(("read".into(), "GET".into(), format!("{mount}/nickname")));
-            expected.sort();
-        }
-        assert_eq!(operations, expected);
+        assert_eq!(
+            operations,
+            vec![
+                ("manage".into(), "PUT".into(), format!("{mount}/nickname")),
+                ("public".into(), "GET".into(), format!("{mount}/signature")),
+            ]
+        );
         let loaded = &sandbox.libs[&id].openapi;
         assert_eq!(loaded.info.version, "2.0.0");
         assert!(
@@ -200,7 +197,7 @@ async fn package_upgrades_replace_apis_and_capabilities_without_changing_or_bloc
                 .contains_key(&format!("{prefix}/obsolete"))
         );
 
-        // Retained versions keep their declarations and existing path grants.
+        // Retiring capability declarations leaves existing path grants intact.
         doc["info"]["version"] = "3.0.0".into();
         doc.as_object_mut().unwrap().remove("x-access-groups");
         for path in doc["paths"].as_object_mut().unwrap().values_mut() {
@@ -215,7 +212,7 @@ async fn package_upgrades_replace_apis_and_capabilities_without_changing_or_bloc
                 db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
                     .get::<_, i64>(0))
                     .unwrap(),
-                if frontend_first { 2 } else { 4 }
+                0
             );
         }
         assert_eq!(sandbox.libs[&id].openapi.info.version, "3.0.0");

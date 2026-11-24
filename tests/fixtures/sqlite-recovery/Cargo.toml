@@ -1,0 +1,18 @@
+[package]
+name = "sqlite-recovery-probe"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[lib]
+path = "probe.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+wasip2 = "=1.0.4"
+
+[profile.release]
+opt-level = "s"
+strip = true

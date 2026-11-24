@@ -194,6 +194,6 @@ async fn sandbox_close_retires_standard_http_streams() {
         .await
         .unwrap();
     sandbox.close();
-    sandbox.wait().await.unwrap();
+    Sandbox::wait(sandbox.tasks.clone()).await.unwrap();
     drop(response);
 }

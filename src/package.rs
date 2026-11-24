@@ -17,24 +17,18 @@ mod signing;
 mod store;
 
 pub(crate) use files::{
-    app_file, disk_bytes, disk_version_bytes, has_signing_evidence, installed_apps,
+    app_file, app_mount, app_name, disk_version_bytes, has_signing_evidence, installed_apps,
     installed_package_versions, installed_packages, installed_version, lib_root,
-    migrate_legacy_packages, recover_version_publication, registration_snapshot, remove_package,
-    remove_package_version, valid_id,
+    recover_version_publication, registered_wasm, registration_snapshot, remove_package,
+    remove_package_version, runtime_libs, valid_id,
 };
 #[cfg(test)]
 pub(crate) use files::{
-    install_app, install_lib, install_package, installed_libs, remove_app, remove_lib,
+    disk_bytes, install_app, install_lib, install_package, installed_libs, remove_app, remove_lib,
 };
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "Preserve the frozen current-time package inspection seam."
-    )
-)]
+#[cfg(test)]
 pub(crate) use format::read_package;
-pub(crate) use format::{PackageFiles, package_metadata, package_openapi};
+pub(crate) use format::{PackageFiles, package_metadata, package_openapi, release_version};
 pub(crate) use manifest::{api_path_matches, api_paths_overlap};
 pub use manifest::{validate_lib, validate_openapi};
 pub(crate) use store::install_store_package;
@@ -59,6 +53,12 @@ pub(crate) fn require_owner(
         return Err(Error::Denied);
     }
     Ok(())
+}
+
+pub(crate) fn package_name(id: &str) -> &str {
+    id.split_once('/')
+        .filter(|(author, _)| dhttp_home::normalize_name(author).as_deref() == Some(*author))
+        .map_or(id, |(_, name)| name)
 }
 
 pub(crate) fn is_standard_author(author: &str) -> bool {

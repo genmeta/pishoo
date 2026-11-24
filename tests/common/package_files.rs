@@ -4,6 +4,14 @@ use crate::{
     sandbox::WasmRuntime,
 };
 
+pub(crate) fn disk_bytes(
+    profile: &IdentityProfile,
+    root: &std::fs::File,
+    id: &str,
+) -> Result<Vec<u8>> {
+    disk_version_bytes(profile, root, id, None)
+}
+
 pub(crate) fn installed_libs(
     profile: &IdentityProfile,
     id: Option<&str>,
@@ -32,13 +40,12 @@ pub(crate) fn install_package(
     bytes: &[u8],
     runtime: &WasmRuntime,
 ) -> Result<serde_json::Value> {
-    use rustix::fs::{FlockOperation, Mode, flock, mkdirat};
+    use rustix::fs::{Mode, mkdirat};
     valid_id(id)?;
     if package_name(id) == "std" {
         return Err(Error::BadRequest("std is reserved".into()));
     }
-    let parent = initialized_profile(profile)?;
-    flock(&parent, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
+    let parent = lock_package_writer(profile)?;
     let package = read_package(bytes)?;
     let mut metadata = package_metadata(&package)?;
     let facts = crate::package::signing::facts(
@@ -55,7 +62,7 @@ pub(crate) fn install_package(
         runtime.compile(backend)?;
     }
     let mut database = installation_database(profile, true)?;
-    check_name(&database, id, "pkg")?;
+    check_name(&database, id)?;
     let name = temporary_name()?;
     mkdirat(&parent, &name, Mode::from_raw_mode(0o700)).map_err(layout_error)?;
     let cleanup_dir = cap_std::fs::Dir::from_std_file(parent.try_clone()?);
@@ -74,22 +81,17 @@ pub(crate) fn install_package(
         write_expanded(&dir, &package, id, kind)?;
     }
     let tx = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let previous = tx
-        .prepare(
-            r#"
-SELECT CASE WHEN p.author IS NULL THEN p.name ELSE p.author||'/'||p.name END,p.version
-FROM pkg_registry.package p
-WHERE ?1 IS NULL OR (CASE WHEN p.author IS NULL THEN p.name ELSE p.author||'/'||p.name END)=?1
-ORDER BY p.name,p.version
-"#,
-        )?
-        .query_map([None::<&str>], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let previous = registered_versions(&tx)?;
     for kind in ["lib", "app"] {
         if metadata[format!("has_{kind}")] == true {
-            check_routes(profile, &tx, id, kind, &package)?;
+            check_routes(
+                profile,
+                &tx,
+                id,
+                kind,
+                &package,
+                &std::collections::HashSet::new(),
+            )?;
         }
     }
     // Fixtures deliberately replace same-version bytes to exercise runtime reloads.
@@ -115,7 +117,8 @@ SET version=excluded.version
         rusqlite::params![package_name(id), metadata["version"].as_str()],
     )?;
     refresh_capabilities(&tx, package_name(id))?;
-    cache_release(profile, bytes, metadata["package_sha256"].as_str().unwrap())?;
+    verify_archive_digest(bytes, &metadata)?;
+    write_component(&stage, "new-archive", bytes)?;
     scopeguard::ScopeGuard::into_inner(cleanup);
     commit_package_files(profile, id, &previous, &parent, &stage, &name, tx)?;
     Ok(lib_metadata(&package, Some(id)))

@@ -16,6 +16,7 @@ mod access;
 mod capabilities;
 mod delivery;
 mod directory;
+mod listing;
 mod storage;
 
 pub(crate) use delivery::contact_jobs;
@@ -132,12 +133,14 @@ fn project_contact(mut contact: Value, draft: &Value) -> Value {
 }
 
 pub(crate) fn contact_router(
+    contact_db: Arc<std::sync::Mutex<rusqlite::Connection>>,
     profile: IdentityProfile,
     endpoint: dhttp::Endpoint,
     access: Arc<AccessService>,
 ) -> Router {
     crate::routes::access_router(access.clone()).layer(axum::middleware::from_fn(
         move |request: Request<Body>, next: axum::middleware::Next| {
+            let contact_db = contact_db.clone();
             let (profile, endpoint, access) = (profile.clone(), endpoint.clone(), access.clone());
             async move {
                 let path = request.uri().path();
@@ -150,7 +153,7 @@ pub(crate) fn contact_router(
                 {
                     return next.run(request).await;
                 }
-                let result = dispatch(profile, endpoint, access, request).await;
+                let result = dispatch(contact_db, profile, endpoint, access, request).await;
                 let mut response = match result {
                     Ok((204, _)) => StatusCode::NO_CONTENT.into_response(),
                     Ok((status, value)) => {
@@ -172,6 +175,7 @@ pub(crate) fn contact_router(
 }
 
 async fn dispatch(
+    contact_db: Arc<std::sync::Mutex<rusqlite::Connection>>,
     profile: IdentityProfile,
     endpoint: dhttp::Endpoint,
     access: Arc<AccessService>,
@@ -318,12 +322,10 @@ async fn dispatch(
             let source = service
                 .as_ref()
                 .ok_or_else(|| fail(403, "verified owner required"))?;
-            if !directory::is_group_provider(&source.0)
-                && !source.0.split_once('/').is_some_and(|(author, package)| {
-                    crate::package::is_standard_author(author) && package == "std/comm/message"
-                })
-            {
-                return Err(fail(403, "local group or message service required"));
+            if !source.0.split_once('/').is_some_and(|(author, package)| {
+                crate::package::is_standard_author(author) && package.starts_with("std/")
+            }) {
+                return Err(fail(403, "local standard service required"));
             }
         }
         let mut value = match method {
@@ -381,35 +383,24 @@ async fn dispatch(
         if !manager {
             return native(method, target, None).await;
         }
-        let request_profile = profile.clone();
-        let drafts = tokio::task::spawn_blocking(move || {
-            let db = database(&request_profile)?;
-            let mut statement = db
-                .prepare("SELECT target_name FROM outbound_contact_request")
-                .map_err(storage)?;
-            let mut entries = std::collections::BTreeMap::new();
-            for name in statement
-                .query_map([], |r| r.get::<_, String>(0))
-                .map_err(storage)?
-            {
-                let name = name.map_err(storage)?;
-                let row = outbound_request(&db, &name)?;
-                entries.insert(name, row);
-            }
-            Ok::<_, Failure>(entries)
-        })
-        .await
-        .map_err(|error| fail(500, error.to_string()))??;
         if path == "/std/contact" {
             let name =
                 name(&parameter(&target, "name")?.ok_or_else(|| fail(400, "name is required"))?)?;
+            let draft = tokio::task::spawn_blocking(move || {
+                let db = contact_db
+                    .lock()
+                    .map_err(|_| fail(500, "contact database lock poisoned"))?;
+                outbound_request(&db, &name)
+            })
+            .await
+            .map_err(|e| fail(500, e.to_string()))??;
             let response = native(Method::GET, target, None)
                 .await
                 .map(|(status, mut value)| {
                     value["kind"] = "name".into();
                     (status, value)
                 });
-            return match (response, drafts.get(&name)) {
+            return match (response, draft.as_ref()) {
                 (Ok((status, value)), Some(draft)) => Ok((status, project_contact(value, draft))),
                 (Err((404, _)), Some(draft)) if draft["_contact_id"].is_null() => {
                     Ok((200, project_contact(Value::Null, draft)))
@@ -417,117 +408,10 @@ async fn dispatch(
                 (response, _) => response,
             };
         }
-        let (requested_page, size) = page(&target)?;
-        let params = form_urlencoded::parse(request_query.as_bytes())
-            .filter(|(key, _)| {
-                key != "page"
-                    && key != "page_size"
-                    && key != "kind"
-                    && (kind == "name" || (key != "search" && key != "modified_since"))
-            })
-            .map(|(key, value)| (key.into_owned(), value.into_owned()))
-            .collect::<Vec<_>>();
-        let mut items = Vec::new();
-        let mut current = 1;
-        let deleted = loop {
-            let uri = {
-                let mut query = form_urlencoded::Serializer::new(String::new());
-                query
-                    .extend_pairs(
-                        params
-                            .iter()
-                            .map(|(key, value)| (key.as_str(), value.as_str())),
-                    )
-                    .append_pair("page", &current.to_string())
-                    .append_pair("page_size", "100");
-                format!("/std/contact/list?{}", query.finish())
-            };
-            let (_, value) = native(Method::GET, uri, None).await?;
-            let entries = value["items"]
-                .as_array()
-                .ok_or_else(|| fail(500, "invalid contact list"))?;
-            items.extend(entries.iter().cloned());
-            if entries.is_empty() || current * 100 >= value["total"].as_i64().unwrap_or(0) {
-                break value["deleted"].clone();
-            }
-            current += 1;
-        };
-        for (name, draft) in drafts.into_iter().filter(|_| kind != "group") {
-            if let Some(contact) = items.iter_mut().find(|contact| contact["name"] == name) {
-                *contact = project_contact(contact.clone(), &draft);
-            } else if draft["_contact_id"].is_null() {
-                let value = project_contact(Value::Null, &draft);
-                let search = parameter(&target, "search")?
-                    .unwrap_or_default()
-                    .to_lowercase();
-                let since = integer(&target, "modified_since", 0)?;
-                if kind != "name"
-                    || name.to_lowercase().contains(&search)
-                        && value["updated_at"].as_i64().unwrap_or(0) >= since
-                {
-                    items.push(value);
-                }
-            }
-        }
-        for item in &mut items {
-            if let Some(group) = item["name"].as_str().filter(|name| name.contains("~#")) {
-                *item = directory::entry(access.database(), group).await?;
-            } else {
-                item["kind"] = "name".into();
-            }
-        }
-        items.retain(|item| kind == "all" || item["kind"] == kind);
-        if kind != "name" {
-            let search = parameter(&target, "search")?
-                .unwrap_or_default()
-                .to_lowercase();
-            let since = integer(&target, "modified_since", 0)?;
-            items.retain(|value| {
-                (kind == "all" || value["kind"] == kind)
-                    && value["updated_at"].as_i64().unwrap_or(0) >= since
-                    && ["name", "alias", "nickname", "description"]
-                        .iter()
-                        .any(|key| {
-                            value[*key]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_lowercase()
-                                .contains(&search)
-                        })
-            });
-        }
-        let key = parameter(&target, "sort")?.unwrap_or_else(|| "updated_at".into());
-        let key = if key == "names" { "name" } else { key.as_str() };
-        if !["name", "alias", "class", "created_at", "updated_at"].contains(&key) {
-            return Err(fail(400, "invalid contact sort"));
-        }
-        let order = parameter(&target, "order")?.unwrap_or_else(|| "desc".into());
-        if !["asc", "desc"].contains(&order.as_str()) {
-            return Err(fail(400, "invalid contact order"));
-        }
-        let asc = order == "asc";
-        items.sort_by(|a, b| {
-            let order = if matches!(key, "created_at" | "updated_at") {
-                a[key].as_i64().cmp(&b[key].as_i64())
-            } else {
-                a[key]
-                    .as_str()
-                    .unwrap_or("")
-                    .cmp(b[key].as_str().unwrap_or(""))
-            };
-            let order = order.then_with(|| a["name"].as_str().cmp(&b["name"].as_str()));
-            if asc { order } else { order.reverse() }
-        });
-        let total = items.len();
-        let items = items
-            .into_iter()
-            .skip(((requested_page - 1) * size) as usize)
-            .take(size as usize)
-            .collect::<Vec<_>>();
-        return Ok((
-            200,
-            json!({"items":items,"total":total,"page":requested_page,"page_size":size,"deleted":deleted}),
-        ));
+        let list = tokio::task::spawn_blocking(move || listing::read(&profile, &target, &kind))
+            .await
+            .map_err(|error| fail(500, error.to_string()))??;
+        return Ok((200, list));
     }
     if method == Method::DELETE {
         let names = if let Some(name_value) = parameter(&target, "name")? {
@@ -767,7 +651,8 @@ async fn dispatch(
         db.execute("INSERT INTO outbound_contact_request(target_name,description,requested,offered,application_id,state,local_deadline,next_attempt_at,created_at,updated_at,contact_id,target_subject)
             VALUES(?1,?2,?3,?4,?5,'queued',?6,?7,?7,?7,?8,?9)",params![target,description,requested.to_string(),offered.to_string(),random_id()?,valid_before,time,
             current.as_ref().and_then(|c|c["id"].as_i64()),catalog_subject]).map_err(storage)?;
-        let draft = outbound_request(&db, &target)?;
+        let draft =
+            outbound_request(&db, &target)?.ok_or_else(|| fail(500, "missing inserted request"))?;
         db.execute_batch("COMMIT").map_err(storage)?;
         return Ok((202, project_contact(current.unwrap_or(Value::Null), &draft)));
     }

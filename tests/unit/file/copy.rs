@@ -1,3 +1,5 @@
+use http_body_util::BodyExt;
+
 use super::*;
 
 fn request(bytes: &'static [u8], directory: &str, digest: &str) -> Request<Body> {
@@ -76,5 +78,61 @@ async fn interrupted_copy_removes_partial_file() {
             .unwrap()
             .count(),
         0
+    );
+}
+
+#[tokio::test]
+async fn personal_import_checks_the_selected_version_at_the_one_gibibyte_limit() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("source.bin");
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(MAX_IMPORT_BYTES).unwrap();
+    let metadata = || {
+        Request::get("/std/file/library?path=source.bin&view=meta")
+            .header("prefer", "return=minimal")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = read_library(root(folder.path()), metadata()).await.unwrap();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let info: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(info["size"], MAX_IMPORT_BYTES);
+    assert!(info.get("digest").is_none());
+    let version = info["version"].as_str().unwrap();
+    let range = || {
+        Request::get(format!(
+            "/std/file/library?path=source.bin&version={version}"
+        ))
+        .header("range", format!("bytes={}-", MAX_IMPORT_BYTES - 1))
+        .body(Body::empty())
+        .unwrap()
+    };
+    let response = read_library(root(folder.path()), range()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        &[0]
+    );
+    file.set_len(MAX_IMPORT_BYTES - 1).unwrap();
+    assert_eq!(
+        read_library(root(folder.path()), range())
+            .await
+            .unwrap_err()
+            .0,
+        409
+    );
+    file.set_len(MAX_IMPORT_BYTES + 1).unwrap();
+    assert_eq!(
+        read_library(root(folder.path()), metadata())
+            .await
+            .unwrap_err()
+            .0,
+        413
     );
 }

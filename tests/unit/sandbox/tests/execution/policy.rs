@@ -26,6 +26,7 @@ async fn identity_signatures_enforce_bounds_and_handshake_scope() {
         outgoing: Outgoing::Denied,
         local: authority("alice.dhttp.net"),
         remote: None,
+        sqlite_locks: Default::default(),
     };
     let signature = store.sign(b"message".to_vec()).await.unwrap();
     assert!(

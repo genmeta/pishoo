@@ -16,11 +16,18 @@ mod proxy;
 pub(crate) const DHTTP_PREFIX: &str = "/std/forward/";
 
 pub(crate) use access::{access_router, authorize};
-pub(crate) use capabilities::{capabilities_router, permissions};
+pub(crate) use capabilities::{capabilities_router, permission_catalog, permissions};
 pub(crate) use outbound::forward_dhttp;
 
 pub(crate) fn reserved(path: &str) -> bool {
     path == "/std" || path.starts_with("/std/") || path == "/sys" || path.starts_with("/sys/")
+}
+
+pub(crate) fn reserved_standard_path(path: &str) -> bool {
+    matches!(
+        path.split('/').nth(1),
+        Some("std" | "sys" | "acl" | "contact" | "contacts" | "pishoo" | "file" | "forward")
+    )
 }
 
 /// Normalize before ACL and routing, so authorization observes the effective method.

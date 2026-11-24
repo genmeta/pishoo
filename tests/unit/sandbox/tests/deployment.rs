@@ -220,7 +220,7 @@ fn startup_uses_current_runtime_files_without_integrity_comparison_or_repair() {
     changed.push(size as u8);
     changed.extend_from_slice(&payload);
     std::fs::write(&wasm, &changed).unwrap();
-    let page = profile.join("app/hello/index.html");
+    let page = profile.join("app/hello.1.0.0/index.html");
     std::fs::write(&page, b"locally edited page").unwrap();
     let mut sandbox = Sandbox::new(runtime);
     sandbox.load_libs(&profile).unwrap();

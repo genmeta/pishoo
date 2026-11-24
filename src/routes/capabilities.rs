@@ -44,74 +44,105 @@ pub(crate) fn capabilities_router(profile: IdentityProfile) -> Router {
             let details = form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes())
                 .any(|(key, value)| key == "details" && value == "1");
             async move {
-                let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
-                    let path = profile.join(".volume/sys/setting/database");
-                    if !path.symlink_metadata()?.is_file() {
-                        return Err(Error::InvalidConfig("config.db must be a regular file".into()));
-                    }
-                    let mut conn = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-                    conn.busy_timeout(std::time::Duration::from_secs(3))?;
-                    let tx = conn.transaction()?;
-                    let ready: bool = tx.query_row(
-                        "SELECT count(*)=2 FROM pragma_table_list WHERE type='table' AND name IN ('lib_capability','lib_capability_operation')",
-                        [], |row| row.get(0),
-                    )?;
-                    if !ready {
-                        return Err(Error::InvalidConfig("capability registration missing; install/reinstall Libs using normal installation".into()));
-                    }
-                    let author: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('installed_lib') WHERE name='author')",
-                        [], |row| row.get(0),
-                    )?;
-                    let (key, lib_key) = if author { ("lib_name", "name") } else { ("lib_id", "id") };
-                    let standard = if author { "l.author IN ('std.dhttp.net','dev.genmeta.tech.dhttp.net')" } else { "(substr(l.id,1,14)='std.dhttp.net/' OR l.id GLOB 'dev.genmeta.tech.dhttp.net/*')" };
-                    let package = if author {
-                        "CASE WHEN coalesce(l.author,'')<>'' THEN l.author||'/'||l.name ELSE l.name END"
-                    } else { "l.id" };
-                    let mut permissions = BTreeMap::<String, BTreeMap<String, BTreeSet<String>>>::new();
-                    let mut titles = BTreeMap::<String, Value>::new();
-                    let mut statement = tx.prepare(&format!(
-                        "SELECT ({package}),c.title,CASE WHEN coalesce({standard},0)=0 AND substr(o.path,1,5)='/std/' THEN '/'||l.name||substr(o.path,5) ELSE o.path END,o.method FROM lib_capability c JOIN installed_lib l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operation o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
-                    ))?;
-                    for row in statement.query_map([], |row| Ok((
-                        row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
-                    )))? {
-                        let (package, title, path, method) = row?;
-                        let localized = serde_json::from_str::<Value>(&title).ok()
-                            .filter(|value| value["en"].is_string() && value["zh-CN"].is_string());
-                        // Keep existing bilingual catalog identities stable across locales.
-                        let label = localized.as_ref().map(|value| format!("{} / {}",
-                            value["zh-CN"].as_str().unwrap(), value["en"].as_str().unwrap()))
-                            .unwrap_or_else(|| title.clone());
-                        let id = format!("{package} · {label}");
-                        titles.entry(id.clone()).or_insert_with(|| localized.unwrap_or(Value::String(title)));
-                        let paths = permissions.entry(id).or_default();
-                        if let (Some(path), Some(method)) = (path, method) {
-                            paths.entry(path).or_default().insert(method);
-                        }
-                    }
-                    if details {
-                        Ok(permissions.into_iter().map(|(id, endpoints)| {
-                            let title = titles.remove(&id).unwrap();
-                            (id, serde_json::json!({"title":title,"endpoints":endpoints}))
-                        }).collect::<serde_json::Map<String, Value>>().into())
-                    } else {
-                        Ok(serde_json::json!(permissions))
-                    }
-                }).await;
+                let result =
+                    tokio::task::spawn_blocking(move || permission_catalog(&profile, details))
+                        .await;
                 let mut response = match result {
                     Ok(Ok(value)) => axum::Json(value).into_response(),
                     Ok(Err(error)) => (error.status(), error.to_string()).into_response(),
-                    Err(error) => (http::StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+                    Err(error) => {
+                        (http::StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+                    }
                 };
                 response.headers_mut().insert(
-                    http::header::CACHE_CONTROL, http::HeaderValue::from_static("no-store"),
+                    http::header::CACHE_CONTROL,
+                    http::HeaderValue::from_static("no-store"),
                 );
                 response
             }
-        }).put(write.clone()).delete(write),
+        })
+        .put(write.clone())
+        .delete(write),
     )
+}
+
+pub(crate) fn permission_catalog(profile: &IdentityProfile, details: bool) -> Result<Value> {
+    let mut db = crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let tx = db.transaction()?;
+    let ready: bool = tx.query_row(
+        "SELECT count(*)=2 FROM pragma_table_list WHERE type='table' AND name IN ('lib_capability','lib_capability_operation')",
+        [], |row| row.get(0),
+    )?;
+    if !ready {
+        return Err(Error::InvalidConfig(
+            "capability registration missing; install/reinstall Libs using normal installation"
+                .into(),
+        ));
+    }
+    let mut permissions = BTreeMap::new();
+    let mut statement = tx.prepare(
+        "SELECT package,title,path,method,name,author FROM installed_permission ORDER BY title,path,method",
+    )?;
+    for row in statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        ))
+    })? {
+        let (package, title, path, method, name, author) = row?;
+        let localized = serde_json::from_str::<Value>(&title)
+            .ok()
+            .filter(|value| value["en"].is_string() && value["zh-CN"].is_string());
+        // Keep existing bilingual catalog identities stable across locales.
+        let label = localized
+            .as_ref()
+            .map(|value| {
+                format!(
+                    "{} / {}",
+                    value["zh-CN"].as_str().unwrap(),
+                    value["en"].as_str().unwrap()
+                )
+            })
+            .unwrap_or_else(|| title.clone());
+        let id = format!("{package} · {label}");
+        let (_, paths) = permissions.entry(id).or_insert_with(|| {
+            (
+                localized.unwrap_or(Value::String(title)),
+                BTreeMap::<String, BTreeSet<String>>::new(),
+            )
+        });
+        if let (Some(mut path), Some(method)) = (path, method) {
+            if !author
+                .as_deref()
+                .is_some_and(crate::package::is_standard_author)
+                && let Some(tail) = path.strip_prefix("/std/")
+            {
+                path = format!("/{name}/{tail}");
+            }
+            if let Some(tail) = path.strip_prefix("/app/")
+                && crate::package::app_mount(&package, tail) == Some(tail)
+            {
+                path = format!("/app/{}", crate::package::app_name(&package));
+            }
+            paths.entry(path).or_default().insert(method);
+        }
+    }
+    Ok(permissions
+        .into_iter()
+        .map(|(id, (title, endpoints))| {
+            let value = if details {
+                serde_json::json!({"title":title,"endpoints":endpoints})
+            } else {
+                serde_json::json!(endpoints)
+            };
+            (id, value)
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into())
 }
 
 async fn write_request(profile: IdentityProfile, request: Request<Body>) -> Result<Response> {
@@ -227,7 +258,10 @@ FROM pkg_registry.package p WHERE p.name=?1 AND p.has_lib=1 LIMIT 1
             format!("/{name}")
         };
         if installed.as_ref().is_some_and(|(_, has_app)| *has_app) {
-            available.insert(("GET".to_owned(), format!("/app/{}", name.to_owned())));
+            available.insert((
+                "GET".to_owned(),
+                format!("/app/{}", crate::package::app_name(name)),
+            ));
         }
         let id = installed
             .as_ref()

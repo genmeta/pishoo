@@ -20,13 +20,7 @@ fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| invalid(&format!("missing or empty {key}")))
 }
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Frozen current-time inspection entry; online installation uses trusted historical time."
-    )
-)]
+#[cfg(test)]
 pub(crate) fn read_package(bytes: &[u8]) -> Result<PackageFiles> {
     read_package_at(bytes, chrono::Utc::now().timestamp())
 }
@@ -84,25 +78,12 @@ fn validate_contents(files: &PackageFiles) -> Result<Value> {
         let raw = package_openapi(files)?;
         let api = super::validate_openapi(raw)?;
         if crate::package::is_standard_author(metadata["publisher"].as_str().unwrap_or(""))
-            && api.paths.as_ref().unwrap().keys().any(|path| {
-                crate::routes::reserved(path)
-                    || [
-                        "/acl",
-                        "/contact",
-                        "/contacts",
-                        "/sys",
-                        "/pishoo",
-                        "/file",
-                        "/forward",
-                    ]
-                    .iter()
-                    .any(|prefix| {
-                        path == prefix
-                            || path
-                                .strip_prefix(prefix)
-                                .is_some_and(|tail| tail.starts_with('/'))
-                    })
-            })
+            && api
+                .paths
+                .as_ref()
+                .unwrap()
+                .keys()
+                .any(|path| crate::routes::reserved_standard_path(path))
         {
             return Err(invalid("standard Lib conflicts with a reserved API path"));
         }
@@ -334,7 +315,7 @@ pub(crate) fn package_metadata(files: &PackageFiles) -> Result<Value> {
     Ok(value)
 }
 
-fn release_version(value: &str) -> bool {
+pub(crate) fn release_version(value: &str) -> bool {
     let parts = value.split('.').collect::<Vec<_>>();
     parts.len() == 3
         && parts.iter().all(|part| {

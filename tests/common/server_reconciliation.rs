@@ -15,6 +15,14 @@ pub(super) async fn reconcile_profiles(
     // Discovery tests deliberately remove or invalidate the home being scanned.
     let device = tempfile::tempdir()?;
     let database = crate::system::open(&DhttpHome::new(device.path().into()))?;
-    crate::server::run::reconcile_profiles(mdns, home, user_homes, servers, runtime, &database)
-        .await
+    crate::server::run::reconcile_profiles(
+        mdns,
+        home,
+        user_homes,
+        servers,
+        runtime,
+        &database,
+        |_| {},
+    )
+    .await
 }
