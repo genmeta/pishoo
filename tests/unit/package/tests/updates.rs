@@ -121,7 +121,12 @@ fn dependency_update_switches_direct_and_shared_transitive_dependencies_together
         for dependency in package["dependencies"].as_array().unwrap() {
             assert_eq!(dependency["version"], expected);
         }
-        assert_eq!(package["installed_versions"], json!(["1.0.0", "2.0.0"]));
+        let versions = if package["name"] == "workspace" {
+            json!(["2.0.0"])
+        } else {
+            json!(["1.0.0", "2.0.0"])
+        };
+        assert_eq!(package["installed_versions"], versions);
     }
     assert_eq!(sandbox.libs.len(), 2);
     assert_eq!(sandbox.apps.len(), 2);
@@ -147,7 +152,7 @@ fn dependency_update_switches_direct_and_shared_transitive_dependencies_together
         "in-flight resources remain valid"
     );
     assert_eq!(
-        std::fs::read(profile.join("app/workspace/index.html")).unwrap(),
+        std::fs::read(profile.join("app/workspace.2.0.0/index.html")).unwrap(),
         b"2.0.0"
     );
     assert_eq!(
@@ -188,7 +193,7 @@ fn dependency_update_switches_direct_and_shared_transitive_dependencies_together
         metadata
     );
     assert_eq!(
-        std::fs::read(profile.join("app/workspace/index.html")).unwrap(),
+        std::fs::read(profile.join("app/workspace.3.0.0/index.html")).unwrap(),
         b"3.0.0"
     );
 }
@@ -215,7 +220,7 @@ fn dependency_update_preserves_external_pins_with_parallel_versions() {
             .contains_key(&("alice.dhttp.net/profile".to_owned(), "2.0.0".to_owned()))
     );
     assert_eq!(
-        std::fs::read(profile.join("app/workspace/index.html")).unwrap(),
+        std::fs::read(profile.join("app/workspace.2.0.0/index.html")).unwrap(),
         b"2.0.0"
     );
 }
@@ -245,7 +250,7 @@ fn dependency_update_rolls_back_all_files_registration_capabilities_and_runtime_
     );
     for name in ["workspace", "introduction"] {
         assert_eq!(
-            std::fs::read(profile.join(format!("app/{name}/index.html"))).unwrap(),
+            std::fs::read(profile.join(format!("app/{name}.1.0.0/index.html"))).unwrap(),
             b"1.0.0"
         );
     }
@@ -304,7 +309,7 @@ fn legacy_wasm_is_loaded_then_replaced_by_versioned_installation_and_removed() {
         &mut sandbox,
     )
     .unwrap();
-    assert!(profile.join("lib/message.wasm").is_file());
+    assert!(!profile.join("lib/message.wasm").exists());
     assert!(profile.join("lib/message.wasm.2.0.0").is_file());
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs[&id].openapi.info.version, "2.0.0");
@@ -423,13 +428,15 @@ fn a_source_version_keeps_its_dependency_edges_when_another_version_is_added() {
         &mut sandbox,
     )
     .unwrap();
-    for version in ["1.0.0", "2.0.0"] {
-        let metadata =
-            crate::package::installed_version(&profile, "alice.dhttp.net/a", version).unwrap();
-        assert_eq!(metadata["dependencies"][0]["version"], version);
-        assert_eq!(sandbox.versions[&("alice.dhttp.net/a".to_owned(), version.to_owned())].dependencies["shared"].1, version);
-    }
-    crate::package::remove_package_version(&profile, "alice.dhttp.net/a", Some("1.0.0")).unwrap();
+    let metadata =
+        crate::package::installed_version(&profile, "alice.dhttp.net/a", "2.0.0").unwrap();
+    assert_eq!(metadata["dependencies"][0]["version"], "2.0.0");
+    assert!(!profile.join("lib/a.wasm.1.0.0").exists());
+    assert!(
+        !sandbox
+            .versions
+            .contains_key(&("alice.dhttp.net/a".to_owned(), "1.0.0".to_owned()))
+    );
     assert!(matches!(
         crate::package::remove_package_version(&profile, "alice.dhttp.net/shared", Some("2.0.0")),
         Err(crate::Error::PackageInUse(_))
@@ -481,4 +488,69 @@ async fn mutual_dependencies_install_reload_route_and_reuse_without_reference_cy
     assert_eq!(result["version"], "1.0.0");
     drop(sandbox);
     assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn upgrade_reclaims_unreferenced_cycles_and_original_archives_after_preview() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("dev.alex.chen")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    install_packages(
+        &profile,
+        &[
+            release("message", "1.0.0", false, &[("group", "1.0.0")]),
+            release("group", "1.0.0", false, &[("message", "1.0.0")]),
+        ],
+        &mut sandbox,
+    )
+    .unwrap();
+    let old = sandbox.libs["alice.dhttp.net/message"].clone();
+    let cache = profile.join(".volume/sys/pkg");
+    let old_archive = cache.join("message-1.0.0.waz");
+    let legacy_dir = cache.join("releases");
+    std::fs::create_dir(&legacy_dir).unwrap();
+    let orphan = legacy_dir.join(format!("{}.waz", "0".repeat(64)));
+    std::fs::write(&orphan, b"unreferenced archive").unwrap();
+    let data = profile.join(".volume/message/database");
+    std::fs::write(&data, b"existing data").unwrap();
+
+    let preview = profile.join("lib/holder.preview");
+    std::fs::create_dir(&preview).unwrap();
+    std::fs::write(
+        preview.join("manifest.json"),
+        br#"{"package":{"name":"holder","version":"1.0.0"},"dependencies":[{"name":"group","version":"1.0.0"}]}"#,
+    )
+    .unwrap();
+    let next = [
+        release("message", "2.0.0", false, &[("group", "2.0.0")]),
+        release("group", "2.0.0", false, &[("message", "2.0.0")]),
+    ]
+    .map(|release| {
+        let (id, bytes, mut proof) = super::packages::with_proof(release);
+        proof["_requested"] = true.into();
+        (id, bytes, proof)
+    });
+    crate::package::files::install_packages(&profile, &next, &mut sandbox).unwrap();
+    assert_eq!(sandbox.versions.len(), 4);
+    assert!(old_archive.exists());
+    assert!(!old.stream_retired.is_cancelled());
+    assert!(!legacy_dir.exists());
+
+    std::fs::remove_dir_all(preview).unwrap();
+    crate::package::files::activate_installed_version(&profile, &old.id, "2.0.0", &mut sandbox)
+        .unwrap()
+        .unwrap();
+    assert_eq!(sandbox.versions.len(), 2);
+    assert!(old.stream_retired.is_cancelled());
+    assert!(!old_archive.exists());
+    assert!(cache.join("database").is_file());
+    assert!(cache.join("message-2.0.0.waz").is_file());
+    assert!(cache.join("group-2.0.0.waz").is_file());
+    assert!(!cache.join("group-1.0.0.waz").exists());
+    assert!(!profile.join("lib/message.wasm.1.0.0").exists());
+    assert!(!profile.join("lib/group.wasm.1.0.0").exists());
+    assert_eq!(std::fs::read(data).unwrap(), b"existing data");
+    sandbox.load_libs(&profile).unwrap();
+    assert_eq!(sandbox.versions.len(), 2);
 }

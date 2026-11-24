@@ -81,7 +81,14 @@ async fn service_can_lookup_a_person_without_a_directory_grant() {
     let profile =
         dhttp_home::identity::IdentityProfile::try_from(root.path().join("alice")).unwrap();
     let service = host_lib(&root.path().join("service"));
-    let router = crate::contact::contact_router(profile, endpoint, access);
+    let router = crate::contact::contact_router(
+        std::sync::Arc::new(std::sync::Mutex::new(
+            crate::contact::database(&profile).unwrap(),
+        )),
+        profile,
+        endpoint,
+        access,
+    );
     let get = |target: &str| {
         Request::get(target)
             .extension(owner.clone())
@@ -182,24 +189,67 @@ async fn local_service_admission_uses_the_bound_provider_authorization_declarati
         "paths":{"/comm/message/list":{"get":{}}}
     }))
     .unwrap();
+    let mut standard = host_lib(&root.path().join("standard"));
+    Arc::get_mut(&mut standard).unwrap().id = target.id.clone();
+    Arc::get_mut(&mut standard).unwrap().openapi = serde_json::from_value(json!({
+        "openapi":"3.1.0","info":{"title":"Message","version":"3"},
+        "paths":{
+            "/comm/message/list":{"get":{}},
+            "/comm/message/{topic}/photo":{"get":{},"delete":{}}
+        }
+    }))
+    .unwrap();
     let mut state = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     state.libs.insert(target.id.clone(), target.clone());
     state
         .versions
         .insert((older.id.clone(), "1".into()), older.clone());
+    state
+        .versions
+        .insert((standard.id.clone(), "3".into()), standard.clone());
     let sandbox = Arc::new(std::sync::RwLock::new(state));
     let router = axum::Router::new()
-        .fallback(axum::routing::get(|| async { "provider checks grants" }))
+        .fallback(axum::routing::any(|| async { "provider checks grants" }))
         .layer(axum::middleware::from_fn_with_state(
             access,
             crate::routes::authorize,
         ));
-    for (provider, expected) in [(None, 403), (Some(target.clone()), 200), (Some(older), 403)] {
-        let mut request =
-            Request::get("https://alice.dhttp.net/std/comm/message/list?channel=example")
-                .header("pishoo-source-lib", "forged/source")
-                .body(axum::body::Body::empty())
-                .unwrap();
+    let ordinary = "dev.example.dhttp.net/example/source";
+    let group = "dev.genmeta.tech.dhttp.net/std/comm/group";
+    for (provider, source_id, method, path, expected) in [
+        (None, ordinary, "GET", "list?channel=example", 403),
+        (Some(target), ordinary, "GET", "list?channel=example", 200),
+        (Some(older), ordinary, "GET", "list?channel=example", 403),
+        (Some(standard.clone()), group, "GET", "genmeta/photo", 200),
+        (
+            Some(standard.clone()),
+            group,
+            "DELETE",
+            "genmeta/photo",
+            403,
+        ),
+        (
+            Some(standard.clone()),
+            ordinary,
+            "GET",
+            "genmeta/photo",
+            403,
+        ),
+        (
+            Some(standard),
+            "dev.example.dhttp.net/std/comm/group",
+            "GET",
+            "genmeta/photo",
+            403,
+        ),
+        (None, group, "GET", "genmeta/photo", 403),
+    ] {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(format!("https://alice.dhttp.net/std/comm/message/{path}"))
+            .header("pishoo-source-lib", "forged/source")
+            .body(axum::body::Body::empty())
+            .unwrap();
         request.extensions_mut().insert(dhttp::HandshakeSummary {
             alpn: None,
             local: Some(endpoint.local_authority().unwrap()),
@@ -209,7 +259,7 @@ async fn local_service_admission_uses_the_bound_provider_authorization_declarati
         request.extensions_mut().insert(sandbox.clone());
         if let Some(provider) = provider {
             let mut source = host_lib(&root.path().join(format!("source-{expected}")));
-            Arc::get_mut(&mut source).unwrap().id = "dev.example.dhttp.net/example/source".into();
+            Arc::get_mut(&mut source).unwrap().id = source_id.into();
             Arc::get_mut(&mut source).unwrap().dependencies.insert(
                 "std/comm/message".into(),
                 (provider.id.clone(), provider.openapi.info.version.clone()),

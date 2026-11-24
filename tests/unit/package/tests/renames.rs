@@ -121,7 +121,7 @@ fn rename_requires_active_dependents_in_the_same_transaction() {
             .all(|(id, _)| id != &format!("{AUTHOR}/profile"))
     );
     sandbox.load_libs(&profile).unwrap();
-    assert!(profile.join("app/introduction/index.html").is_file());
+    assert!(profile.join("app/introduction.2.0.0/index.html").is_file());
     assert!(!profile.join("lib/std/profile.wasm.1.0.0").exists());
 }
 #[test]
@@ -311,14 +311,14 @@ fn cached_dependent_replacement_keeps_its_active_and_explicit_root_registration(
     )
     .unwrap();
     let cached = release("introduction", "2.0.0", &[], true, 'a');
-    install(&profile, &mut sandbox, &[cached.clone()]).unwrap();
-    crate::package::files::activate_installed_version(
+    install(
         &profile,
-        &format!("{AUTHOR}/introduction"),
-        "1.0.0",
         &mut sandbox,
+        &[
+            cached.clone(),
+            release("holder", "1.0.0", &[("introduction", "2.0.0")], true, 'a'),
+        ],
     )
-    .unwrap()
     .unwrap();
     install(
         &profile,

@@ -257,7 +257,7 @@ async fn store_app_updates_exact_dependencies_through_the_management_api() {
             ));
         }
         assert_eq!(
-            std::fs::read(profile.join("app/workspace/index.html")).unwrap(),
+            std::fs::read(profile.join(format!("app/workspace.{version}/index.html"))).unwrap(),
             version.as_bytes()
         );
         assert_eq!(
@@ -317,7 +317,7 @@ async fn store_app_updates_exact_dependencies_through_the_management_api() {
         &sandbox.read().unwrap().libs["alice.dhttp.net/profile"]
     ));
     assert_eq!(
-        std::fs::read(profile.join("app/workspace/index.html")).unwrap(),
+        std::fs::read(profile.join("app/workspace.2.0.0/index.html")).unwrap(),
         b"2.0.0"
     );
     let response = management

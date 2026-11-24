@@ -100,14 +100,17 @@ pub(super) fn put_admin(db: &Connection, name: &str, subject: &[u8]) -> Result<(
     Ok(())
 }
 
-/// The durable first registration prevents a revoked administrator from being re-enrolled.
-pub(super) fn register_first_administrator(db: &Connection, owner: &Visitor) -> Result<()> {
-    let registered: bool = db.query_row(
+pub(super) fn device_initialized(db: &Connection) -> Result<bool> {
+    Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM device WHERE id=1)",
         [],
         |row| row.get(0),
-    )?;
-    if registered {
+    )?)
+}
+
+/// The durable first registration prevents a revoked administrator from being re-enrolled.
+pub(super) fn register_first_administrator(db: &Connection, owner: &Visitor) -> Result<()> {
+    if device_initialized(db)? {
         return Ok(());
     }
     let existing: Option<String> = db

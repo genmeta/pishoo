@@ -58,11 +58,17 @@ pub(crate) async fn authorize(
     if let Some(visitor) = &visitor {
         request.extensions_mut().insert(visitor.clone());
     }
-    // A provider explicitly declaring local service authorization checks the
-    // direct Lib's fine-grained grants itself. Network requests keep path ACLs.
-    let service_authorized_provider = request
-        .extensions()
-        .get::<Arc<crate::sandbox::Lib>>()
+    // The host supplies the direct Lib only for calls within this identity.
+    let standard = |id: &str| {
+        id.split_once('/').is_some_and(|(author, name)| {
+            crate::package::is_standard_author(author) && name.starts_with("std/")
+        })
+    };
+    let service = request.extensions().get::<Arc<crate::sandbox::Lib>>();
+    let standard_read = service.is_some_and(|lib| standard(&lib.id))
+        && request.method() == http::Method::GET
+        && request.uri().path().starts_with("/std/");
+    let service_authorized_provider = service
         .and_then(|_| {
             request
                 .extensions()
@@ -73,21 +79,20 @@ pub(crate) async fn authorize(
             crate::sandbox::select_library(&sandbox.read().unwrap(), endpoint, &request)
                 .ok()
                 .is_some_and(|(lib, _)| {
-                    lib.openapi
-                        .extensions
-                        .get("pishoo-service-authorization")
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(true)
+                    standard_read && standard(&lib.id)
+                        || lib
+                            .openapi
+                            .extensions
+                            .get("pishoo-service-authorization")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
                 })
         });
     if service_authorized_provider {
         return next.run(request).await;
     }
-    // Directory services enforce their own persisted operation grants.
-    if request
-        .extensions()
-        .get::<Arc<crate::sandbox::Lib>>()
-        .is_some()
+    // Contact authorizes directory writes in its own handler.
+    if service.is_some()
         && matches!(*request.method(), http::Method::PUT | http::Method::GET)
         && request.uri().path() == "/std/contact"
     {
@@ -108,31 +113,17 @@ pub(crate) async fn authorize(
                         .unwrap()
                         .apps
                         .keys()
-                        .map(|id| id.split_once('/').map_or(&id[..], |(_, name)| name))
-                        .filter(|name| {
-                            tail.strip_prefix(name)
-                                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+                        .filter_map(|id| {
+                            crate::package::app_mount(id, tail).map(|mount| (mount, id))
                         })
-                        .max_by_key(|name| name.len())
-                        .map(str::to_owned)
+                        .max_by_key(|(mount, _)| mount.len())
+                        .map(|(_, id)| crate::package::app_name(id).to_owned())
                 });
             let local = request
                 .extensions()
                 .get::<dhttp_home::identity::IdentityProfile>()
-                .and_then(|profile| {
-                    tail.match_indices('/')
-                        .map(|(end, _)| &tail[..end])
-                        .chain(std::iter::once(tail))
-                        .rfind(|name| {
-                            crate::package::valid_id(name).is_ok()
-                                && profile
-                                    .join("dev")
-                                    .join(name)
-                                    .join("manifest.json")
-                                    .is_file()
-                        })
-                        .map(str::to_owned)
-                });
+                .and_then(|profile| crate::development::preview_mount(profile, tail, true))
+                .map(|(name, _)| crate::package::app_name(&name).to_owned());
             installed
                 .into_iter()
                 .chain(local)

@@ -24,9 +24,6 @@ mod lib_http;
 #[path = "network/workspace_split.rs"]
 mod workspace_split;
 
-#[path = "network/std_workflow.rs"]
-mod std_workflow;
-
 #[path = "network/system.rs"]
 mod system;
 

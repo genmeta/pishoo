@@ -21,7 +21,7 @@ use crate::{Error, Result};
 mod host;
 mod runtime;
 
-use crate::package::{app_file, installed_apps, lib_root};
+use crate::package::{app_file, installed_apps, lib_root, package_name};
 
 pub(crate) struct Sandbox {
     pub(crate) libs: HashMap<String, Arc<Lib>>,
@@ -48,6 +48,7 @@ pub(crate) struct Lib {
     component: Component,
     runtime: Arc<WasmRuntime>,
     filesystem: WasiFilesystemCtx,
+    volume_access: std::fs::File,
 }
 
 struct StoreData {
@@ -60,6 +61,7 @@ struct StoreData {
     outgoing: Outgoing,
     local: dhttp::LocalAuthority,
     remote: Option<dhttp::RemoteAuthority>,
+    sqlite_locks: host::sqlite::SqliteLocks,
 }
 
 pub(crate) struct Invocation {
@@ -111,18 +113,13 @@ impl Sandbox {
     }
 
     /// A timeout leaves unfinished executions owning their Store.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "frozen shutdown operation used by resource tests")
-    )]
-    pub(crate) async fn wait(&self) -> Result<()> {
-        tokio::time::timeout(Duration::from_secs(15), self.tasks.wait())
+    pub(crate) async fn wait(tasks: TaskTracker) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(15), tasks.wait())
             .await
             .map_err(|_| Error::ShutdownDeadline)
     }
 
     pub(crate) fn load_libs(&mut self, profile: &IdentityProfile) -> Result<()> {
-        crate::package::migrate_legacy_packages(profile)?;
         let parent = std::fs::File::from(
             rustix::fs::open(
                 profile.path(),
@@ -136,50 +133,27 @@ impl Sandbox {
         );
         rustix::fs::flock(&parent, rustix::fs::FlockOperation::LockShared)
             .map_err(std::io::Error::from)?;
-        let active = crate::package::installed_packages(profile, None)?;
-        let active_versions = active
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|entry| {
-                (
-                    entry["id"].as_str().unwrap(),
-                    entry["version"].as_str().unwrap(),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let metadata = crate::package::installed_package_versions(profile, None)?;
-        let mut pending = metadata
-            .into_iter()
-            .filter(|entry| entry["has_lib"] == true)
-            .collect::<Vec<_>>();
+        let registrations = crate::package::runtime_libs(profile)?;
+        let mut candidates = HashMap::new();
         let mut versions: HashMap<(String, String), Arc<Lib>> = HashMap::new();
-        let root = if pending.is_empty() {
+        let root = if registrations.is_empty() {
             None
         } else {
             Some(lib_root(profile)?)
         };
-        while !pending.is_empty() {
-            let entry = pending.pop().unwrap();
+        for entry in registrations {
             let id = entry["id"]
                 .as_str()
                 .ok_or_else(|| Error::InvalidConfig("missing installed identity".into()))?;
             let version = entry["version"]
                 .as_str()
                 .ok_or_else(|| Error::InvalidConfig("missing installed version".into()))?;
-            let bytes = if active_versions
-                .get(id)
-                .is_some_and(|active| *active == version)
-            {
-                crate::package::disk_bytes(profile, root.as_ref().unwrap(), id)?
-            } else {
-                crate::package::disk_version_bytes(
-                    profile,
-                    root.as_ref().unwrap(),
-                    id,
-                    Some(version),
-                )?
-            };
+            if package_name(id) != entry["name"].as_str().unwrap() {
+                return Err(Error::InvalidConfig(
+                    "invalid installed package name".into(),
+                ));
+            }
+            let bytes = crate::package::registered_wasm(root.as_ref().unwrap(), id, &entry)?;
             let mut lib = Lib::load(
                 self.runtime.clone(),
                 id.to_owned(),
@@ -211,18 +185,11 @@ impl Sandbox {
                     (id, dependency["version"].as_str().unwrap().to_owned()),
                 );
             }
-            versions.insert((id.to_owned(), version.to_owned()), Arc::new(lib));
-        }
-        let mut candidates = HashMap::new();
-        for entry in active.as_array().unwrap() {
-            if entry["has_lib"] == true {
-                let id = entry["id"].as_str().unwrap();
-                let version = entry["version"].as_str().unwrap();
-                let lib = versions
-                    .get(&(id.to_owned(), version.to_owned()))
-                    .ok_or_else(|| Error::InvalidConfig("missing active version".into()))?;
-                candidates.insert(id.to_owned(), Arc::clone(lib));
+            let lib = Arc::new(lib);
+            if entry["active"] == true {
+                candidates.insert(id.to_owned(), lib.clone());
             }
+            versions.insert((id.to_owned(), version.to_owned()), lib);
         }
         let apps = installed_apps(profile, None)?;
         for lib in self.versions.values().chain(self.libs.values()) {
@@ -344,10 +311,7 @@ impl Sandbox {
                             .apps
                             .iter()
                             .filter_map(|(id, (_, directory))| {
-                                let name = package_name(id);
-                                tail.strip_prefix(name)
-                                    .filter(|suffix| suffix.is_empty() || suffix.starts_with('/'))
-                                    .map(|_| (name, directory))
+                                crate::package::app_mount(id, tail).map(|name| (name, directory))
                             })
                             .max_by_key(|(name, _)| name.len())
                             .ok_or(Error::RouteNotFound)?;
@@ -386,15 +350,7 @@ pub(crate) fn requested_version(request: &http::Request<axum::body::Body>) -> Re
         code: "invalid_package_version",
         status: http::StatusCode::BAD_REQUEST,
     })?;
-    if values.next().is_some()
-        || version.split('.').count() != 3
-        || version.split('.').any(|part| {
-            part.is_empty()
-                || !part.bytes().all(|byte| byte.is_ascii_digit())
-                || part.parse::<u64>().is_err()
-                || part.len() > 1 && part.starts_with('0')
-        })
-    {
+    if values.next().is_some() || !crate::package::release_version(version) {
         return Err(Error::PackagePolicy {
             code: "invalid_package_version",
             status: http::StatusCode::BAD_REQUEST,
@@ -408,12 +364,12 @@ pub(crate) fn select_library(
     endpoint: &dhttp::Endpoint,
     request: &http::Request<axum::body::Body>,
 ) -> Result<(Arc<Lib>, String)> {
-    let requested = requested_version(request)?;
     let path = request.uri().path();
     let standard = path.starts_with("/std/");
     let standard_path = path.strip_prefix("/std").unwrap_or(path);
     let tail = path.trim_start_matches('/');
     let source = request.extensions().get::<Arc<Lib>>();
+    let requested = requested_version(request)?;
     let candidates = sandbox
         .versions
         .iter()
@@ -459,61 +415,35 @@ pub(crate) fn select_library(
             .max_by_key(|id| package_name(id).len())
     }
     .ok_or(Error::RouteNotFound)?;
-    let bound = source.and_then(|source| {
-        if source.id == id {
-            Some(Arc::clone(source))
-        } else {
-            source.dependencies.get(package_name(&id)).and_then(|key| {
-                sandbox
-                    .versions
-                    .get(key)
-                    .or_else(|| {
-                        sandbox
-                            .libs
-                            .get(&key.0)
-                            .filter(|lib| lib.openapi.info.version == key.1)
-                    })
-                    .or_else(|| {
-                        sandbox
-                            .dev_libs
-                            .get(&key.0)
-                            .map(|(_, lib)| lib)
-                            .filter(|lib| lib.openapi.info.version == key.1)
-                    })
-                    .filter(|lib| lib.id == id)
-                    .cloned()
-            })
-        }
-    });
-    if bound.is_none()
-        && source.is_some_and(|source| source.dependencies.contains_key(package_name(&id)))
-    {
+    let preview = sandbox.dev_libs.get(&id).map(|(_, lib)| lib);
+    let dependency = source.and_then(|lib| lib.dependencies.get(package_name(&id)));
+    let self_call = source.filter(|lib| lib.id == id);
+    let bound_version = self_call
+        .map(|lib| lib.openapi.info.version.as_str())
+        .or_else(|| dependency.map(|(_, version)| version.as_str()));
+    if dependency.is_some_and(|(provider, _)| provider != &id) && self_call.is_none() {
         return Err(Error::PackagePolicy {
             code: "package_version_unavailable",
             status: http::StatusCode::NOT_ACCEPTABLE,
         });
     }
-    if let Some(bound) = &bound
-        && requested.is_some_and(|version| version != bound.openapi.info.version)
+    if requested
+        .zip(bound_version)
+        .is_some_and(|(request, bound)| request != bound)
     {
         return Err(Error::PackagePolicy {
             code: "dependency_version_conflict",
             status: http::StatusCode::CONFLICT,
         });
     }
-    let owner = crate::package::require_owner(endpoint, request).is_ok();
-    let selected_version = bound
-        .as_ref()
-        .map(|lib| lib.openapi.info.version.as_str())
-        .or(requested);
-    let preview = sandbox.dev_libs.get(&id).map(|(_, lib)| lib).filter(|lib| {
-        owner && selected_version.is_none_or(|version| lib.openapi.info.version == version)
-    });
-    let lib = if let Some(preview) = preview {
-        Arc::clone(preview)
-    } else if let Some(bound) = bound {
-        bound
-    } else if let Some(version) = requested {
+    let version = bound_version.or(requested);
+    let lib = if let Some(lib) = self_call {
+        lib
+    } else if let Some(lib) =
+        preview.filter(|lib| version.is_none_or(|v| lib.openapi.info.version == v))
+    {
+        lib
+    } else if let Some(version) = version {
         sandbox
             .versions
             .get(&(id.clone(), version.to_owned()))
@@ -523,23 +453,20 @@ pub(crate) fn select_library(
                     .get(&id)
                     .filter(|lib| lib.openapi.info.version == version)
             })
-            .cloned()
             .ok_or(Error::PackagePolicy {
                 code: "package_version_unavailable",
                 status: http::StatusCode::NOT_ACCEPTABLE,
             })?
     } else {
-        sandbox.libs.get(&id).cloned().ok_or_else(|| {
-            if !owner && sandbox.dev_libs.contains_key(&id) {
-                Error::Denied
-            } else {
-                Error::PackagePolicy {
-                    code: "package_inactive",
-                    status: http::StatusCode::SERVICE_UNAVAILABLE,
-                }
-            }
+        sandbox.libs.get(&id).ok_or(Error::PackagePolicy {
+            code: "package_inactive",
+            status: http::StatusCode::SERVICE_UNAVAILABLE,
         })?
     };
+    if preview.is_some_and(|preview| Arc::ptr_eq(preview, lib)) {
+        crate::package::require_owner(endpoint, request)?;
+    }
+    let lib = Arc::clone(lib);
     let path = if standard {
         if !lib.openapi.paths.as_ref().is_some_and(|paths| {
             paths
@@ -688,9 +615,3 @@ fn reject_api(error: Error) -> axum::response::Response {
 #[cfg(test)]
 #[path = "../tests/unit/sandbox/tests.rs"]
 pub(crate) mod tests;
-
-fn package_name(id: &str) -> &str {
-    id.split_once('/')
-        .filter(|(author, _)| dhttp_home::normalize_name(author).as_deref() == Some(*author))
-        .map_or(id, |(_, name)| name)
-}

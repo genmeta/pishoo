@@ -34,16 +34,18 @@ pub(crate) const STORE_OWNER: &str = match option_env!("PISHOO_REGISTRY_OWNER_HA
 };
 
 // Resolve only through the authenticated, pinned store, then verify the canonical release normally.
-async fn resolve_author(endpoint: &dhttp::Endpoint, name: &str, version: &str) -> Result<String> {
+async fn resolve_author(
+    endpoint: &dhttp::Endpoint,
+    name: &str,
+    version: &str,
+    resolved: &mut std::collections::HashMap<(String, String), Value>,
+) -> Result<String> {
+    let key = (name.to_owned(), version.to_owned());
+    if let Some(metadata) = resolved.get(&key) {
+        return Ok(metadata["author"].as_str().unwrap().to_owned());
+    }
     super::valid_id(name)?;
-    if version.split('.').count() != 3
-        || version.split('.').any(|part| {
-            part.is_empty()
-                || !part.bytes().all(|b| b.is_ascii_digit())
-                || part.parse::<u64>().is_err()
-                || (part.len() > 1 && part.starts_with('0'))
-        })
-    {
+    if !super::format::release_version(version) {
         return Err(Error::BadRequest(
             "invalid package name or exact version".into(),
         ));
@@ -69,7 +71,9 @@ async fn resolve_author(endpoint: &dhttp::Endpoint, name: &str, version: &str) -
             "store resolved a different package".into(),
         ));
     }
-    Ok(author.to_owned())
+    let author = author.to_owned();
+    resolved.insert(key, metadata);
+    Ok(author)
 }
 
 async fn download_release(
@@ -77,18 +81,11 @@ async fn download_release(
     publisher: &str,
     name: &str,
     version: &str,
+    resolved: Option<&Value>,
 ) -> Result<(Vec<u8>, Value)> {
     let id = format!("{publisher}/{name}");
     super::valid_id(&id)?;
-    let parts = version.split('.').collect::<Vec<_>>();
-    if parts.len() != 3
-        || parts.iter().any(|part| {
-            part.parse::<u64>().is_err()
-                || part.is_empty()
-                || !part.bytes().all(|byte| byte.is_ascii_digit())
-                || part.len() > 1 && part.starts_with('0')
-        })
-    {
+    if !super::format::release_version(version) {
         return Err(Error::BadRequest(
             "version must be MAJOR.MINOR.PATCH".into(),
         ));
@@ -97,9 +94,11 @@ async fn download_release(
         "/store/v1/packages/{publisher}/{}/versions/{version}",
         name.to_owned()
     );
-    let metadata: Value =
-        serde_json::from_slice(&store_get(endpoint, &path, 8 * 1024 * 1024).await?)
-            .map_err(|_| Error::InvalidComponent("invalid store metadata".into()))?;
+    let metadata = match resolved {
+        Some(metadata) => metadata.clone(),
+        None => serde_json::from_slice(&store_get(endpoint, &path, 8 * 1024 * 1024).await?)
+            .map_err(|_| Error::InvalidComponent("invalid store metadata".into()))?,
+    };
     let download = format!("{path}/package.waz");
     if metadata["id"] != id
         || metadata["author"] != publisher
@@ -189,11 +188,12 @@ pub(super) async fn install_store_packages(
             "installation requires 1 to 100 roots".into(),
         ));
     }
+    let mut resolved = std::collections::HashMap::new();
     let mut roots = Vec::new();
     let mut unique = std::collections::BTreeSet::new();
     for (author, name, version) in requests {
         let author = if author.is_empty() {
-            resolve_author(endpoint, name, version).await?
+            resolve_author(endpoint, name, version, &mut resolved).await?
         } else {
             author.clone()
         };
@@ -259,7 +259,16 @@ pub(super) async fn install_store_packages(
                 format!("package {name} is already installed by another author"),
             )));
         }
-        let (bytes, mut proof) = download_release(endpoint, &publisher, &name, &version).await?;
+        let (bytes, mut proof) = download_release(
+            endpoint,
+            &publisher,
+            &name,
+            &version,
+            resolved
+                .get(&(name.clone(), version.clone()))
+                .filter(|m| m["author"] == publisher),
+        )
+        .await?;
         proof.as_object_mut().unwrap().remove("_requested");
         if let Some(current) = installed.as_array().unwrap().iter().find(|p| p["id"] == id)
             && current["author_owner_hash"].is_null()
@@ -268,7 +277,7 @@ pub(super) async fn install_store_packages(
                 super::signing::policy("publisher_ownership_conflict", http::StatusCode::CONFLICT)
             })?;
             let (_, previous) =
-                match download_release(endpoint, &publisher, &name, old_version).await {
+                match download_release(endpoint, &publisher, &name, old_version, None).await {
                     Ok(release) => release,
                     Err(Error::SigningStatusUnavailable) => {
                         return Err(Error::SigningStatusUnavailable);
@@ -282,12 +291,9 @@ pub(super) async fn install_store_packages(
                 };
             proof["_previous_release"] = previous;
         }
-        let document = package_metadata(&super::format::read_package_at(
-            &bytes,
-            proof["signature"]["verified_at"].as_i64().unwrap(),
-        )?)?;
-        for dep in document["dependencies"].as_array().unwrap() {
-            let author = match dep["publisher"].as_str() {
+        // verify_release already matched these exact dependencies to the signed manifest.
+        for dep in proof["dependencies"].as_array().unwrap() {
+            let author = match dep["author"].as_str() {
                 Some(author) => author.to_owned(),
                 None => match installed_versions
                     .iter()
@@ -302,6 +308,7 @@ pub(super) async fn install_store_packages(
                             endpoint,
                             dep["name"].as_str().unwrap(),
                             dep["version"].as_str().unwrap(),
+                            &mut resolved,
                         )
                         .await?
                     }
@@ -355,33 +362,29 @@ fn order_packages(
 ) -> Result<Vec<(String, Vec<u8>, Value)>> {
     // Runtime packages need no build order. Validate the complete closure before
     // registration; keep the requested root last for activation and its response.
-    for (_, bytes, proof) in &resources {
-        let doc = package_metadata(&super::format::read_package_at(
-            bytes,
-            proof["signature"]["verified_at"].as_i64().ok_or_else(|| {
-                super::signing::policy(
-                    "package_policy_upgrade_required",
-                    http::StatusCode::UNPROCESSABLE_ENTITY,
-                )
-            })?,
-        )?)?;
-        if !doc["dependencies"].as_array().unwrap().iter().all(|dep| {
-            resources.iter().any(|(id, _, proof)| {
-                proof["version"] == dep["version"]
-                    && id.split_once('/').map_or(id.as_str(), |(_, name)| name)
-                        == dep["name"].as_str().unwrap()
-                    && dep["publisher"].as_str().is_none_or(|author| {
-                        id.split_once('/')
-                            .is_some_and(|(publisher, _)| publisher == author)
-                    })
-            }) || installed.iter().any(|entry| {
-                entry["name"] == dep["name"]
-                    && entry["version"] == dep["version"]
-                    && dep["publisher"]
-                        .as_str()
-                        .is_none_or(|author| entry["author"] == author)
+    for (_, _, proof) in &resources {
+        if !proof["dependencies"]
+            .as_array()
+            .ok_or_else(|| Error::InvalidComponent("missing release dependencies".into()))?
+            .iter()
+            .all(|dep| {
+                resources.iter().any(|(id, _, proof)| {
+                    proof["version"] == dep["version"]
+                        && id.split_once('/').map_or(id.as_str(), |(_, name)| name)
+                            == dep["name"].as_str().unwrap()
+                        && dep["author"].as_str().is_none_or(|author| {
+                            id.split_once('/')
+                                .is_some_and(|(publisher, _)| publisher == author)
+                        })
+                }) || installed.iter().any(|entry| {
+                    entry["name"] == dep["name"]
+                        && entry["version"] == dep["version"]
+                        && dep["author"]
+                            .as_str()
+                            .is_none_or(|author| entry["author"] == author)
+                })
             })
-        }) {
+        {
             return Err(Error::BadRequest("missing exact package dependency".into()));
         }
     }
@@ -490,7 +493,7 @@ pub(super) fn verify_release(
     publisher: &str,
     name: &str,
     version: &str,
-) -> Result<()> {
+) -> Result<super::PackageFiles> {
     let invalid = |message: &str| Error::InvalidComponent(message.into());
     let digest = format!("{:x}", Sha256::digest(bytes));
     if metadata["package_sha256"] != digest || metadata["size"].as_u64() != Some(bytes.len() as u64)
@@ -584,7 +587,7 @@ pub(super) fn verify_release(
             "publisher owner_hash differs from the authenticated store proof",
         ));
     }
-    Ok(())
+    Ok(package)
 }
 
 #[cfg(test)]

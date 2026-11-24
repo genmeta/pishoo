@@ -17,8 +17,28 @@ struct Vfs {
     raw: sqlite3_vfs,
     root: Arc<Dir>,
     name: CString,
-    database: &'static str,
+    database: Database,
 }
+
+struct Database {
+    file: &'static str,
+    journal: &'static str,
+    lock: &'static str,
+}
+
+macro_rules! database {
+    ($name:literal) => {
+        Database {
+            file: $name,
+            journal: concat!($name, "-journal"),
+            lock: concat!($name, ".lock"),
+        }
+    };
+}
+
+const MAIN: Database = database!("database");
+const LEGACY: Database = database!("message.db");
+
 #[repr(C)]
 struct File {
     raw: sqlite3_file,
@@ -34,8 +54,8 @@ pub(super) fn with<T>(
 ) -> Result<T, Failure> {
     // Message keeps using an existing legacy business database on reopen.
     let database = match root.symlink_metadata("message.db") {
-        Ok(_) => "message.db",
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "database",
+        Ok(_) => LEGACY,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => MAIN,
         Err(error) => return Err(super::io(error)),
     };
     let mut vfs = Box::new(Vfs {
@@ -65,23 +85,20 @@ pub(super) fn with<T>(
     });
     let mut db = Connection::open_with_flags_and_vfs(
         "database",
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_CREATE
+        OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         registered.name.to_str().unwrap(),
     )
     .map_err(storage)?;
     unsafe {
-        // A guest can edit its own index. Bound record allocation and prohibit
-        // extra databases independently of the host's fixed SQL statements.
+        // Bound native attachment record allocation and prevent ATTACH.
         sqlite3_limit(db.handle(), SQLITE_LIMIT_LENGTH, 16 * 1024);
         sqlite3_limit(db.handle(), SQLITE_LIMIT_ATTACHED, 0);
     }
     db.busy_timeout(std::time::Duration::from_secs(2))
         .map_err(storage)?;
     db.execute_batch(sql::CONNECTION).map_err(storage)?;
-    // SQL is compiled into the host, never supplied by the guest. In particular
-    // ATTACH, load_extension, WAL, and arbitrary filenames have no entry point.
     action(&mut db)
 }
 unsafe fn root<'a>(vfs: *mut sqlite3_vfs) -> &'a Dir {
@@ -98,11 +115,11 @@ unsafe fn filename<'a>(name: *const c_char) -> Option<&'a str> {
     }
 }
 unsafe fn physical_name(vfs: *mut sqlite3_vfs, name: &str) -> &'static str {
-    match ((*((*vfs).pAppData as *mut Vfs)).database, name) {
-        ("message.db", "database") => "message.db",
-        ("message.db", _) => "message.db-journal",
-        (_, "database") => "database",
-        _ => "database-journal",
+    let database = &(*((*vfs).pAppData as *mut Vfs)).database;
+    if name == "database" {
+        database.file
+    } else {
+        database.journal
     }
 }
 unsafe extern "C" fn open(
@@ -161,11 +178,7 @@ unsafe extern "C" fn open(
         file: Some(file),
         lock: SQLITE_LOCK_NONE,
         root: Some((*((*vfs).pAppData as *mut Vfs)).root.clone()),
-        lock_name: if name.starts_with("message.db") {
-            "message.db.lock"
-        } else {
-            "database.lock"
-        },
+        lock_name: (*((*vfs).pAppData as *mut Vfs)).database.lock,
     });
     if !result.is_null() {
         *result = SQLITE_OPEN_READWRITE;

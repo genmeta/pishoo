@@ -29,6 +29,7 @@ fn parent(runtime: &WasmRuntime, body: &str) -> StoreData {
             .unwrap()
             .clone(),
         remote: None,
+        sqlite_locks: Default::default(),
     }
 }
 

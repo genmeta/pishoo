@@ -161,8 +161,8 @@ pub(crate) async fn load_access(
     inherit_identity_owner(working.as_file(), profile)?;
     let uri = format!("sqlite://{}?mode=rw", working.path().display());
     let access = access_control::AccessService::load_from_db(&uri, profile.name(), subject).await?;
-    // Seed native discovery/contact entry points only; business ACLs are configured
-    // after installation. Existing databases never have defaults reapplied.
+    // Seed discovery, contact and public personal card reads once per identity.
+    // Existing databases never have defaults reapplied.
     for (method, path, effect, grantee) in [
         (
             http::Method::POST,
@@ -192,6 +192,37 @@ pub(crate) async fn load_access(
             http::Method::GET,
             "/std/acl/permissions",
             Effect::Allow,
+            Grantee::All,
+        ),
+        (
+            http::Method::GET,
+            "/std/profile/nickname",
+            Effect::Allow,
+            Grantee::All,
+        ),
+        (
+            http::Method::GET,
+            "/std/profile/avatar",
+            Effect::Allow,
+            Grantee::All,
+        ),
+        (
+            http::Method::GET,
+            "/std/profile/introduction",
+            Effect::Allow,
+            Grantee::All,
+        ),
+        (
+            http::Method::GET,
+            "/std/profile/permission",
+            Effect::Allow,
+            Grantee::All,
+        ),
+        // The ACL inherits by path prefix. Saved permission presets are a separate resource.
+        (
+            http::Method::GET,
+            "/std/profile/permission/list",
+            Effect::Deny,
             Grantee::All,
         ),
     ] {

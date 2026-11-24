@@ -63,6 +63,7 @@ fn native_router(server: &Server) -> Router {
             server.endpoint.clone(),
         ))
         .merge(crate::contact::contact_router(
+            server.contact_db.clone(),
             server.profile.clone(),
             server.endpoint.clone(),
             server.access.clone(),
@@ -87,25 +88,13 @@ fn native_router(server: &Server) -> Router {
                 if path == "/sys" || path.starts_with("/sys/") {
                     return http::StatusCode::FORBIDDEN.into_response();
                 }
-                let tail = path
-                    .strip_prefix("/app/")
-                    .unwrap_or(path.trim_start_matches('/'));
-                let local = tail
-                    .match_indices('/')
-                    .map(|(end, _)| &tail[..end])
-                    .chain(std::iter::once(tail))
-                    .any(|name| {
-                        crate::package::valid_id(name).is_ok()
-                            && [name.to_owned(), name.replace('/', "%2F")]
-                                .iter()
-                                .any(|directory| {
-                                    profile
-                                        .join("dev")
-                                        .join(directory)
-                                        .join("manifest.json")
-                                        .is_file()
-                                })
-                    });
+                let frontend = path.strip_prefix("/app/");
+                let local = crate::development::preview_mount(
+                    &profile,
+                    frontend.unwrap_or_else(|| path.trim_start_matches('/')),
+                    frontend.is_some(),
+                )
+                .is_some();
                 if !local
                     && !path.starts_with("/std/")
                     && !sandbox.read().unwrap().libs.keys().any(|id| {
@@ -185,11 +174,10 @@ fn current_router(server: &Server) -> Router {
                     .path()
                     .strip_prefix("/app/")
                     .is_some_and(|tail| {
-                        sandbox.apps.keys().any(|id| {
-                            let name = id.split_once('/').map_or(&id[..], |(_, name)| name);
-                            tail.strip_prefix(name)
-                                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
-                        })
+                        sandbox
+                            .apps
+                            .keys()
+                            .any(|id| crate::package::app_mount(id, tail).is_some())
                     })
                     || sandbox.libs.keys().any(|id| {
                         !crate::package::is_standard_author(id.split('/').next().unwrap_or(""))
@@ -406,11 +394,6 @@ impl Server {
             sandbox.tasks.clone()
         };
         *self.router.write().unwrap() = axum::Router::new();
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            tasks.wait().await;
-            Ok(())
-        })
-        .await
-        .map_err(|_| Error::ShutdownDeadline)?
+        Sandbox::wait(tasks).await
     }
 }

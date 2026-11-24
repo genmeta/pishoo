@@ -157,9 +157,12 @@ pub(crate) async fn register_host(
     if profile.name() != endpoint.name() {
         return Err(Error::IdentityMismatch);
     }
+    let mut db = database.lock().await;
+    if storage::device_initialized(&db)? {
+        return Ok(());
+    }
     let local = endpoint.local_authority()?;
     let owner = identity(local.name(), local.certificates())?;
-    let mut db = database.lock().await;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     storage::register_first_administrator(&tx, &owner)?;
     tx.commit()?;

@@ -1158,3 +1158,39 @@ fn native_reopen_recovers_hot_journal_before_reading_shared_business_rows() {
     })
     .unwrap();
 }
+
+#[tokio::test]
+async fn aborted_attachment_handler_retains_sqlite_lock_until_index_closes() {
+    let home = tempfile::tempdir().unwrap();
+    let volume = home.path();
+    let root = Arc::new(Dir::open_ambient_dir(volume, cap_std::ambient_authority()).unwrap());
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let (exit, exit_rx) = std::sync::mpsc::channel();
+    let (closed, closed_rx) = tokio::sync::oneshot::channel();
+    let handler = tokio::spawn(async move {
+        // Notify after the blocking callback and its connection have both exited.
+        let closed = scopeguard::guard(closed, |closed| {
+            let _ = closed.send(());
+        });
+        blocking(move || {
+            let _closed = closed;
+            vfs::with(root, |db| {
+                db.execute_batch("BEGIN IMMEDIATE; CREATE TABLE files(id INTEGER);")
+                    .map_err(storage)?;
+                entered.send(()).unwrap();
+                exit_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                db.execute_batch("COMMIT;").map_err(storage)
+            })
+        })
+        .await
+    });
+    entered_rx.await.unwrap();
+    handler.abort();
+    assert!(handler.await.unwrap_err().is_cancelled());
+    assert!(volume.join("database.lock").is_dir());
+    exit.send(()).unwrap();
+    closed_rx.await.unwrap();
+    assert!(!volume.join("database.lock").exists());
+}

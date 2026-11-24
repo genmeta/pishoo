@@ -17,16 +17,30 @@ pub(super) fn storage(error: rusqlite::Error) -> Failure {
     fail(status, format!("contact storage: {error}"))
 }
 
-pub(super) fn outbound_request(db: &Connection, target: &str) -> Result<Value, Failure> {
-    db.query_row("SELECT application_id, description, state, min(local_deadline,coalesce(remote_deadline,local_deadline)),
-            last_error, created_at, updated_at, contact_id, target_subject
-        FROM outbound_contact_request WHERE target_name=?1", [target], |row| Ok(json!({
-        "target_name":target, "application_id":row.get::<_,String>(0)?, "description":row.get::<_,String>(1)?,
-        "status":row.get::<_,String>(2)?, "valid_before":row.get::<_,i64>(3)?, "error_message":row.get::<_,Option<String>>(4)?,
-        "created_at":row.get::<_,i64>(5)?, "updated_at":row.get::<_,i64>(6)?,
-        "_contact_id":row.get::<_,Option<i64>>(7)?, "_contact_subject":row.get::<_,Option<String>>(8)?
-    }))).optional().map_err(storage)?.ok_or_else(||fail(404,"contact request not found"))
+const REQUEST_COLUMNS: &str = "target_name, application_id, description, state,
+    min(local_deadline,coalesce(remote_deadline,local_deadline)), last_error, created_at,
+    updated_at, contact_id, target_subject";
+
+fn draft_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "target_name":row.get::<_,String>(0)?, "application_id":row.get::<_,String>(1)?,
+        "description":row.get::<_,String>(2)?, "status":row.get::<_,String>(3)?,
+        "valid_before":row.get::<_,i64>(4)?, "error_message":row.get::<_,Option<String>>(5)?,
+        "created_at":row.get::<_,i64>(6)?, "updated_at":row.get::<_,i64>(7)?,
+        "_contact_id":row.get::<_,Option<i64>>(8)?, "_contact_subject":row.get::<_,Option<String>>(9)?
+    }))
 }
+
+pub(super) fn outbound_request(db: &Connection, target: &str) -> Result<Option<Value>, Failure> {
+    db.query_row(
+        &format!("SELECT {REQUEST_COLUMNS} FROM outbound_contact_request WHERE target_name=?1"),
+        [target],
+        draft_row,
+    )
+    .optional()
+    .map_err(storage)
+}
+
 pub(super) fn expire_requests(db: &Connection) -> Result<(), Failure> {
     db.execute("UPDATE outbound_contact_request SET state='expired',lease_until=NULL,review_id=NULL,updated_at=?1,last_error='contact request expired'
         WHERE state IN ('queued','pending') AND min(local_deadline,coalesce(remote_deadline,local_deadline))<=?1",[now()]).map_err(storage)?;

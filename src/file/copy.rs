@@ -3,6 +3,8 @@ use tower::ServiceExt;
 
 use super::*;
 
+const MAX_IMPORT_BYTES: u64 = 1024 * 1024 * 1024;
+
 // This router is present only in the host's internal HTTP router. It is never
 // merged into the external service or exposed as a WASI filesystem preopen.
 pub(crate) fn library_router(root: std::path::PathBuf, endpoint: dhttp::Endpoint) -> Router {
@@ -281,6 +283,8 @@ async fn read_library(root: Dir, request: Request<Body>) -> Result<Response, Fai
     let path = required(&q, "path")?.to_owned();
     let expected = q.get("version").cloned();
     let info = q.get("view").is_some_and(|value| value == "meta");
+    // Imports use metadata to resume each range and request the digest at completion.
+    let hash_contents = info && one(request.headers(), "prefer")? != Some("return=minimal");
     let (file,metadata)=blocking(move || {
         if !valid_directory(&path){return Err(fail(400,"invalid personal file path"));}
         let mut parts=path.split('/').collect::<Vec<_>>();
@@ -291,16 +295,25 @@ async fn read_library(root: Dir, request: Request<Body>) -> Result<Response, Fai
             directory=Dir::from_std_file(std::fs::File::from(fd));
         }
         let mut file=open(&directory,&name,false,false)?;
-        let size=file.metadata().map_err(io)?.len();
-        if size>100*1024*1024{return Err(fail(413,"personal file exceeds import limit"));}
-        let selected_version=source_version(&file.metadata().map_err(io)?);
-        let mut digest=blake3::Hasher::new();let mut buffer=[0;64*1024];
-        loop{let count=file.read(&mut buffer).map_err(io)?;if count==0{break;}digest.update(&buffer[..count]);}
-        let digest=digest.finalize().to_hex().to_string();let version=source_version(&file.metadata().map_err(io)?);
-        if selected_version!=version{return Err(fail(409,"personal file version changed"));}
+        let selected = file.metadata().map_err(io)?;
+        let size = selected.len();
+        if size > MAX_IMPORT_BYTES { return Err(fail(413, "personal file exceeds import limit")); }
+        let version = source_version(&selected);
         if expected.as_ref().is_some_and(|value|value!=&version){return Err(fail(409,"personal file version changed"));}
-        file.rewind().map_err(io)?;
-        let metadata=json!({"name":name,"size":size,"digest":digest,"version":version,"media_type":mime_guess::from_path(&name).first_or_octet_stream().essence_str()});
+        let mut metadata=json!({"name":name,"size":size,"version":version,"media_type":mime_guess::from_path(&name).first_or_octet_stream().essence_str()});
+        if hash_contents {
+            let mut digest = blake3::Hasher::new();
+            let mut buffer = [0; 64 * 1024];
+            loop {
+                let count = file.read(&mut buffer).map_err(io)?;
+                if count == 0 { break; }
+                digest.update(&buffer[..count]);
+            }
+            if version != source_version(&file.metadata().map_err(io)?) {
+                return Err(fail(409, "personal file version changed"));
+            }
+            metadata["digest"] = digest.finalize().to_hex().to_string().into();
+        }
         Ok((file,metadata))
     }).await?;
     if info {

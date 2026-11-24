@@ -790,6 +790,42 @@ async fn disabled_profile_skips_credentials_libs_and_workers() {
 }
 
 #[tokio::test]
+async fn unchanged_device_scan_keeps_the_published_router() {
+    let root = tempfile::tempdir().unwrap();
+    let home = DhttpHome::new(root.path().into());
+    let database = crate::system::open(&home).unwrap();
+    let (commands, _) = tokio::sync::mpsc::channel(1);
+    let server = server(root.path()).await;
+    let name = server.name().to_owned();
+    let runtime = server.sandbox.read().unwrap().runtime.clone();
+    let marker = Arc::new(());
+    let published = Arc::downgrade(&marker);
+    *server.router.write().unwrap() = current_router(&server).layer(axum::Extension(marker));
+    let mut servers = BTreeMap::from([(name.clone(), server)]);
+    let mdns = ddns::mdns::MdnsResolverSet::new("pishoo-test.local");
+
+    let changed = super::run::reconcile_device(
+        &mdns,
+        &home,
+        None,
+        &mut servers,
+        runtime,
+        &database,
+        &commands,
+    )
+    .await
+    .unwrap();
+
+    assert!(!changed);
+    assert!(published.upgrade().is_some());
+
+    let server = servers.get_mut(&name).unwrap();
+    let endpoint = server.endpoint.clone();
+    super::run::apply_ocsp(server, endpoint).await.unwrap();
+    assert!(published.upgrade().is_some());
+}
+
+#[tokio::test]
 async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server() {
     let root = tempfile::tempdir().unwrap();
     dhttp::DhttpNetwork::init().await.unwrap();
@@ -1245,29 +1281,6 @@ async fn introduction_static_reads_require_explicit_grant_without_management_acc
         &crate::package::tests::publisher("std.dhttp.net", 'a'),
     );
     crate::package::install_app(&server.profile, "std.dhttp.net/introduction", &package).unwrap();
-    let profile_document = json!({
-        "openapi":"3.1.0",
-        "info":{"title":"Profile","version":"1.0.0","description":"Public profile","license":{"name":"MIT"}},
-        "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":"profile","dependencies":[]},
-        "paths":{
-            "/profile/nickname":{"get":{"operationId":"nickname","summary":"Nickname"},"put":{"operationId":"edit","summary":"Edit nickname"}},
-            "/profile/avatar":{"get":{"operationId":"avatar","summary":"Avatar"}}
-        }
-    });
-    let profile_package = crate::package::tests::package_fixture(
-        &profile_document,
-        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-        std::collections::BTreeMap::new(),
-        &crate::package::tests::publisher("std.dhttp.net", 'a'),
-    );
-    let runtime = server.sandbox.read().unwrap().runtime.clone();
-    crate::package::install_lib(
-        &server.profile,
-        "std.dhttp.net/profile",
-        &profile_package,
-        &runtime,
-    )
-    .unwrap();
     server.sandbox.write().unwrap().apps =
         crate::package::installed_apps(&server.profile, None).unwrap();
     *server.router.write().unwrap() = current_router(&server);
@@ -1289,8 +1302,6 @@ async fn introduction_static_reads_require_explicit_grant_without_management_acc
             "/app/introduction/",
             "/app/introduction/assets/app.js",
             "/app/introduction/deep/link?view=card",
-            "/std/profile/nickname",
-            "/std/profile/avatar",
         ] {
             let router = server.router.read().unwrap().clone();
             let response = router.oneshot(request(method.clone(), path)).await.unwrap();
@@ -1338,8 +1349,7 @@ async fn introduction_static_reads_require_explicit_grant_without_management_acc
         (Method::GET, "/std/contacts"),
         (Method::GET, "/std/acl/access"),
         (Method::GET, "/std/sys/listen"),
-        (Method::GET, "/std/profile/nickname"),
-        (Method::GET, "/std/profile/avatar"),
+        (Method::PUT, "/std/profile/nickname"),
     ] {
         let router = server.router.read().unwrap().clone();
         let response = router.oneshot(request(method, path)).await.unwrap();

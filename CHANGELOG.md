@@ -1,6 +1,16 @@
 # Changelog
 
-## [0.9.2-preview.2] - Unreleased
+## [0.9.2-preview.3] - Unreleased
+
+- Admit reads between verified local standard libraries using their running package identities. Allow local standard libraries to read Contact group bindings.
+
+- Select active App directories from package registrations and mount standard Apps without the leading `std/` segment. Resolve owner-only previews for every hosted identity and check their routes and exact versions alongside installed libraries.
+- Import personal files up to 1 GiB. Release SQLite locks owned by interrupted WASM calls after their outstanding file operations finish, so the next call can roll back the journal.
+- Share the permission catalog between contact requests and the permissions API, and paginate contacts with their outgoing requests.
+- Open personal card reads by default when creating an identity ACL. Existing ACLs retain their saved rules, and saved permission presets have a separate access rule.
+- Refresh due OCSP responses after resuming from system sleep.
+
+## [0.9.2-preview.2] - 2026-11-19
 
 - Fix installed package routing when scanning development previews.
 - Look up group owner bindings and personal aliases in the local contacts table. Allow authenticated local Group and Message services to read the bindings used by group conversations.

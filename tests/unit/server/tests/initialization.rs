@@ -163,21 +163,28 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
         ));
     }
     for visitor in [None, Some("bob.dhttp.net")] {
-        assert!(matches!(
-            authorization(&access, Method::GET, "/std/acl/permissions", visitor).await,
-            AuthResult::Allowed
-        ));
+        for path in [
+            "/std/acl/permissions",
+            "/std/profile/nickname",
+            "/std/profile/avatar",
+            "/std/profile/introduction",
+            "/std/profile/permission",
+        ] {
+            assert!(
+                matches!(
+                    authorization(&access, Method::GET, path, visitor).await,
+                    AuthResult::Allowed
+                ),
+                "{path} must be public"
+            );
+        }
         for (method, path) in [
             (Method::POST, "/std/acl/permissions"),
-            (Method::GET, "/std/profile/nickname"),
-            (Method::GET, "/std/profile/avatar"),
             (Method::GET, "/app/introduction"),
             (Method::GET, "/app/introduction/"),
             (Method::GET, "/app/introduction/assets/app.js"),
             (Method::GET, "/app/introduction/assets/app.css"),
             (Method::GET, "/std/profile"),
-            (Method::GET, "/std/profile/introduction"),
-            (Method::GET, "/std/profile/permission"),
             (Method::GET, "/std/profile/permission/list"),
             (Method::GET, "/app/workspace"),
             (Method::GET, "/app/workspace/assets/app.js"),
@@ -222,8 +229,8 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
             |row| row.get::<_, i64>(0),
         )
         .unwrap(),
-        0,
-        "the host must not seed business ACLs, including redundant deny rules"
+        5,
+        "the profile card defaults only cover four reads and the preset exception"
     );
     for table in ["contacts", "contact_applications", "access_reviews"] {
         assert_eq!(
@@ -284,6 +291,14 @@ async fn business_permissions_are_configured_after_initialization_and_survive_re
         )
         .await
         .unwrap();
+    access
+        .remove_policy(
+            AccessMethod::Specified(Method::GET),
+            "/std/profile/nickname",
+            Grantee::All,
+        )
+        .await
+        .unwrap();
     let reopened = load_access(&profile, &subject).await.unwrap();
     assert!(matches!(
         authorization(&reopened, Method::GET, "/app/introduction", None).await,
@@ -322,6 +337,11 @@ async fn reopening_preserves_removed_default_rule_and_existing_config() {
         (Method::GET, "/std/contact"),
         (Method::GET, "/std/contact/list"),
         (Method::GET, "/std/acl/status"),
+        (Method::GET, "/std/profile/nickname"),
+        (Method::GET, "/std/profile/avatar"),
+        (Method::GET, "/std/profile/introduction"),
+        (Method::GET, "/std/profile/permission"),
+        (Method::GET, "/std/profile/permission/list"),
     ] {
         access
             .remove_policy(
@@ -952,6 +972,29 @@ fn conflicting_legacy_directories_and_public_files_preserve_both_versions() {
         std::fs::read(profile.join("app/notes/index.html")).unwrap(),
         b"installed page"
     );
+}
+
+#[test]
+fn startup_removes_only_recognized_staging_directories_without_journals() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path(), "owner");
+    let orphan = profile.join(".pishoo-0123456789abcdef0123456789abcdef");
+    let unrelated = profile.join(".pishoo-local-notes");
+    std::fs::create_dir_all(orphan.join("new-app")).unwrap();
+    std::fs::write(orphan.join("new-app/index.html"), b"staged page").unwrap();
+    std::fs::create_dir(&unrelated).unwrap();
+
+    for _ in 0..2 {
+        initialize_directories(&profile).unwrap();
+        assert!(!orphan.exists());
+        assert!(unrelated.is_dir());
+    }
+
+    std::fs::create_dir(&orphan).unwrap();
+    let marker = orphan.join(".transaction.json");
+    std::os::unix::fs::symlink("missing-target", &marker).unwrap();
+    assert!(initialize_directories(&profile).is_err());
+    assert!(marker.symlink_metadata().unwrap().is_symlink());
 }
 
 #[test]

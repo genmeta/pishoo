@@ -13,7 +13,7 @@ fn environment() -> (tempfile::TempDir, IdentityProfile, Arc<RwLock<Sandbox>>) {
 fn environment_named(name: &str) -> (tempfile::TempDir, IdentityProfile, Arc<RwLock<Sandbox>>) {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join(name)).unwrap();
-    std::fs::create_dir_all(profile.join("app/hello")).unwrap();
+    std::fs::create_dir_all(profile.join("app/hello.1.0.0")).unwrap();
     std::fs::create_dir_all(profile.join("lib/hello.preview")).unwrap();
     std::fs::write(
         profile.join("lib/hello.preview/manifest.json"),
@@ -135,7 +135,7 @@ fn standard_files(profile: &IdentityProfile, name: &str, path: &str) -> std::pat
 #[tokio::test]
 async fn local_app_ranges_conditions_redirects_and_errors_remain_no_store() {
     let (_temp, profile, sandbox) = environment();
-    std::fs::write(profile.join("app/hello/index.html"), b"0123456789").unwrap();
+    std::fs::write(profile.join("app/hello.1.0.0/index.html"), b"0123456789").unwrap();
     let app = app(&profile, &sandbox);
     let initial = app
         .clone()
@@ -168,7 +168,7 @@ async fn local_app_ranges_conditions_redirects_and_errors_remain_no_store() {
         assert_eq!(response.status(), status);
         assert_eq!(response.headers()["cache-control"], "no-store");
     }
-    replace(&profile.join("app/hello/index.html"), b"replacement");
+    replace(&profile.join("app/hello.1.0.0/index.html"), b"replacement");
     let mut conditional = request("/app/hello/", true);
     conditional.headers_mut().insert("if-none-match", etag);
     let response = app.oneshot(conditional).await.unwrap();
@@ -180,7 +180,7 @@ async fn local_app_ranges_conditions_redirects_and_errors_remain_no_store() {
 #[tokio::test]
 async fn files_are_discovered_without_registration_and_survive_router_restart() {
     let (_temp, profile, sandbox) = environment();
-    std::fs::write(profile.join("app/hello/index.html"), "hello").unwrap();
+    std::fs::write(profile.join("app/hello.1.0.0/index.html"), "hello").unwrap();
     for _ in 0..2 {
         let response = app(&profile, &sandbox)
             .oneshot(request("/app/hello/", true))
@@ -205,7 +205,7 @@ async fn files_are_discovered_without_registration_and_survive_router_restart() 
 #[tokio::test]
 async fn directory_replacement_and_removal_affect_new_requests_only() {
     let (_temp, profile, sandbox) = environment();
-    std::fs::write(profile.join("app/hello/index.html"), "old").unwrap();
+    std::fs::write(profile.join("app/hello.1.0.0/index.html"), "old").unwrap();
     let api = app(&profile, &sandbox);
     let response = api
         .clone()
@@ -217,10 +217,14 @@ async fn directory_replacement_and_removal_affect_new_requests_only() {
         profile.join("lib/.previous"),
     )
     .unwrap();
-    std::fs::rename(profile.join("app/hello"), profile.join("app/.previous")).unwrap();
-    std::fs::create_dir_all(profile.join("app/hello")).unwrap();
+    std::fs::rename(
+        profile.join("app/hello.1.0.0"),
+        profile.join("app/.previous"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(profile.join("app/hello.1.0.0")).unwrap();
     std::fs::create_dir_all(profile.join("lib/hello.preview")).unwrap();
-    std::fs::write(profile.join("app/hello/index.html"), "new").unwrap();
+    std::fs::write(profile.join("app/hello.1.0.0/index.html"), "new").unwrap();
     std::fs::write(
         profile.join("lib/hello.preview/manifest.json"),
         r#"{"package":{"author":"dev.test.sky.lee.dhttp.net","name":"hello","version":"1.0.0"}}"#,
@@ -240,7 +244,7 @@ async fn directory_replacement_and_removal_affect_new_requests_only() {
         b"new"
     );
     std::fs::remove_dir_all(profile.join("lib/hello.preview")).unwrap();
-    std::fs::remove_dir_all(profile.join("app/hello")).unwrap();
+    std::fs::remove_dir_all(profile.join("app/hello.1.0.0")).unwrap();
     assert_eq!(
         api.oneshot(request("/app/hello/", true))
             .await
@@ -253,7 +257,7 @@ async fn directory_replacement_and_removal_affect_new_requests_only() {
 #[tokio::test]
 async fn development_files_require_owner_and_reject_path_escape() {
     let (_temp, profile, sandbox) = environment();
-    std::fs::write(profile.join("app/hello/index.html"), "private").unwrap();
+    std::fs::write(profile.join("app/hello.1.0.0/index.html"), "private").unwrap();
     let api = app(&profile, &sandbox);
     for path in ["/app/hello/", "/hello/read"] {
         assert_eq!(
@@ -281,7 +285,7 @@ async fn development_files_require_owner_and_reject_path_escape() {
             "{path}"
         );
     }
-    std::os::unix::fs::symlink(profile.path(), profile.join("app/hello/escape")).unwrap();
+    std::os::unix::fs::symlink(profile.path(), profile.join("app/hello.1.0.0/escape")).unwrap();
     assert_eq!(
         api.clone()
             .oneshot(request("/app/hello/escape/file.txt", true))
@@ -290,8 +294,8 @@ async fn development_files_require_owner_and_reject_path_escape() {
             .status(),
         StatusCode::NOT_FOUND
     );
-    std::fs::remove_dir_all(profile.join("app/hello")).unwrap();
-    std::os::unix::fs::symlink(profile.path(), profile.join("app/hello")).unwrap();
+    std::fs::remove_dir_all(profile.join("app/hello.1.0.0")).unwrap();
+    std::os::unix::fs::symlink(profile.path(), profile.join("app/hello.1.0.0")).unwrap();
     assert_eq!(
         api.oneshot(request("/app/hello/", true))
             .await
@@ -304,7 +308,7 @@ async fn development_files_require_owner_and_reject_path_escape() {
 #[tokio::test]
 async fn development_frontend_preserves_redirect_head_and_spa_behavior() {
     let (_temp, profile, sandbox) = environment();
-    std::fs::write(profile.join("app/hello/index.html"), "page").unwrap();
+    std::fs::write(profile.join("app/hello.1.0.0/index.html"), "page").unwrap();
     let api = app(&profile, &sandbox);
     let response = api
         .clone()
@@ -432,7 +436,10 @@ async fn jade_publishes_without_a_control_connection_and_cleans_up_on_stop() {
         .spawn()
         .unwrap();
     let ready = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        while !profile.join("app/hello/index.html").exists() {
+        // Jade publishes the completed builds one project at a time.
+        while !profile.join("lib/hello.preview/state.json").is_file()
+            || !profile.join("lib/profile.preview/state.json").is_file()
+        {
             if let Some(status) = child.try_wait().unwrap() {
                 panic!("jade exited before publication: {status}");
             }
@@ -450,6 +457,8 @@ async fn jade_publishes_without_a_control_connection_and_cleans_up_on_stop() {
     }
 
     assert!(profile.join("lib/hello.wasm.1.0.0").exists());
+    assert!(!profile.join("app/hello").exists());
+    assert!(!profile.join("app/profile").exists());
     assert!(profile.ssl_dir().exists());
     let sandbox = Arc::new(RwLock::new(Sandbox::new(Arc::new(
         crate::WasmRuntime::new().unwrap(),
@@ -467,7 +476,7 @@ async fn jade_publishes_without_a_control_connection_and_cleans_up_on_stop() {
         b"without socket"
     );
     std::fs::write(profile.join(".volume/hello/database"), "keep").unwrap();
-    let dependency_page = profile.join("app/profile/index.html");
+    let dependency_page = profile.join("app/profile.0.3.0/index.html");
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while std::fs::read(&dependency_page).ok().as_deref() != Some(b"dependency v1") {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -504,6 +513,8 @@ async fn jade_publishes_without_a_control_connection_and_cleans_up_on_stop() {
     );
     assert!(!profile.join("lib/hello.preview").exists());
     assert!(!profile.join("lib/profile.preview").exists());
+    assert!(!profile.join("app/hello.1.0.0").exists());
+    assert!(!profile.join("app/profile.0.3.0").exists());
     assert_eq!(
         std::fs::read(profile.join(".volume/std/profile/database")).unwrap(),
         b"dependency data"
@@ -531,14 +542,15 @@ async fn jade_publishes_without_a_control_connection_and_cleans_up_on_stop() {
 }
 
 #[tokio::test]
-async fn local_files_require_the_real_owner_independently_of_identity_spelling() {
+async fn previews_require_the_owner_for_every_identity_name() {
     for name in [
         "alex.chen.dhttp.net",
         "dev.wang.dhttp.net",
+        "dev.alex.chen.dhttp.net",
         "dev.dev.wang.dhttp.net",
     ] {
         let (_temp, profile, sandbox) = environment_named(name);
-        std::fs::write(profile.join("app/hello/index.html"), "private").unwrap();
+        std::fs::write(profile.join("app/hello.1.0.0/index.html"), "private").unwrap();
         let routes = app(&profile, &sandbox);
         let response = routes
             .clone()
@@ -697,7 +709,7 @@ async fn standard_declarations_select_arbitrary_package_names_and_require_owner(
 }
 
 #[tokio::test]
-async fn standard_preview_path_changes_retire_code_and_removal_restores_installed_routes() {
+async fn standard_preview_path_changes_retire_code_and_keep_installed_dependencies() {
     let (_temp, profile, sandbox) = environment();
     let file = standard_files(&profile, "conversations", "/comm/group");
     let id = "dev.genmeta.tech.dhttp.net/conversations";
@@ -705,13 +717,17 @@ async fn standard_preview_path_changes_retire_code_and_removal_restores_installe
     let installed = Arc::new(
         Lib::load(
             sandbox.read().unwrap().runtime.clone(),
-            id.to_owned(),
+            "dev.genmeta.tech.dhttp.net/dependency".into(),
             &wasm_with_path("0.9.0", "/comm/installed"),
             data.path(),
         )
         .unwrap(),
     );
-    sandbox.write().unwrap().libs.insert(id.into(), installed);
+    sandbox
+        .write()
+        .unwrap()
+        .libs
+        .insert("dev.genmeta.tech.dhttp.net/dependency".into(), installed);
     let routes = app(&profile, &sandbox);
     assert_eq!(
         status(&routes, "/std/comm/group", true).await,
@@ -720,7 +736,7 @@ async fn standard_preview_path_changes_retire_code_and_removal_restores_installe
     let first = sandbox.read().unwrap().dev_libs[id].1.clone();
     assert_eq!(
         status(&routes, "/std/comm/installed", true).await,
-        StatusCode::NOT_FOUND
+        StatusCode::METHOD_NOT_ALLOWED
     );
     replace(&file, &wasm_with_path("1.0.1", "/rooms/read"));
     assert_eq!(
@@ -774,27 +790,34 @@ async fn standard_preview_rejects_duplicate_providers_and_keeps_native_precedenc
         StatusCode::CONFLICT
     );
     std::fs::remove_dir_all(profile.join("lib/two.preview")).unwrap();
+    let routes = app(&profile, &sandbox);
+    for (version, expected) in [
+        ("invalid", StatusCode::BAD_REQUEST),
+        ("2.0.0", StatusCode::NOT_ACCEPTABLE),
+    ] {
+        let mut req = request("/std/comm/group", true);
+        req.headers_mut()
+            .insert("pishoo-package-version", version.parse().unwrap());
+        assert_eq!(
+            routes.clone().oneshot(req).await.unwrap().status(),
+            expected
+        );
+    }
     let data = tempfile::tempdir().unwrap();
-    let installed = Arc::new(
-        Lib::load(
-            sandbox.read().unwrap().runtime.clone(),
-            "std.dhttp.net/another".into(),
-            &wasm_with_path("1.0.0", "/comm/group"),
-            data.path(),
-        )
-        .unwrap(),
-    );
+    let installed = Lib::load(
+        sandbox.read().unwrap().runtime.clone(),
+        "std.dhttp.net/another".into(),
+        &wasm_with_path("1.0.0", "/comm/group"),
+        data.path(),
+    )
+    .unwrap();
     sandbox
         .write()
         .unwrap()
         .libs
-        .insert("std.dhttp.net/another".into(), installed);
+        .insert(installed.id.clone(), Arc::new(installed));
     assert_eq!(
-        app(&profile, &sandbox)
-            .oneshot(request("/std/comm/group", true))
-            .await
-            .unwrap()
-            .status(),
+        status(&routes, "/std/comm/group", true).await,
         StatusCode::CONFLICT
     );
     standard_files(&profile, "one", "/sys/listen");

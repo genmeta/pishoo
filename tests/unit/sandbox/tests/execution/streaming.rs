@@ -134,6 +134,7 @@ async fn large_echo_reports_fuel_exhaustion() {
             outgoing: Outgoing::Denied,
             local: authority("alice.dhttp.net"),
             remote: None,
+            sqlite_locks: Default::default(),
         },
     );
     store.limiter(|data| &mut data.memory);

@@ -4,6 +4,29 @@ use tower::ServiceExt;
 use super::*;
 use crate::{WasmRuntime, package::read_package};
 
+#[test]
+fn release_cache_waits_for_journals_and_ignores_unjournaled_staging_directories() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
+    crate::configure(&profile, None, true).unwrap();
+    let parent = profile_dir(&profile).unwrap();
+    let db = installation_database(&profile, false).unwrap();
+    let stage = profile.join(".pishoo-0123456789abcdef0123456789abcdef");
+    std::fs::create_dir(&stage).unwrap();
+    let marker = stage.join(".transaction.json");
+    std::fs::write(&marker, b"{}").unwrap();
+    let archive = profile.join(".volume/sys/pkg/unused-1.0.0.waz");
+    std::fs::write(&archive, b"unreferenced archive").unwrap();
+
+    collect_release_cache(&parent, &db).unwrap();
+    assert!(archive.is_file());
+
+    std::fs::remove_file(marker).unwrap();
+    collect_release_cache(&parent, &db).unwrap();
+    assert!(!archive.exists());
+    assert!(stage.is_dir());
+}
+
 #[tokio::test]
 async fn access_groups_register_mounted_operations_and_populate_catalog() {
     for publisher in [
@@ -182,75 +205,6 @@ fn app_capability_rejects_missing_frontend_and_untrusted_targets() {
 #[path = "tests/access_defaults.rs"]
 mod access_defaults;
 
-#[test]
-fn registered_resources_remain_readable_under_preview_and_after_installation() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    crate::configure(&profile, None, true).unwrap();
-    let runtime = std::sync::Arc::new(WasmRuntime::new().unwrap());
-    let package = |version: &str| {
-        let document = json!({"openapi":"3.1.0","info":{"title":"Hello","version":version,"description":"test","license":{"name":"MIT"}},
-            "x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"hello","dependencies":[]},
-            "paths":{"/read":{"post":{"operationId":"read","summary":"Read","responses":{"201":{"description":"Created"}}}}}});
-        crate::package::tests::package_fixture(
-            &document,
-            include_bytes!("../../../fixtures/wasi-http-read-request-then-respond.wasm"),
-            std::collections::BTreeMap::from([(
-                "index.html".parse().unwrap(),
-                version.as_bytes().to_vec(),
-            )]),
-            &crate::package::tests::publisher("alice.dhttp.net", 'a'),
-        )
-    };
-    let id = "alice.dhttp.net/hello";
-    install_package(&profile, id, &package("1.0.0"), &runtime).unwrap();
-    let lib = lib_root(&profile).unwrap();
-    let original = disk_bytes(&profile, &lib, id).unwrap();
-    let marker = profile.join("lib/hello.preview");
-    std::fs::create_dir(&marker).unwrap();
-    std::fs::rename(
-        profile.join("lib/hello.wasm.1.0.0"),
-        marker.join("previous-lib"),
-    )
-    .unwrap();
-    std::fs::rename(profile.join("app/hello"), marker.join("previous-app")).unwrap();
-    std::fs::write(profile.join("lib/hello.wasm.1.0.0"), b"unsigned preview").unwrap();
-    std::fs::create_dir(profile.join("app/hello")).unwrap();
-    std::fs::write(profile.join("app/hello/index.html"), b"preview page").unwrap();
-    std::fs::write(
-        marker.join("manifest.json"),
-        serde_json::to_vec(&json!({
-            "package":{"author":"alice.dhttp.net","name":"hello","version":"1.0.0"}
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let mut state = json!({});
-    for (kind, path) in [("lib", "lib/hello.wasm.1.0.0"), ("app", "app/hello")] {
-        let metadata = profile.join(path).metadata().unwrap();
-        state[kind] = json!({"dev":metadata.dev(),"ino":metadata.ino()});
-    }
-    std::fs::write(
-        marker.join("state.json"),
-        serde_json::to_vec(&state).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(disk_bytes(&profile, &lib, id).unwrap(), original);
-    let mut sandbox = crate::sandbox::Sandbox::new(runtime.clone());
-    sandbox.load_libs(&profile).unwrap();
-    let apps = installed_apps(&profile, Some(id)).unwrap();
-    let page = app_file(&apps[id].1, "index.html").unwrap();
-    assert_eq!(read_runtime_wasm(page).unwrap(), b"1.0.0");
-    install_package(&profile, id, &package("2.0.0"), &runtime).unwrap();
-    sandbox.load_libs(&profile).unwrap();
-    assert_ne!(disk_bytes(&profile, &lib, id).unwrap(), original);
-    let apps = installed_apps(&profile, Some(id)).unwrap();
-    assert_eq!(
-        read_runtime_wasm(app_file(&apps[id].1, "index.html").unwrap()).unwrap(),
-        b"2.0.0"
-    );
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn waz_v2_installation_preserves_runtime_files_and_offline_manual() {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -258,6 +212,7 @@ async fn waz_v2_installation_preserves_runtime_files_and_offline_manual() {
 
     for (author, name) in [
         ("alice.dhttp.net", "comm/manual"),
+        ("alice.dhttp.net", "database/manual"),
         ("dev.genmeta.tech.dhttp.net", "std/comm/manual"),
     ] {
         let id = format!("{author}/{name}");
@@ -319,10 +274,63 @@ async fn waz_v2_installation_preserves_runtime_files_and_offline_manual() {
             std::fs::read(profile.join(format!("lib/{name}.wasm.1.0.0"))).unwrap(),
             backend
         );
+        let mount = name.strip_prefix("std/").unwrap_or(name);
         assert_eq!(
-            std::fs::read(profile.join(format!("app/{name}/index.html"))).unwrap(),
+            std::fs::read(profile.join(format!("app/{mount}.1.0.0/index.html"))).unwrap(),
             b"manual app"
         );
+        assert!(
+            profile
+                .join(format!("app/{mount}"))
+                .symlink_metadata()
+                .is_err()
+        );
+        if name != mount {
+            assert!(!profile.join(format!("app/{name}")).exists());
+            let old = profile.join(format!("app/{name}.1.0.0"));
+            std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+            std::fs::rename(profile.join(format!("app/{mount}.1.0.0")), &old).unwrap();
+            std::os::unix::fs::symlink("manual.1.0.0", profile.join(format!("app/{name}")))
+                .unwrap();
+            let mut sandbox = crate::sandbox::Sandbox::new(runtime.clone());
+            sandbox.load_libs(&profile).unwrap();
+            super::activate_installed_version(&profile, &id, "1.0.0", &mut sandbox)
+                .unwrap()
+                .unwrap();
+            assert!(!old.exists());
+            assert!(!profile.join(format!("app/{name}")).exists());
+            assert!(!profile.join("app/std").exists());
+            let router = crate::sandbox::tests::api_router(
+                &sandbox,
+                crate::test_support::identity::endpoint("alice"),
+            );
+            for path in [format!("/app/{mount}/"), format!("/app/{name}/")] {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        http::Request::builder()
+                            .uri(&path)
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), http::StatusCode::OK, "{path}");
+                assert_eq!(
+                    axum::body::to_bytes(response.into_body(), 1024)
+                        .await
+                        .unwrap(),
+                    "manual app"
+                );
+            }
+
+            assert!(
+                profile
+                    .join(format!("app/{mount}"))
+                    .symlink_metadata()
+                    .is_err()
+            );
+        }
         let details = installed_packages(&profile, Some(&id)).unwrap();
         assert_eq!(
             details["manual"],
@@ -337,13 +345,39 @@ async fn waz_v2_installation_preserves_runtime_files_and_offline_manual() {
             assert!(!profile.join("lib/std/std").exists());
         }
         let hash = format!("{:x}", Sha256::digest(&bytes));
-        assert_eq!(cached_release(&profile, &hash).unwrap().unwrap(), files);
-        std::fs::write(
-            profile.join(format!(".volume/sys/pkg/releases/{hash}.waz")),
-            b"corrupt",
-        )
-        .unwrap();
-        assert!(cached_release(&profile, &hash).is_err());
-        assert!(cached_release(&profile, "../outside").is_err());
+        let cache = profile.join(".volume/sys/pkg");
+        let named = cache.join(format!(
+            "{}-1.0.0.waz",
+            name.replacen("database/", "database~/", 1)
+        ));
+        let legacy_dir = cache.join("releases");
+        let legacy = legacy_dir.join(format!("{hash}.waz"));
+        std::fs::create_dir(&legacy_dir).unwrap();
+        assert_eq!(
+            cached_release(&profile, &details, &hash).unwrap().unwrap(),
+            files
+        );
+        std::fs::rename(&named, &legacy).unwrap();
+        assert_eq!(
+            cached_release(&profile, &details, &hash).unwrap().unwrap(),
+            files
+        );
+        let db = installation_database(&profile, false).unwrap();
+        collect_release_cache(&profile_dir(&profile).unwrap(), &db).unwrap();
+        assert!(!legacy_dir.exists());
+        assert_eq!(std::fs::read(&named).unwrap(), bytes);
+        let legacy_named = legacy_dir.join(format!("{name}-1.0.0.waz"));
+        std::fs::create_dir_all(legacy_named.parent().unwrap()).unwrap();
+        std::fs::rename(&named, &legacy_named).unwrap();
+        assert_eq!(
+            cached_release(&profile, &details, &hash).unwrap().unwrap(),
+            files
+        );
+        collect_release_cache(&profile_dir(&profile).unwrap(), &db).unwrap();
+        assert!(!legacy_dir.exists());
+        assert_eq!(std::fs::read(&named).unwrap(), bytes);
+        std::fs::write(named, b"corrupt").unwrap();
+        assert!(cached_release(&profile, &details, &hash).is_err());
+        assert!(cached_release(&profile, &details, "../outside").is_err());
     }
 }

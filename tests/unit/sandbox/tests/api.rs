@@ -434,7 +434,7 @@ async fn routed_executions_exceed_four_concurrent_requests_and_reap_after_close(
     assert_eq!(sandbox.tasks.len(), 8);
     sandbox.close();
     assert_eq!(sandbox.tasks.len(), 8);
-    sandbox.wait().await.unwrap();
+    Sandbox::wait(sandbox.tasks.clone()).await.unwrap();
     assert!(sandbox.tasks.is_empty());
     drop(responses);
 }

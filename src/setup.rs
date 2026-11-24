@@ -221,7 +221,7 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
             tx.execute_batch(include_str!(
                 "package/migrations/v5_support_package_versions.sql"
             ))?;
-            create_package_views(&tx)?;
+            create_package_views(&tx, false)?;
             tx.commit()?;
         }
         return Ok(());
@@ -288,11 +288,11 @@ pub(crate) fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result
         );
         conn.execute(&format!("ATTACH DATABASE ?1 AS {schema}"), [uri])?;
     }
-    create_package_views(&conn)?;
+    create_package_views(&conn, flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY))?;
     Ok(conn)
 }
 
-fn create_package_views(conn: &Connection) -> Result<()> {
+fn create_package_views(conn: &Connection, read_only: bool) -> Result<()> {
     let package: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pkg_registry.sqlite_master WHERE type='table' AND name='package')",
         [], |row| row.get(0),
@@ -304,7 +304,7 @@ fn create_package_views(conn: &Connection) -> Result<()> {
         if multiversion {
             r#"
 CREATE TEMP VIEW package_current AS
-SELECT p.* FROM pkg_registry.package p
+SELECT p.*,CASE WHEN p.author IS NULL THEN p.name ELSE p.author||'/'||p.name END AS id FROM pkg_registry.package p
 JOIN pkg_registry.package_active a ON a.name=p.name AND a.version=p.version;
 CREATE TEMP VIEW lib AS SELECT * FROM package_current WHERE has_lib=1;
 CREATE TEMP VIEW app AS SELECT * FROM package_current WHERE has_app=1;
@@ -313,16 +313,36 @@ CREATE TEMP VIEW installed_app AS SELECT DISTINCT name,author FROM pkg_registry.
 "#
         } else {
             r#"
-CREATE TEMP VIEW lib AS SELECT * FROM pkg_registry.package WHERE has_lib=1;
-CREATE TEMP VIEW app AS SELECT * FROM pkg_registry.package WHERE has_app=1;
+CREATE TEMP VIEW lib AS SELECT *,CASE WHEN author IS NULL THEN name ELSE author||'/'||name END AS id FROM pkg_registry.package WHERE has_lib=1;
+CREATE TEMP VIEW app AS SELECT *,CASE WHEN author IS NULL THEN name ELSE author||'/'||name END AS id FROM pkg_registry.package WHERE has_app=1;
 CREATE TEMP VIEW installed_lib AS SELECT * FROM lib;
 CREATE TEMP VIEW installed_app AS SELECT * FROM app;
 "#
         }
     } else {
-        "CREATE TEMP VIEW installed_lib AS SELECT * FROM lib; CREATE TEMP VIEW installed_app AS SELECT * FROM app;"
+        // Pre-unified registrations key capabilities by full Lib id.
+        "CREATE TEMP VIEW installed_lib AS SELECT id,name,
+            CASE WHEN instr(id,'/')>0 THEN substr(id,1,instr(id,'/')-1) END AS author FROM lib;
+         CREATE TEMP VIEW installed_app AS SELECT * FROM app;"
     };
     conn.execute_batch(views)?;
+    if read_only {
+        let (identity, key, lib_key) = if package {
+            (
+                "CASE WHEN coalesce(l.author,'')='' THEN l.name ELSE l.author||'/'||l.name END",
+                "lib_name",
+                "name",
+            )
+        } else {
+            ("l.id", "lib_id", "id")
+        };
+        conn.execute_batch(&format!(
+            "CREATE TEMP VIEW installed_permission AS
+             SELECT {identity} AS package,l.name,l.author,c.title,o.path,o.method
+             FROM installed_lib l JOIN lib_capability c ON l.{lib_key}=c.{key}
+             LEFT JOIN lib_capability_operation o ON o.{key}=c.{key} AND o.capability_id=c.capability_id"
+        ))?;
+    }
     Ok(())
 }
 
@@ -438,10 +458,13 @@ fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()
     if has_apps {
         let mut names = conn.prepare("SELECT name FROM installed_app ORDER BY name")?;
         for name in names.query_map([], |row| row.get::<_, String>(0))? {
-            let mount = format!("/app/{}", name?);
+            let name = name?;
+            let mount = format!("/app/{}", crate::package::app_name(&name));
             if let Some(proxy) = proxies.iter().find(|proxy| {
                 let path = proxy.location.strip_prefix("= ").unwrap_or(&proxy.location);
-                path == mount || path.starts_with(&format!("{mount}/"))
+                path.strip_prefix("/app/")
+                    .and_then(|tail| crate::package::app_mount(&name, tail))
+                    .is_some()
             }) {
                 return Err(Error::InvalidConfig(format!(
                     "proxy {} conflicts with installed App {mount}",
@@ -456,16 +479,9 @@ fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()
         |row| row.get(0),
     )?;
     if has_libs {
-        let has_author: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('lib') WHERE name='author')",
-            [],
-            |row| row.get(0),
+        let mut names = conn.prepare(
+            "SELECT name FROM installed_lib WHERE author IS NULL OR author NOT IN ('std.dhttp.net','dev.genmeta.tech.dhttp.net') ORDER BY name",
         )?;
-        let mut names = conn.prepare(if has_author {
-            "SELECT name FROM installed_lib WHERE author IS NULL OR author NOT IN ('std.dhttp.net','dev.genmeta.tech.dhttp.net') ORDER BY name"
-        } else {
-            "SELECT name FROM installed_lib WHERE substr(id,1,14)<>'std.dhttp.net/' AND id NOT GLOB 'dev.genmeta.tech.dhttp.net/*' ORDER BY name"
-        })?;
         for name in names.query_map([], |row| row.get::<_, String>(0))? {
             let mount = format!("/{}", name?);
             if let Some(proxy) = proxies.iter().find(|proxy| {

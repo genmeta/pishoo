@@ -380,7 +380,7 @@ async fn note_sandbox_mounts_only_its_named_database_directory() {
         );
     }
     sandbox.close();
-    sandbox.wait().await.unwrap();
+    Sandbox::wait(sandbox.tasks.clone()).await.unwrap();
 }
 
 /// Temporary loopback UI fixture; every API request still executes the real guest.
@@ -436,5 +436,5 @@ async fn note_browser_preview() {
         _ = tokio::time::sleep(Duration::from_secs(300)) => (),
     }
     sandbox.close();
-    sandbox.wait().await.unwrap();
+    Sandbox::wait(sandbox.tasks.clone()).await.unwrap();
 }

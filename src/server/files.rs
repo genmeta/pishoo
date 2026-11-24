@@ -136,7 +136,7 @@ pub(super) fn initialize_directories(profile: &IdentityProfile) -> Result<()> {
                 .map_err(|error| error.error)?;
         }
     }
-    recover_package_files(profile)?;
+    recover_package_files(profile, &root)?;
     if rustix::process::geteuid().is_root() {
         repair_identity_ownership(&root, &owner)?;
     }
@@ -284,28 +284,44 @@ fn recovery_leaf(
     Ok(leaf.to_owned())
 }
 
-fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
-    for entry in std::fs::read_dir(profile.path())? {
+fn recover_package_files(profile: &IdentityProfile, root: &std::fs::File) -> Result<()> {
+    let directory = cap_std::fs::Dir::from_std_file(root.try_clone()?);
+    for entry in directory.entries()? {
         let entry = entry?;
-        if !entry
-            .file_name()
-            .to_str()
-            .is_some_and(|n| n.starts_with(".pishoo-"))
-            || !entry.file_type()?.is_dir()
-        {
+        let name = entry.file_name();
+        let Some(suffix) = name.to_str().and_then(|name| name.strip_prefix(".pishoo-")) else {
+            continue;
+        };
+        if !entry.file_type()?.is_dir() {
             continue;
         }
-        let stage = entry.path();
-        let marker = stage.join(".transaction.json");
-        if !marker.try_exists()? {
-            continue;
-        }
-        let stat = marker.symlink_metadata()?;
+        let marker = std::path::Path::new(&name).join(".transaction.json");
+        let stat = match directory.symlink_metadata(&marker) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Publication starts only after the journal is durable. The
+                // writer also removes it before discarding a finished stage.
+                if suffix.len() == 32
+                    && suffix
+                        .bytes()
+                        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                    && let Err(error) = directory
+                        .remove_dir_all(&name)
+                        .and_then(|()| root.sync_all())
+                {
+                    tracing::warn!(identity = profile.name(), stage = ?name, %error, "cannot remove abandoned package staging directory");
+                }
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         if !stat.file_type().is_file() || stat.len() > 2 * 1024 * 1024 {
             return Err(Error::InvalidConfig(
                 "invalid package recovery journal".into(),
             ));
         }
+        let stage = profile.join(&name);
+        let marker = profile.join(marker);
         let journal: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker)?)
             .map_err(|e| Error::InvalidConfig(e.to_string()))?;
         if journal["format"] == 2 {

@@ -4,6 +4,7 @@ use super::StoreData;
 
 pub(super) mod execution;
 mod http;
+pub(super) mod sqlite;
 
 // Existing identity WIT bindings and capability-checked host operations.
 

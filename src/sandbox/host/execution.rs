@@ -172,6 +172,7 @@ async fn execute_child(
                 outgoing: Outgoing::Denied,
                 local,
                 remote,
+                sqlite_locks: Default::default(),
             },
         );
         store.limiter(|state| &mut state.memory);
@@ -181,6 +182,7 @@ async fn execute_child(
         store.epoch_deadline_async_yield_and_update(1);
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+        super::sqlite::add_to_linker(&mut linker)?;
         let outcome = tokio::time::timeout_at(deadline, async {
             let command = Command::instantiate_async(&mut store, &program, &linker).await?;
             command.wasi_cli_run().call_run(&mut store).await

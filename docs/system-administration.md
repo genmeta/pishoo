@@ -104,3 +104,9 @@ Pishoo 负责身份与管理员事实的核验、持久保存和服务配置生�
 cargo test --offline --lib -- --test-threads=1
 cargo test --offline --lib server::tests::network::system::device_admin_registration_and_authorization_over_h3 -- --ignored --exact
 ```
+
+## WASM 调用异常后的 SQLite 恢复
+
+Pishoo 跟踪每次 WASI 调用实际取得的 SQLite `unix-dotfile` 锁。调用异常结束时，宿主等该调用的文件操作结束，再释放仍属于该调用的锁。下一次调用通过应用原有的 SQLite 连接回滚未提交事务，应用可继续服务。当前失败的请求由调用方按业务语义处理。HTTP、Lib CLI 和嵌入命令共用此机制。
+
+宿主通过打开的目录句柄核对锁的文件系统身份。宿主通过 SQLite 文件头识别已有库。新库写入文件头前，若调用已打开空文件，再创建同名的 `.lock` 目录，宿主也会将该目录识别为数据库锁；应用自建锁时应避开这一组合。该机制在 Pishoo 进程运行时清理已跟踪的调用，进程异常退出前来不及清理的锁仍需停机处理。

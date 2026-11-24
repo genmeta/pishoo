@@ -27,7 +27,7 @@ use wasmtime_wasi_http::{
 
 use super::{
     Invocation, Lib, Outgoing, Sandbox, StoreData, WasmRuntime,
-    host::{call_context, execution, identity, identity_v2},
+    host::{call_context, execution, identity, identity_v2, sqlite},
 };
 use crate::{Body, Error, Result, package::valid_id};
 
@@ -143,6 +143,7 @@ impl WasmRuntime {
             wasmtime_wasi::filesystem::WasiFilesystem,
         >(&mut linker, StoreData::filesystem)
         .map_err(Error::Guest)?;
+        sqlite::add_to_linker(&mut linker).map_err(Error::Guest)?;
         identity::IdentityV1::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
             &mut linker,
             |state| state,
@@ -406,7 +407,26 @@ impl Lib {
         builder
             .preopened_dir(&data, "/db", wasmtime_wasi::FsPerms::ReadWrite)
             .map_err(Error::Guest)?;
-        let filesystem = builder.build().filesystem().clone();
+        let mut filesystem = builder.build().filesystem().clone();
+        use wasmtime_wasi::p2::bindings::filesystem::preopens::Host;
+        let mut table = ResourceTable::new();
+        let preopens = wasmtime_wasi::filesystem::WasiFilesystemCtxView {
+            ctx: &mut filesystem,
+            table: &mut table,
+        }
+        .get_directories()
+        .map_err(Error::Guest)?;
+        let (descriptor, _) = preopens
+            .into_iter()
+            .find(|(_, path)| path == "/db")
+            .ok_or_else(|| Error::InvalidComponent("missing private directory".into()))?;
+        let wasmtime_wasi::filesystem::Descriptor::Dir(directory) = table
+            .get(&descriptor)
+            .map_err(|error| Error::Guest(error.into()))?
+        else {
+            return Err(Error::InvalidComponent("invalid private directory".into()));
+        };
+        let volume_access = directory.dir.try_clone()?;
         Ok(Self {
             id,
             author_owner_hash: None,
@@ -417,7 +437,33 @@ impl Lib {
             component,
             runtime,
             filesystem,
+            volume_access,
         })
+    }
+}
+
+impl StoreData {
+    fn for_lib(
+        lib: &Lib,
+        outgoing: Outgoing,
+        local: dhttp::LocalAuthority,
+        remote: Option<dhttp::RemoteAuthority>,
+        caller_service: Option<(String, String, String)>,
+    ) -> Self {
+        let mut wasi = WasiCtx::builder().build();
+        *wasi.filesystem() = lib.filesystem.clone();
+        Self {
+            caller_service,
+            commands: lib.commands.clone(),
+            table: ResourceTable::new(),
+            wasi,
+            http: WasiHttpCtx::new(),
+            memory: execution_limits(),
+            outgoing,
+            local,
+            remote,
+            sqlite_locks: Default::default(),
+        }
     }
 }
 
@@ -440,6 +486,36 @@ impl WasiHttpView for StoreData {
     }
 }
 
+impl Outgoing {
+    // Bind native file access to the executing Lib before the entry point
+    // installs its HTTP handshake or CLI authority on outgoing requests.
+    fn bind_lib(
+        &mut self,
+        endpoint: &dhttp::Endpoint,
+        lib: &Arc<Lib>,
+    ) -> Result<Option<&mut axum::Router>> {
+        let Self::Granted {
+            endpoint: granted,
+            source,
+            api,
+            ..
+        } = self
+        else {
+            return Ok(None);
+        };
+        check_endpoint(endpoint, granted)?;
+        *source = Some(Arc::clone(lib));
+        let files = crate::file::router(
+            cap_std::fs::Dir::from_std_file(lib.volume_access.try_clone()?),
+            api.clone(),
+        );
+        *api = axum::Router::new()
+            .fallback_service(api.clone().merge(files))
+            .layer(axum::middleware::from_fn(crate::routes::normalize_method));
+        Ok(Some(api))
+    }
+}
+
 // One invocation owns its Store and tracked guest task.
 
 impl Invocation {
@@ -454,42 +530,7 @@ impl Invocation {
         if local.name() != endpoint.name() {
             return Err(Error::IdentityMismatch);
         }
-        if let Outgoing::Granted {
-            endpoint: granted,
-            source,
-            api,
-            ..
-        } = &mut outgoing
-        {
-            check_endpoint(&endpoint, granted)?;
-            *source = Some(Arc::clone(&lib));
-            // Derive the file capability from this Lib's actual preopen. Do not
-            // reopen a path, or forward a previous caller's directory authority.
-            use wasmtime_wasi::p2::bindings::filesystem::preopens::Host;
-            let mut filesystem = lib.filesystem.clone();
-            let mut table = ResourceTable::new();
-            let preopens = wasmtime_wasi::filesystem::WasiFilesystemCtxView {
-                ctx: &mut filesystem,
-                table: &mut table,
-            }
-            .get_directories()
-            .map_err(Error::Guest)?;
-            let (descriptor, _) = preopens
-                .into_iter()
-                .find(|(_, path)| path == "/db")
-                .ok_or_else(|| Error::InvalidComponent("missing private directory".into()))?;
-            let wasmtime_wasi::filesystem::Descriptor::Dir(directory) =
-                table.get(&descriptor).map_err(|e| Error::Guest(e.into()))?
-            else {
-                return Err(Error::InvalidComponent("invalid private directory".into()));
-            };
-            *api = axum::Router::new()
-                .fallback_service(api.clone().merge(crate::file::router(
-                    cap_std::fs::Dir::from_std_file(directory.dir.try_clone()?),
-                    api.clone(),
-                )))
-                .layer(axum::middleware::from_fn(crate::routes::normalize_method));
-
+        if let Some(api) = outgoing.bind_lib(&endpoint, &lib)? {
             let actual = endpoint.local_authority()?;
             let actual = dhttp_home::certificate::extract_dhttp_subject_key_identifier(
                 actual.certificates(),
@@ -565,19 +606,7 @@ impl Invocation {
         // Construct before spawning/awaiting; even an unpolled returned Body
         // must cancel. Transfer this guard from execute to its response body.
         let cancel_on_drop = cancelled.clone().drop_guard();
-        let mut wasi = WasiCtx::builder().build();
-        *wasi.filesystem() = lib.filesystem.clone();
-        let store_data = StoreData {
-            caller_service,
-            commands: lib.commands.clone(),
-            table: ResourceTable::new(),
-            wasi,
-            http: WasiHttpCtx::new(),
-            memory: execution_limits(),
-            outgoing,
-            local,
-            remote,
-        };
+        let store_data = StoreData::for_lib(&lib, outgoing, local, remote, caller_service);
         let (response_tx, response_rx) = oneshot::channel();
         let execution_task = tasks.spawn(async move {
             let _ownership = scopeguard::guard(lib.filesystem.clone(), |filesystem| {
@@ -654,42 +683,7 @@ impl Invocation {
         mut outgoing: Outgoing,
     ) -> Result<()> {
         let local = endpoint.local_authority()?.clone();
-        if let Outgoing::Granted {
-            endpoint: granted,
-            source,
-            api,
-            ..
-        } = &mut outgoing
-        {
-            check_endpoint(&endpoint, granted)?;
-            *source = Some(Arc::clone(&lib));
-            // Derive the file capability from this Lib's actual preopen. Do not
-            // reopen a path, or forward a previous caller's directory authority.
-            use wasmtime_wasi::p2::bindings::filesystem::preopens::Host;
-            let mut filesystem = lib.filesystem.clone();
-            let mut table = ResourceTable::new();
-            let preopens = wasmtime_wasi::filesystem::WasiFilesystemCtxView {
-                ctx: &mut filesystem,
-                table: &mut table,
-            }
-            .get_directories()
-            .map_err(Error::Guest)?;
-            let (descriptor, _) = preopens
-                .into_iter()
-                .find(|(_, path)| path == "/db")
-                .ok_or_else(|| Error::InvalidComponent("missing private directory".into()))?;
-            let wasmtime_wasi::filesystem::Descriptor::Dir(directory) =
-                table.get(&descriptor).map_err(|e| Error::Guest(e.into()))?
-            else {
-                return Err(Error::InvalidComponent("invalid private directory".into()));
-            };
-            *api = axum::Router::new()
-                .fallback_service(api.clone().merge(crate::file::router(
-                    cap_std::fs::Dir::from_std_file(directory.dir.try_clone()?),
-                    api.clone(),
-                )))
-                .layer(axum::middleware::from_fn(crate::routes::normalize_method));
-
+        if let Some(api) = outgoing.bind_lib(&endpoint, &lib)? {
             let authority = local.clone();
             *api = api.clone().layer(axum::middleware::from_fn(
                 move |mut request: Request<axum::body::Body>, next: axum::middleware::Next| {
@@ -703,8 +697,7 @@ impl Invocation {
                 },
             ));
         }
-        let mut wasi = WasiCtx::builder().build();
-        *wasi.filesystem() = lib.filesystem.clone();
+        let store_data = StoreData::for_lib(&lib, outgoing, local, None, None);
         let mut task = scopeguard::guard(
             tasks.spawn(async move {
                 let _ownership = scopeguard::guard(lib.filesystem.clone(), |filesystem| {
@@ -712,20 +705,7 @@ impl Invocation {
                         tracing::error!(%error, "cannot restore Lib data ownership");
                     }
                 });
-                let mut store = Store::new(
-                    &lib.runtime.engine,
-                    StoreData {
-                        caller_service: None,
-                        commands: lib.commands.clone(),
-                        table: ResourceTable::new(),
-                        wasi,
-                        http: WasiHttpCtx::new(),
-                        memory: execution_limits(),
-                        outgoing,
-                        local,
-                        remote: None,
-                    },
-                );
+                let mut store = Store::new(&lib.runtime.engine, store_data);
                 store.limiter(|state| &mut state.memory);
                 configure_execution(&mut store, false).map_err(Error::Guest)?;
                 let command = wasmtime_wasi::p2::bindings::Command::instantiate_async(
