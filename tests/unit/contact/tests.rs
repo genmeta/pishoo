@@ -1204,3 +1204,272 @@ async fn receipts_are_scoped_to_the_application_and_verified_applicant() {
         404
     );
 }
+
+#[tokio::test]
+async fn named_applications_share_a_receipt_across_wire_formats_and_are_decided_by_id() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("usopp.li")).unwrap();
+    let endpoint = crate::test_support::identity::endpoint("usopp.li.dhttp.net");
+    let receiver = owner(&endpoint).unwrap();
+    let applicant = owner(&crate::test_support::identity::endpoint(
+        "zero.ai.dhttp.net",
+    ))
+    .unwrap();
+    let access = Arc::new(
+        AccessService::load_from_db("sqlite::memory:", endpoint.name(), receiver.subject_id())
+            .await
+            .unwrap(),
+    );
+    let router = contact_router(
+        Arc::new(Mutex::new(database(&profile).unwrap())),
+        profile,
+        endpoint,
+        access,
+    );
+    let id = "c".repeat(64);
+    let submit = |path: &str, body: Value, actor: access_control::Visitor| {
+        Request::post(path)
+            .extension(actor)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let new = json!({"description":"colleague","application_id":id});
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(submit(
+                "/std/contact/zero.ai",
+                new.clone(),
+                applicant.clone()
+            ))
+            .await
+            .unwrap()
+            .status(),
+        201
+    );
+    let old = json!({"description":"colleague","application_id":id,"class":"Human","from":"zero.ai.dhttp.net","to":"usopp.li.dhttp.net","requested_access":{},"offers":{}});
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(submit("/std/contact", old, applicant.clone()))
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(submit("/std/contact/other", new.clone(), applicant.clone()))
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    let mut conflict = new;
+    conflict["description"] = "other".into();
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(submit("/std/contact/zero.ai", conflict, applicant.clone()))
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+    let target = format!("/std/contact/requests/{id}");
+    let decide = |actor: access_control::Visitor| {
+        Request::patch(&target)
+            .extension(actor)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"status":"active"}"#))
+            .unwrap()
+    };
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(decide(applicant.clone()))
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(decide(receiver.clone()))
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(decide(receiver.clone()))
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    let get = Request::get(&target)
+        .extension(applicant.clone())
+        .body(Body::empty())
+        .unwrap();
+    let reply = router.clone().oneshot(get).await.unwrap();
+    assert_eq!(reply.status(), 200);
+    let value: Value =
+        serde_json::from_slice(&axum::body::to_bytes(reply.into_body(), 8192).await.unwrap())
+            .unwrap();
+    assert_eq!(value["application_id"], id);
+    assert_eq!(value["status"], "active");
+    let extra = "d".repeat(64);
+    let body = json!({"application_id":extra,"description":"more access","requested_access":{"/std/comm/message/zero.ai":["POST"]}});
+    let response = router
+        .clone()
+        .oneshot(submit("/std/contact/zero.ai", body, applicant.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    let v: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["status"], "pending");
+    let deny = Request::patch(format!("/std/contact/requests/{extra}"))
+        .extension(receiver)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"status":"denied"}"#))
+        .unwrap();
+    assert_eq!(router.clone().oneshot(deny).await.unwrap().status(), 200);
+    let status = router
+        .oneshot(
+            Request::get(&target)
+                .extension(applicant)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(
+        &axum::body::to_bytes(status.into_body(), 8192)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["status"], "active");
+}
+
+#[tokio::test]
+async fn active_directory_and_detail_report_current_grants_after_revocation() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(temp.path().join("usopp.li")).unwrap();
+    let endpoint = crate::test_support::identity::endpoint("usopp.li.dhttp.net");
+    let owner = owner(&endpoint).unwrap();
+    std::fs::create_dir_all(profile.join(".volume/sys/access")).unwrap();
+    let uri = format!(
+        "sqlite://{}?mode=rwc",
+        profile.join(".volume/sys/access/database").display()
+    );
+    let access = Arc::new(
+        AccessService::load_from_db(&uri, endpoint.name(), owner.subject_id())
+            .await
+            .unwrap(),
+    );
+    let peer = "zero.ai.dhttp.net";
+    let subject = "a".repeat(64);
+    access::record_outbound(
+        &access,
+        peer,
+        &subject,
+        json!({}),
+        json!({}),
+        now() + 3600,
+        now(),
+    )
+    .await
+    .unwrap();
+    local_api(
+        &access,
+        &endpoint,
+        Method::PATCH,
+        "/std/contact?name=zero.ai.dhttp.net",
+        Some(&json!({"status":"active"})),
+    )
+    .await
+    .unwrap();
+    let app = contact_router(
+        Arc::new(Mutex::new(database(&profile).unwrap())),
+        profile,
+        endpoint,
+        access.clone(),
+    );
+    let who = access_control::Grantee::One(peer.into());
+    let method = access_control::Method::Specified(Method::POST);
+    let path = "/std/comm/message/zero.ai";
+    access
+        .set_policy(
+            method.clone(),
+            path,
+            access_control::Effect::Allow,
+            who.clone(),
+        )
+        .await
+        .unwrap();
+    for granted in [true, false] {
+        if !granted {
+            access
+                .remove_policy(method.clone(), path, who.clone())
+                .await
+                .unwrap();
+        }
+        for resource in ["/std/contact/zero.ai", "/std/contact/list"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(resource)
+                        .extension(owner.clone())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let value: Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 8192)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let row = if resource.ends_with("/list") {
+                &value["items"][0]
+            } else {
+                &value
+            };
+            assert_eq!(
+                row["granted_access"][path]["allow"],
+                if granted {
+                    json!(["POST"])
+                } else {
+                    Value::Null
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn received_legacy_permission_templates_display_only_the_applicants_resources() {
+    let mut row = json!({"incoming":true,"name":"zero.ai.dhttp.net","requested_access":{
+        "/std/comm/message/{name}":["POST","DELETE"],"/std/comm/message":["POST"],
+        "/std/comm/message/{name}/file/{file_id}":["HEAD","GET"],"/std/comm/group/{topic}/member/{name}":["PUT"]
+    }});
+    capabilities::incoming_request(&mut row);
+    assert_eq!(
+        row["requested_access"],
+        json!({"/std/comm/message/zero.ai":["POST"],"/std/comm/message/zero.ai/file":["HEAD","GET"]})
+    );
+}

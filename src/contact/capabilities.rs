@@ -35,6 +35,97 @@ pub(super) fn offered(selected: &[Value]) -> Value {
     access
 }
 
+/// A permission catalog advertises operations before the peer or group is known.
+/// Only materialize instances that the authenticated friendship actually identifies.
+pub(super) fn bind_peer(groups: &mut [Value], peer: &str) -> Result<(), Failure> {
+    let peer = crate::routes::identity_segment(peer, &["list", "history"])
+        .map_err(|_| fail(400, "invalid peer"))?;
+    for group in groups {
+        let endpoints = group["endpoints"]
+            .as_array_mut()
+            .ok_or_else(|| fail(502, "invalid catalog"))?;
+        let named_message = endpoints
+            .iter()
+            .any(|op| op["path"] == "/std/comm/message/{name}" && op["method"] == "POST");
+        endpoints.retain_mut(|op| {
+            if named_message {
+                if op["path"] == "/std/comm/message" && op["method"] == "POST" {
+                    return false;
+                }
+                if op["path"] == "/std/comm/message/{name}" {
+                    op["path"] = format!("/std/comm/message/{peer}").into();
+                } else if op["path"] == "/std/comm/message/{name}/file/{file_id}"
+                    && matches!(op["method"].as_str(), Some("GET" | "HEAD"))
+                {
+                    op["path"] = format!("/std/comm/message/{peer}/file").into();
+                }
+            }
+            !op["path"].as_str().is_none_or(|p| p.contains(['{', '}']))
+        });
+    }
+    Ok(())
+}
+
+/// Old applicants may copy literal templates from a new catalog. Present the
+/// peer's concrete operations while preserving the original signed-in applicant
+/// payload and its retry digest in daccess.
+pub(super) fn incoming_request(contact: &mut Value) {
+    if contact["incoming"] != true && !contact["incoming_application_id"].is_string() {
+        return;
+    }
+    let Some(peer) = contact["name"]
+        .as_str()
+        .and_then(|n| crate::routes::identity_segment(n, &["list", "history"]).ok())
+    else {
+        return;
+    };
+    let Some(access) = contact
+        .get_mut("requested_access")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let named = "/std/comm/message/{name}";
+    let file = "/std/comm/message/{name}/file/{file_id}";
+    let receives = access
+        .get(named)
+        .and_then(Value::as_array)
+        .is_some_and(|v| v.iter().any(|m| m == "POST"));
+    if receives
+        && let Some(methods) = access
+            .get_mut("/std/comm/message")
+            .and_then(Value::as_array_mut)
+    {
+        methods.retain(|m| m != "POST");
+        if methods.is_empty() {
+            access.remove("/std/comm/message");
+        }
+    }
+    for (template, target, allowed) in [
+        (named, format!("/std/comm/message/{peer}"), &["POST"][..]),
+        (
+            file,
+            format!("/std/comm/message/{peer}/file"),
+            &["GET", "HEAD"][..],
+        ),
+    ] {
+        if let Some(Value::Array(methods)) = access.remove(template) {
+            for method in methods
+                .into_iter()
+                .filter(|m| m.as_str().is_some_and(|s| allowed.contains(&s)))
+            {
+                let target = access.entry(target.clone()).or_insert_with(|| json!([]));
+                if let Some(grants) = target.as_array_mut()
+                    && !grants.contains(&method)
+                {
+                    grants.push(method);
+                }
+            }
+        }
+    }
+    access.remove("/std/comm/group/{topic}/member/{name}");
+}
+
 pub(super) fn catalog(profile: &IdentityProfile) -> Result<Value, Failure> {
     crate::routes::permission_catalog(profile, false).map_err(|error| fail(500, error.to_string()))
 }

@@ -24,6 +24,9 @@ mod lib_http;
 #[path = "network/workspace_split.rs"]
 mod workspace_split;
 
+#[path = "network/communication_workspace.rs"]
+mod communication_workspace;
+
 #[path = "network/system.rs"]
 mod system;
 
@@ -286,6 +289,7 @@ impl Resolve for PeerResolver {
                 "receiver.dhttp.net"
                     | "alice.dhttp.net"
                     | "bob.dhttp.net"
+                    | "zero.ai.dhttp.net"
                     | "usopp.li.dhttp.net"
                     | "late.dhttp.net"
                     | "broken.dhttp.net"

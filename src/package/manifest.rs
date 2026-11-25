@@ -86,7 +86,11 @@ pub fn validate_openapi(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec> {
         if !valid_path(path) {
             return Err(invalid("unsupported API path"));
         }
-        if declared.iter().any(|other| api_paths_overlap(other, path)) {
+        if declared.iter().any(|other| {
+            api_paths_overlap(other, path)
+                && !more_specific(other, path)
+                && !more_specific(path, other)
+        }) {
             return Err(invalid("overlapping API paths"));
         }
         declared.push(path);
@@ -206,6 +210,20 @@ fn valid_path(path: &str) -> bool {
                     && names.insert(name)
             })
         }
+}
+
+// Within one provider a narrower template may coexist with its strict
+// superset. Intersections where each side fixes a different segment remain
+// ambiguous, even if one side happens to have more literal segments overall.
+fn more_specific(narrow: &str, broad: &str) -> bool {
+    let mut strict = false;
+    for (left, right) in narrow.split('/').zip(broad.split('/')) {
+        if left.starts_with('{') && !right.starts_with('{') {
+            return false;
+        }
+        strict |= !left.starts_with('{') && right.starts_with('{');
+    }
+    strict
 }
 
 /// Parameters consume one nonempty path segment, never a subtree.

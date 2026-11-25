@@ -151,3 +151,43 @@ pub(super) async fn patch(
     tx.commit().await.map_err(failure)?;
     Ok(result)
 }
+
+pub(super) fn etag(value: &Value) -> Option<String> {
+    let subject = value["bound_subject"].as_str()?;
+    hash(subject).ok()?;
+    Some(format!("\"{}-{}\"", value["id"].as_i64()?, subject))
+}
+
+pub(super) async fn remove(
+    access: &AccessService,
+    name: &str,
+    expected: Option<&str>,
+) -> Result<(), Failure> {
+    let expected = expected.ok_or_else(|| fail(428, "If-Match required"))?;
+    let tx = access.database().begin().await.map_err(failure)?;
+    let current = entry(&tx, name).await?;
+    if etag(&current).as_deref() != Some(expected) {
+        return Err(fail(412, "group contact changed"));
+    }
+    let rows = tx
+        .execute_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            "DELETE FROM contacts WHERE id=? AND name=? AND subject_id=?",
+            [
+                current["id"].as_i64().unwrap().into(),
+                name.into(),
+                current["bound_subject"]
+                    .as_str()
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec()
+                    .into(),
+            ],
+        ))
+        .await
+        .map_err(failure)?;
+    if rows.rows_affected() != 1 {
+        return Err(fail(412, "group contact changed"));
+    }
+    tx.commit().await.map_err(failure)
+}

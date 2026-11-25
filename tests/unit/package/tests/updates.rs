@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use serde_json::{Value, json};
 
 use super::*;
-fn install_packages(
+pub(crate) fn install_packages(
     profile: &IdentityProfile,
     packages: &[(String, Vec<u8>)],
     sandbox: &mut Sandbox,

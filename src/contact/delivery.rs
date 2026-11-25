@@ -27,7 +27,7 @@ async fn remote_response(
     path: &str,
     body: Option<&Value>,
     expected: Option<&str>,
-) -> Result<(u16, Value, String), Failure> {
+) -> Result<(u16, Value, String, bool), Failure> {
     tokio::time::timeout(Duration::from_secs(15), async {
         let uri: http::Uri = format!("https://{target}{path}")
             .parse()
@@ -83,6 +83,10 @@ async fn remote_response(
                 .as_str()
                 .to_owned();
         let status = response.status().as_u16();
+        let resources = response
+            .headers()
+            .get("pishoo-contact-resources")
+            .is_some_and(|v| v == "1");
         let mut body = response.into_body();
         let mut bytes = Vec::new();
         while let Some(frame) = body.frame().await {
@@ -100,7 +104,7 @@ async fn remote_response(
             Err(_) if !matches!(status, 200 | 201) => Value::Null,
             Err(_) => return Err(fail(502, "invalid remote JSON")),
         };
-        Ok((status, value, sid))
+        Ok((status, value, sid, resources))
     })
     .await
     .map_err(|_| fail(504, "contact request timed out"))?
@@ -118,7 +122,7 @@ pub(super) async fn remote(
     if !matches!(response.0, 200 | 201) {
         return Err(fail(response.0, "remote contact operation rejected"));
     }
-    Ok(response)
+    Ok((response.0, response.1, response.2))
 }
 
 fn pending_review(code: u16, body: &Value) -> Result<Option<i64>, Failure> {
@@ -217,15 +221,29 @@ async fn deliver(
         }
         let expected=subject.as_deref().or_else(||existing.as_ref().and_then(|c|c["subject_id"].as_str()));
         if let Some(id)=review {
-            let (code,doc,_)=remote_response(endpoint,&job.target,Method::GET,&format!("/std/acl/status?id={id}"),None,expected).await?;
+            let (code,doc,_,_)=remote_response(endpoint,&job.target,Method::GET,&format!("/std/acl/status?id={id}"),None,expected).await?;
             if !review_progress(code,&doc)? {return Err(fail(202,"need_review"));}
         }
+        // Probe a read-only native endpoint before choosing a wire format. A
+        // missing advertisement keeps existing peers on their original contract.
+        let (catalog_status,_,peer_sid,resources) = remote_response(endpoint,&job.target,Method::GET,"/std/acl/permissions",None,expected).await?;
+        let resources = resources && catalog_status == 200;
         let (method,path,body)=if job.state=="queued" {
-            (Method::POST,"/std/contact".into(),Some(json!({"from":endpoint.name(),"to":job.target,"application_id":job.application_id,"description":job.description,"class":"Human","requested_access":job.requested,"offers":job.offered})))
+            let mut body=json!({"application_id":job.application_id,"description":job.description,"requested_access":job.requested,"offers":job.offered});
+            let path=if resources {
+                format!("/std/contact/{}", crate::routes::identity_segment(endpoint.name(), &["list","requests"]).map_err(|_|fail(500,"invalid local identity"))?)
+            } else {
+                body["from"]=endpoint.name().into();
+                body["to"]=job.target.as_str().into();
+                body["class"]="Human".into();
+                "/std/contact".to_owned()
+            };
+            (Method::POST,path,Some(body))
         } else {
-            (Method::GET,format!("/std/contact?application_id={}",job.application_id),None)
+            let path=if resources { format!("/std/contact/requests/{}",job.application_id) } else {format!("/std/contact?application_id={}",job.application_id)};
+            (Method::GET,path,None)
         };
-        let (status,receipt,sid)=remote_response(endpoint,&job.target,method,&path,body.as_ref(),expected).await?;
+        let (status,receipt,sid,_)=remote_response(endpoint,&job.target,method,&path,body.as_ref(),Some(&peer_sid)).await?;
         if let Some(id)=pending_review(status,&receipt)? {
             review=Some(id);
             subject=Some(sid);

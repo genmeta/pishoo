@@ -126,9 +126,10 @@ fn outbound_uri(uri: &Uri) -> Result<(Uri, String)> {
         }
         None => name,
     };
+    let path = super::resource::canonical(&format!("/{suffix}"))?;
     let path = match uri.query() {
-        Some(query) => format!("/{suffix}?{query}"),
-        None => format!("/{suffix}"),
+        Some(query) => format!("{path}?{query}"),
+        None => path,
     };
     let uri = format!("https://{authority}{path}")
         .parse()

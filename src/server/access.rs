@@ -129,6 +129,116 @@ fn snapshot_access(source: &std::path::Path, destination: &std::path::Path) -> R
     Ok(())
 }
 
+// Apply the same canonical spelling to stored rules before daccess constructs
+// its in-memory policy tree. A rule copied from another spelling must never
+// turn an explicit deny or review for the same subject into an allow.
+fn canonicalize_communication_rules(path: &std::path::Path) -> Result<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+    // macOS exposes the temporary root through /var. Resolve the containing
+    // directory and continue to refuse symlinks at the database itself.
+    let directory = path
+        .parent()
+        .ok_or_else(|| Error::InvalidConfig("missing access database directory".into()))?
+        .canonicalize()?;
+    let file = path
+        .file_name()
+        .ok_or_else(|| Error::InvalidConfig("missing access database filename".into()))?;
+    let mut conn = rusqlite::Connection::open_with_flags(
+        directory.join(file),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let mut affected = BTreeSet::new();
+    let mut rules = BTreeMap::new();
+    {
+        let mut stmt=tx.prepare("SELECT api,method,grantee,grantee_type,effect,created_at FROM access_rules
+            WHERE api GLOB '/std/contact/*' OR api GLOB '/std/comm/message/*' OR api GLOB '/std/comm/group/*'")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let api: String = row.get(0)?;
+            let Ok(canonical) = crate::routes::canonical_communication_path(&api) else {
+                continue;
+            };
+            let method: String = row.get(1)?;
+            let key = (canonical, method);
+            if key.0 != api {
+                affected.insert(key.clone());
+            }
+            let grantee: String = row.get(2)?;
+            let kind: i32 = row.get(3)?;
+            let effect: String = row.get(4)?;
+            let created: i64 = row.get(5)?;
+            rules
+                .entry(key)
+                .or_insert_with(BTreeMap::new)
+                .entry(api)
+                .or_insert_with(BTreeMap::new)
+                .insert((grantee, kind), (effect, created));
+        }
+    }
+    for (canonical, method) in affected {
+        let spellings = &rules[&(canonical.clone(), method.clone())];
+        let mut selectors: BTreeSet<_> = spellings
+            .values()
+            .flat_map(|entries| entries.keys().cloned())
+            .collect();
+        if selectors.contains(&("*?".into(), 4))
+            && (selectors.contains(&("**".into(), 2)) || selectors.contains(&("?".into(), 3)))
+        {
+            selectors.remove(&("*?".into(), 4));
+            selectors.insert(("**".into(), 2));
+            selectors.insert(("?".into(), 3));
+        }
+        if spellings.len() > 1 {
+            tracing::warn!(%canonical,%method, original=?spellings, "combining equivalent communication ACL paths; conflicting decisions use the more restrictive effect");
+        }
+        for api in spellings.keys() {
+            tx.execute(
+                "DELETE FROM access_rules WHERE api=? AND method=?",
+                rusqlite::params![api, method],
+            )?;
+        }
+        for (grantee, kind) in selectors {
+            let mut effects = spellings.values().filter_map(|entries| {
+                entries
+                    .get(&(grantee.clone(), kind))
+                    .or_else(|| {
+                        (kind == 0 || kind == 1)
+                            .then(|| entries.get(&("**".into(), 2)))
+                            .flatten()
+                    })
+                    .or_else(|| entries.get(&("*?".into(), 4)))
+            });
+            let Some((effect, created)) = effects.next() else {
+                continue;
+            };
+            let severity = |effect: &str| match effect {
+                "deny" => 2,
+                "review" => 1,
+                _ => 0,
+            };
+            let (effect, created) = effects.fold(
+                (effect, *created),
+                |(strongest, oldest), (effect, created)| {
+                    (
+                        if severity(effect) > severity(strongest) {
+                            effect
+                        } else {
+                            strongest
+                        },
+                        oldest.min(*created),
+                    )
+                },
+            );
+            tx.execute("INSERT INTO access_rules(method,api,effect,grantee_type,grantee,updated_at,created_at) VALUES(?,?,?,?,?,unixepoch(),?)",
+                rusqlite::params![method,canonical,effect,kind,grantee,created])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub(crate) async fn load_access(
     profile: &IdentityProfile,
     subject: &access_control::SubjectId,
@@ -150,6 +260,7 @@ pub(crate) async fn load_access(
         Ok(access)
     };
     if version.is_some() {
+        canonicalize_communication_rules(&path)?;
         return load().await;
     }
     // Nothing partially initialized is ever published at the application's database path.

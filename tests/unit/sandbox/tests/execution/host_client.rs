@@ -773,3 +773,45 @@ async fn local_group_directory_authorization_preserves_original_anonymous_visito
         );
     }
 }
+
+#[tokio::test]
+async fn message_file_acl_probe_requires_the_actual_local_service_and_never_runs_the_operation() {
+    use tower::ServiceExt;
+    let root = tempfile::tempdir().unwrap();
+    let endpoint = endpoint();
+    let (access, _) = native(&endpoint).await;
+    let mut source = host_lib(root.path());
+    Arc::get_mut(&mut source).unwrap().id = "dev.genmeta.tech.dhttp.net/std/comm/message".into();
+    let path = "/std/comm/message/zero.ai/file/001";
+    let app = axum::Router::new()
+        .fallback(axum::routing::any(|| async { http::StatusCode::IM_A_TEAPOT }))
+        .layer(axum::middleware::from_fn_with_state(
+            access.clone(),
+            crate::routes::authorize,
+        ));
+    let request = || {
+        Request::head(path)
+            .extension(endpoint.local_authority().unwrap())
+            .header("pishoo-check-access", "1")
+            .body(axum::body::Body::empty())
+            .unwrap()
+    };
+    assert_eq!(app.clone().oneshot(request()).await.unwrap().status(), 403);
+    for (effect, expected) in [
+        (access_control::Effect::Allow, 204),
+        (access_control::Effect::Deny, 403),
+    ] {
+        access
+            .set_policy(
+                access_control::Method::Specified(http::Method::HEAD),
+                path,
+                effect,
+                access_control::Grantee::One(endpoint.name().into()),
+            )
+            .await
+            .unwrap();
+        let mut check = request();
+        check.extensions_mut().insert(source.clone());
+        assert_eq!(app.clone().oneshot(check).await.unwrap().status(), expected);
+    }
+}

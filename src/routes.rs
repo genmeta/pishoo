@@ -10,6 +10,8 @@ use crate::{Error, Result, setup::ProxyLocation};
 mod access;
 mod capabilities;
 mod outbound;
+mod resource;
+pub(crate) use resource::{canonical as canonical_communication_path, identity_segment};
 
 mod proxy;
 
@@ -62,6 +64,12 @@ pub(crate) async fn normalize_method(
         }
         *request.method_mut() = method.unwrap();
         request.headers_mut().remove("x-http-method-override");
+    }
+    match resource::normalize_uri(request.uri()) {
+        Ok(uri) => *request.uri_mut() = uri,
+        Err(error) => {
+            return ([(header::CACHE_CONTROL, "no-store")], reject(error)).into_response();
+        }
     }
     next.run(request).await
 }
