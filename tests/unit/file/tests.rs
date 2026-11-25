@@ -947,9 +947,16 @@ fn business_database(path: &std::path::Path) -> Connection {
 async fn uploads_share_the_business_database_and_preserve_its_facts() {
     let (dir, api) = setup();
     let db = business_database(&dir.path().join("database"));
-    db.execute_batch("CREATE TABLE messages(id INTEGER PRIMARY KEY, text TEXT); INSERT INTO messages VALUES(1,'hello'); PRAGMA user_version=6;").unwrap();
+    db.execute_batch(
+        "CREATE TABLE messages(id INTEGER PRIMARY KEY, text TEXT);
+         CREATE TABLE chat_changes(summary TEXT CHECK (summary IS NULL OR json_valid(summary)));
+         INSERT INTO messages VALUES(1,'hello');
+         PRAGMA user_version=6;",
+    )
+    .unwrap();
     let id = make(&api, "shared", 3).await;
     assert_eq!(put(&api, &id, 0, b"abc").await.status(), 204);
+    assert_eq!(facts(&api, &id).await["size"], 3);
     assert!(!dir.path().join(".file/database").exists());
     assert_eq!(
         db.query_row("SELECT offset FROM native_files WHERE id=?1", [&id], |r| {

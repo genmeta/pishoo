@@ -223,7 +223,8 @@ run_binary() {
     export RUSTUP_HOME=/opt/rustup
     export CARGO_HOME=/opt/cargo
     export PATH=/opt/cargo/bin:/usr/local/zig:$PATH
-    export RUSTFLAGS="${RUSTFLAGS:-} -L /opt/sysroots/$arch/usr/$libdir"
+    # Keep the PAM sysroot out of rustc's bundled static archive search.
+    export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-L/opt/sysroots/$arch/usr/$libdir"
     write_aarch64_zig_workaround
 
     cd "$product_source"
