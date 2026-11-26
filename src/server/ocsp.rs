@@ -135,6 +135,16 @@ pub(crate) async fn fetch_ocsp(certificates: &[dhttp::CertificateDer<'_>]) -> Re
     .map_err(|_| error("responder timed out after 15 seconds".into()))?
 }
 
+pub(super) fn fresh_for_startup(
+    response: &[u8],
+    certificates: &[dhttp::CertificateDer<'_>],
+    now: qtls::UnixTime,
+) -> bool {
+    ocsp_expiry(response, certificates, now).is_ok_and(|expiry| {
+        expiry.saturating_sub(std::time::Duration::from_secs(now.as_secs())) > super::OCSP_PERIOD
+    })
+}
+
 pub(super) async fn renew_ocsp(
     profile: &IdentityProfile,
     endpoint: &dhttp::Endpoint,
@@ -158,8 +168,7 @@ pub(super) async fn renew_ocsp(
     }
     // Leave a full 72-hour renewal window after the next periodic check.
     let fetched = if expiry.is_some_and(|expiry| {
-        expiry.saturating_sub(Duration::from_secs(now.as_secs()))
-            > Duration::from_secs(2 * 72 * 60 * 60)
+        expiry.saturating_sub(Duration::from_secs(now.as_secs())) > super::OCSP_PERIOD * 2
     }) {
         None
     } else {

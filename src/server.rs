@@ -27,6 +27,8 @@ use self::{
     ocsp::{cache_ocsp, fetch_ocsp},
 };
 
+const OCSP_PERIOD: std::time::Duration = std::time::Duration::from_secs(72 * 60 * 60);
+
 struct Server {
     profile: IdentityProfile,
     endpoint: dhttp::Endpoint,
@@ -294,8 +296,7 @@ impl Server {
             .await
             .map_err(|e| Error::InvalidIdentity(e.to_string()))?;
         match profile.load_ocsp().await {
-            Ok(response)
-                if qtls::validate_ocsp(&response, &certs, qtls::UnixTime::now()).is_ok() => {}
+            Ok(response) if ocsp::fresh_for_startup(&response, &certs, qtls::UnixTime::now()) => {}
             _ => {
                 let response = fetch_ocsp(&certs).await?;
                 cache_ocsp(&profile, &response)?;

@@ -356,6 +356,7 @@ async fn owner_bytes(
 #[tokio::test]
 #[ignore = "run alone; requires OpenSSL/local TCP+UDP and owns global TLS/DNS/DHTTP_HOME"]
 async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() {
+    use der::Decode;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let root = tempfile::tempdir().unwrap();
@@ -394,7 +395,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
         "-out",
         "receiver/ssl/fullchain.crt",
         "-days",
-        "1",
+        "6",
         "-extfile",
         "leaf.ext",
     ]);
@@ -436,7 +437,8 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     assert_ne!(renewed, before);
 
     let responses = [
-        shorter,
+        before.clone(), // Initial load must replace the one-day staple.
+        shorter.clone(),
         before.clone(),
         renewed.clone(),
         renewed.clone(),
@@ -485,6 +487,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
         )
         .unwrap();
     }
+    std::fs::write(root.path().join("receiver/ssl/stapling.ocsp"), shorter).unwrap();
     let old_home = std::env::var_os("DHTTP_HOME");
     unsafe {
         std::env::set_var("DHTTP_HOME", process_home.path());
@@ -515,6 +518,31 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     let mut server = Server::load(profile, Arc::new(WasmRuntime::new().unwrap()))
         .await
         .unwrap();
+    assert_eq!(server.endpoint.local_authority().unwrap().ocsp(), before);
+    assert_eq!(std::fs::read(server.profile.ocsp_path()).unwrap(), before);
+    let authority = server.endpoint.local_authority().unwrap();
+    let proof = authority.ocsp();
+    let response = x509_ocsp::OcspResponse::from_der(proof)
+        .unwrap()
+        .response_bytes
+        .unwrap();
+    let basic = x509_ocsp::BasicOcspResponse::from_der(response.response.as_bytes()).unwrap();
+    let expiry = basic.tbs_response_data.responses[0]
+        .next_update
+        .unwrap()
+        .0
+        .to_unix_duration();
+    for (remaining, fresh) in [
+        (OCSP_PERIOD + Duration::from_secs(1), true),
+        (OCSP_PERIOD, false),
+        (Duration::from_secs(2 * 3600), false),
+    ] {
+        let now = qtls::UnixTime::since_unix_epoch(expiry - remaining);
+        assert_eq!(
+            ocsp::fresh_for_startup(proof, authority.certificates(), now),
+            fresh
+        );
+    }
     // Keep the in-memory configuration and application resources through the update.
     let router = server.router.clone();
     let publisher = server.publisher.clone().unwrap();
