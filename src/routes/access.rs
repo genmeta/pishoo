@@ -26,7 +26,19 @@ pub(crate) async fn authorize(
     mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    if request.uri().path().starts_with("/std/contact")
+        && !matches!(*request.method(), http::Method::HEAD | http::Method::GET)
+        && request
+            .headers()
+            .get("sec-fetch-site")
+            .is_some_and(|v| v == "cross-site")
+    {
+        return reject(Error::Denied);
+    }
     request.headers_mut().remove("pishoo-source-lib");
+    if request.headers().contains_key("pishoo-act-as") {
+        return reject(Error::Denied);
+    }
     request.extensions_mut().remove::<Visitor>();
     let visitor = if let Some(handshake) = request.extensions().get::<dhttp::HandshakeSummary>() {
         if handshake.local.is_none() {
@@ -65,6 +77,24 @@ pub(crate) async fn authorize(
         })
     };
     let service = request.extensions().get::<Arc<crate::sandbox::Lib>>();
+    let probe = request.headers().get("pishoo-check-access").is_some();
+    if probe
+        && !(request
+            .headers()
+            .get_all("pishoo-check-access")
+            .iter()
+            .count()
+            == 1
+            && request.headers()["pishoo-check-access"] == "1"
+            && service.is_some_and(|lib| {
+                lib.id.split_once('/').is_some_and(|(author, name)| {
+                    crate::package::is_standard_author(author) && name == "std/comm/message"
+                })
+            })
+            && request.uri().path().starts_with("/std/comm/message/"))
+    {
+        return reject(Error::Denied);
+    }
     let standard_read = service.is_some_and(|lib| standard(&lib.id))
         && request.method() == http::Method::GET
         && request.uri().path().starts_with("/std/");
@@ -88,13 +118,21 @@ pub(crate) async fn authorize(
                             == Some(true)
                 })
         });
-    if service_authorized_provider {
+    if service_authorized_provider && !probe {
         return next.run(request).await;
     }
     // Contact authorizes directory writes in its own handler.
+    let contact_path = request.uri().path();
+    let item = contact_path
+        .strip_prefix("/std/contact/")
+        .filter(|p| !p.contains('/') && !matches!(*p, "list" | "requests"));
     if service.is_some()
-        && matches!(*request.method(), http::Method::PUT | http::Method::GET)
-        && request.uri().path() == "/std/contact"
+        && ((request.method() == http::Method::GET
+            && (contact_path == "/std/contact" || item.is_some()))
+            || (request.method() == http::Method::PUT
+                && (contact_path == "/std/contact" || item.is_some_and(|p| p.contains("~%23"))))
+            || (request.method() == http::Method::DELETE
+                && item.is_some_and(|p| p.contains("~%23"))))
     {
         return next.run(request).await;
     }
@@ -137,19 +175,74 @@ pub(crate) async fn authorize(
         })
         .map(|name| format!("/app/{name}"));
     let app_head = app.is_some() && request.method() == http::Method::HEAD;
-    let headers = Headers {
-        method: if app.is_some() {
-            http::Method::GET
+    let mut compatibility = None;
+    let (method, path) =
+        if let Some(app) = app {
+            (http::Method::GET, app)
         } else {
-            request.method().clone()
-        },
-        path: app.unwrap_or_else(|| {
-            request
-                .uri()
-                .path_and_query()
-                .map_or("/", |p| p.as_str())
-                .to_owned()
-        }),
+            let resolves_files = !probe
+                && request.method() == http::Method::POST
+                && request.uri().path() == "/std/comm/message"
+                && request
+                    .extensions()
+                    .get::<Arc<std::sync::RwLock<crate::sandbox::Sandbox>>>()
+                    .zip(request.extensions().get::<dhttp::Endpoint>())
+                    .is_some_and(|(sandbox, endpoint)| {
+                        crate::sandbox::select_library(&sandbox.read().unwrap(), endpoint, &request)
+                            .is_ok_and(|(lib, _)| {
+                                lib.id.split_once('/').is_some_and(|(author, name)| {
+                                    crate::package::is_standard_author(author)
+                                        && name == "std/comm/message"
+                                }) && lib
+                                    .openapi
+                                    .extensions
+                                    .get("pishoo-resource-acl")
+                                    .and_then(serde_json::Value::as_bool)
+                                    == Some(true)
+                            })
+                    });
+            let (method, path) =
+                match super::resource::operation(&mut request, visitor.as_ref(), resolves_files)
+                    .await
+                {
+                    Ok(Some(op)) => op,
+                    Ok(None) => return next.run(request).await,
+                    Err(error) => return reject(error),
+                };
+            let local = request
+                .extensions()
+                .get::<dhttp::Endpoint>()
+                .map(dhttp::Endpoint::name);
+            let original = (method, path);
+            match super::resource::compatibility_operation(
+                &access,
+                original.0.clone(),
+                original.1.clone(),
+                visitor.as_ref(),
+                local,
+            )
+            .await
+            {
+                Ok(op) => {
+                    if op != original {
+                        compatibility = Some((original, op.clone()));
+                    }
+                    op
+                }
+                Err(error) => return reject(error),
+            }
+        };
+    let stream = if method == http::Method::GET && path == "/std/comm/message/history" && !probe {
+        match stream_rules(&access, &path).await {
+            Ok(snapshot) => Some((path.clone(), snapshot)),
+            Err(error) => return reject(Error::InvalidConfig(error.to_string())),
+        }
+    } else {
+        None
+    };
+    let headers = Headers {
+        method,
+        path,
         fields: request.headers().clone(),
     };
     let allowed = match access
@@ -222,7 +315,65 @@ pub(crate) async fn authorize(
     if !allowed {
         return reject(Error::Denied);
     }
+    // A concrete rule may have been installed while an older permission was
+    // awaiting review. Recheck the mapping before dispatching the action.
+    if let Some(((method, path), selected)) = compatibility {
+        let local = request
+            .extensions()
+            .get::<dhttp::Endpoint>()
+            .map(dhttp::Endpoint::name);
+        match super::resource::compatibility_operation(
+            &access,
+            method,
+            path,
+            visitor.as_ref(),
+            local,
+        )
+        .await
+        {
+            Ok(current) if current == selected => (),
+            Ok(_) => {
+                return (
+                    StatusCode::CONFLICT,
+                    [(http::header::CACHE_CONTROL, "no-store")],
+                    "communication policy changed; retry",
+                )
+                    .into_response();
+            }
+            Err(error) => return reject(error),
+        }
+    }
+    if probe {
+        return (
+            StatusCode::NO_CONTENT,
+            [(http::header::CACHE_CONTROL, "no-store")],
+        )
+            .into_response();
+    }
+    if let Err(error) = super::resource::rule_target(&mut request).await {
+        return reject(error);
+    }
     let mut response = next.run(request).await;
+    if let Some((path, snapshot)) = stream
+        && response.status().is_success()
+        && response
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .is_some_and(|v| v.as_bytes().starts_with(b"text/event-stream"))
+    {
+        use http_body_util::BodyExt;
+        let (parts, mut body) = response.into_parts();
+        let body = axum::body::Body::from_stream(async_stream::stream! {
+            while let Some(frame)=body.frame().await {
+                if !stream_rules(&access,&path).await.is_ok_and(|current|current==snapshot) {break;}
+                match frame {
+                    Ok(frame)=>if let Ok(data)=frame.into_data() {yield Ok(data);},
+                    Err(error)=>{yield Err(error);break;}
+                }
+            }
+        });
+        response = Response::from_parts(parts, body);
+    }
     if app_head {
         // Let an App read its current transport identity through its existing
         // page request. Never cache identity-dependent response metadata.
@@ -241,4 +392,25 @@ pub(crate) async fn authorize(
 
 pub(crate) fn access_router(access: Arc<AccessService>) -> Router {
     access_control::management_router(access)
+}
+
+// A live event stream must stop before delivering the next frame when the
+// relevant policy changes. Reconnection uses the normal ACL and saved cursor.
+async fn stream_rules(
+    access: &AccessService,
+    path: &str,
+) -> Result<Vec<(String, String, String)>, sea_orm::DbErr> {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+    let rows=access.database().query_all_raw(Statement::from_sql_and_values(DatabaseBackend::Sqlite,
+        "SELECT api,grantee,method||':'||effect AS decision FROM access_rules WHERE method IN ('GET','*') AND (api='/' OR api=?1 OR instr(?1,api||'/')=1) ORDER BY api,grantee,method",
+        [path.into()])).await?;
+    rows.into_iter()
+        .map(|r| {
+            Ok((
+                r.try_get("", "api")?,
+                r.try_get("", "grantee")?,
+                r.try_get("", "decision")?,
+            ))
+        })
+        .collect()
 }

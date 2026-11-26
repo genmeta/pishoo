@@ -130,6 +130,30 @@ async fn resume_digest_idempotence_and_immutable_completion() {
         put(&api, &id, data.len() as u64, b"more").await.status(),
         409
     );
+    let resource = format!("{FILE}/{id}");
+    let head = call(&api, "HEAD", &resource, &[], Body::empty()).await;
+    assert_eq!(head.status(), 200);
+    let tagged = head.headers()[header::ETAG].clone();
+    assert!(
+        head.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+    let partial = call(
+        &api,
+        "GET",
+        &resource,
+        &[("range", "bytes=1-2".into())],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(partial.status(), 206);
+    assert_eq!(partial.headers()[header::ETAG], tagged);
+    let bytes = partial.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], &data[1..=2]);
     let response = call(&api, "GET", &format!("{FILE}?id={id}"), &[], Body::empty()).await;
     assert_eq!(response.status(), 200);
     assert_eq!(

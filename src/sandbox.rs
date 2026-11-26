@@ -226,15 +226,21 @@ impl Sandbox {
                     };
                     let version = lib.openapi.info.version.clone();
                     if request.uri().path().starts_with("/std/") {
-                        let methods = lib
-                            .openapi
-                            .paths
-                            .as_ref()
-                            .unwrap()
-                            .iter()
-                            .find(|(pattern, _)| crate::package::api_path_matches(pattern, &path))
+                        let paths = lib.openapi.paths.as_ref().unwrap();
+                        let methods = paths
+                            .get(&path)
+                            .or_else(|| {
+                                paths
+                                    .iter()
+                                    .filter(|(pattern, _)| {
+                                        crate::package::api_path_matches(pattern, &path)
+                                    })
+                                    .min_by_key(|(pattern, _)| {
+                                        pattern.bytes().filter(|b| *b == b'{').count()
+                                    })
+                                    .map(|(_, item)| item)
+                            })
                             .ok_or(Error::RouteNotFound)?
-                            .1
                             .methods()
                             .into_iter()
                             .map(|(method, _)| method.as_str().to_owned())

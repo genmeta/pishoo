@@ -479,6 +479,7 @@ pub(crate) fn router(root: Dir, library: Router) -> Router {
     };
     Router::new()
         .route(FILE, any(handler.clone()))
+        .route("/std/file/{id}", any(handler.clone()))
         .route(UPLOAD, any(handler))
         .merge(copies)
 }
@@ -505,17 +506,26 @@ async fn serve(root: Arc<Dir>, request: Request<Body>) -> Result<Response, Failu
     if upload && method == Method::POST {
         return create(root, request).await;
     }
-    let q = query(
-        &request,
-        if upload {
-            &["id"]
-        } else if method == Method::GET {
-            &["id", "view"]
-        } else {
-            &["id"]
-        },
-    )?;
-    let id = required(&q, "id")?.to_owned();
+    let resource = request
+        .uri()
+        .path()
+        .strip_prefix("/std/file/")
+        .filter(|_| !upload);
+    if resource.is_some() && !matches!(method, Method::GET | Method::HEAD) {
+        return Err(fail(405, "method not allowed"));
+    }
+    let allowed: &[&str] = if resource.is_some() {
+        &[]
+    } else if !upload && method == Method::GET {
+        &["id", "view"]
+    } else {
+        &["id"]
+    };
+    let q = query(&request, allowed)?;
+    let id = match resource {
+        Some(segment) => segment.to_owned(),
+        None => required(&q, "id")?.to_owned(),
+    };
     if !valid_id(&id) {
         return Err(fail(400, "invalid id"));
     }

@@ -109,24 +109,50 @@ pub(super) async fn receipt(
         [super::now().into(),id.into(),applicant.name().into(),applicant.subject_id().as_bytes().to_vec().into()]))
         .await.map_err(decode)?.ok_or_else(||fail(404,"application not found"))?;
     let state: String = row.try_get("", "state").map_err(decode)?;
-    let mut granted = serde_json::Map::new();
-    if state == "active" {
-        for rule in tx.query_all_raw(Statement::from_sql_and_values(DatabaseBackend::Sqlite,
-            "SELECT api,method,effect FROM access_rules WHERE grantee_type=0 AND grantee=? ORDER BY api,effect,method",
-            [applicant.name().into()])).await.map_err(decode)? {
-            let path:String=rule.try_get("","api").map_err(decode)?;
-            let effect:String=rule.try_get("","effect").map_err(decode)?;
-            let method:String=rule.try_get("","method").map_err(decode)?;
-            let methods=granted.entry(path).or_insert_with(||json!({"allow":[],"review":[],"deny":[]}));
-            methods[&effect].as_array_mut().ok_or_else(||fail(500,"invalid ACL effect"))?.push(json!(method));
-        }
-    }
+    let granted = if state == "active" {
+        current_grants(&tx, applicant.name(), applicant.subject_id().as_bytes()).await?
+    } else {
+        json!({})
+    };
     tx.commit().await.map_err(decode)?;
     Ok(
         json!({"application_id":id,"name":receiver.name(),"subject_id":String::from_utf8_lossy(receiver.subject_id().as_bytes()),
         "status":state,"received_at":row.try_get::<i64>("","received_at").map_err(decode)?,
         "valid_before":row.try_get::<i64>("","expired_after").map_err(decode)?,"granted_access":granted}),
     )
+}
+
+pub(super) async fn current_grants(
+    db: &impl sea_orm::ConnectionTrait,
+    name: &str,
+    subject: &[u8],
+) -> Result<Value, Failure> {
+    use sea_orm::{DatabaseBackend, Statement};
+    let decode = |e: sea_orm::DbErr| fail(500, e.to_string());
+    let mut granted = serde_json::Map::new();
+    for rule in db
+        .query_all_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            "SELECT r.api,r.method,r.effect FROM access_rules r
+         JOIN contacts c ON c.name=r.grantee AND c.subject_id=?2 AND c.status=2
+         WHERE r.grantee_type=0 AND r.grantee=?1 ORDER BY r.api,r.effect,r.method",
+            [name.into(), subject.to_vec().into()],
+        ))
+        .await
+        .map_err(decode)?
+    {
+        let path: String = rule.try_get("", "api").map_err(decode)?;
+        let effect: String = rule.try_get("", "effect").map_err(decode)?;
+        let method: String = rule.try_get("", "method").map_err(decode)?;
+        let row = granted
+            .entry(path)
+            .or_insert_with(|| json!({"allow":[],"review":[],"deny":[]}));
+        row[&effect]
+            .as_array_mut()
+            .ok_or_else(|| fail(500, "invalid ACL effect"))?
+            .push(json!(method));
+    }
+    Ok(Value::Object(granted))
 }
 
 /// Persist only an identity learned through an authenticated peer connection.
@@ -198,4 +224,21 @@ pub(super) async fn apply_offered(
         }
     }
     Ok(())
+}
+
+/// The default collection GET serves each authenticated person's limited self
+/// view. Sharing an individual entry explicitly may also disclose its details.
+pub(super) async fn shared_detail(
+    access: &AccessService,
+    visitor: &access_control::Visitor,
+    segment: &str,
+) -> Result<bool, Failure> {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+    let path = format!("/std/contact/{segment}");
+    let row=access.database().query_one_raw(Statement::from_sql_and_values(DatabaseBackend::Sqlite,
+        "SELECT EXISTS(SELECT 1 FROM access_rules WHERE api=? AND method IN ('GET','*') AND grantee IN (?,'**','*?') AND effect IN ('allow','review')) AS shared",
+        [path.into(),visitor.name().into()])).await.map_err(|e|fail(500,e.to_string()))?;
+    Ok(row
+        .and_then(|r| r.try_get::<bool>("", "shared").ok())
+        .unwrap_or(false))
 }

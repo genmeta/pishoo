@@ -769,3 +769,308 @@ async fn hierarchical_app_pages_and_head_use_the_complete_registered_root_permis
         StatusCode::FORBIDDEN
     );
 }
+
+#[test]
+fn communication_resources_share_canonical_path_spelling() {
+    use crate::routes::resource::canonical;
+    for (raw, expected) in [
+        (
+            "/std/comm/message/ZERO.ai.dhttp.net/",
+            "/std/comm/message/zero.ai",
+        ),
+        (
+            "/std/comm/message/histor%79.dhttp.net",
+            "/std/comm/message/history.dhttp.net",
+        ),
+        (
+            "/std/comm/group/usopp.li.dhttp.net~%23dev/member/%7Aero.ai.dhttp.net/",
+            "/std/comm/group/usopp.li~%23dev/member/zero.ai",
+        ),
+        ("/std/contact/list.dhttp.net", "/std/contact/list.dhttp.net"),
+        ("/std/contact/li%73t", "/std/contact/list"),
+    ] {
+        assert_eq!(canonical(raw).unwrap(), expected);
+    }
+    for tail in [
+        "usopp.li%2Fdev",
+        "usopp.li%252Fdev",
+        "%2e%2e",
+        "zero.ai//file",
+        "usopp.li~%2523dev",
+        "zero%5cai",
+        "%Z1",
+        "%00",
+    ] {
+        assert!(
+            canonical(&format!("/std/comm/message/{tail}")).is_err(),
+            "{tail}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_and_named_private_messages_use_one_effective_policy() {
+    use access_control::{Effect, Grantee};
+    use tower::ServiceExt;
+    let (access, _) = authorization_app(Effect::Deny).await;
+    let peer = crate::test_support::identity::endpoint("zero.ai.dhttp.net");
+    let endpoint = crate::test_support::identity::endpoint("usopp.li.dhttp.net");
+    let rule = access_control::Method::Specified(Method::POST);
+    access
+        .set_policy(
+            rule.clone(),
+            "/std/comm/message/zero.ai",
+            Effect::Allow,
+            Grantee::Named,
+        )
+        .await
+        .unwrap();
+    let app = Router::new()
+        .fallback(axum::routing::any(|| async { StatusCode::NO_CONTENT }))
+        .layer(axum::middleware::from_fn_with_state(
+            access.clone(),
+            authorize,
+        ))
+        .layer(axum::Extension(endpoint))
+        .layer(axum::middleware::from_fn(normalize_method));
+    let send = |path: &str| {
+        Request::post(path)
+            .extension(peer.local_authority().unwrap().clone())
+            .header("content-type", "application/json")
+            .body(AxumBody::from(
+                r#"{"type":"text","to":"usopp.li","content":"hi","client_message_id":"1"}"#,
+            ))
+            .unwrap()
+    };
+    for (effect, expected) in [
+        (Effect::Allow, 204),
+        (Effect::Deny, 403),
+        (Effect::Review, 202),
+    ] {
+        access
+            .set_policy(
+                rule.clone(),
+                "/std/comm/message/zero.ai",
+                effect,
+                Grantee::Named,
+            )
+            .await
+            .unwrap();
+        let legacy = app
+            .clone()
+            .oneshot(send("/std/comm/message"))
+            .await
+            .unwrap();
+        let resource = app
+            .clone()
+            .oneshot(send("/std/comm/message/zero.ai.dhttp.net/"))
+            .await
+            .unwrap();
+        assert_eq!(legacy.status(), expected);
+        assert_eq!(resource.status(), expected);
+        if expected == 202 {
+            assert_eq!(
+                legacy.headers()[header::LOCATION],
+                resource.headers()[header::LOCATION]
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn legacy_private_file_grants_and_group_intake_do_not_override_specific_decisions() {
+    use access_control::{Effect, Grantee};
+    use sea_orm::ConnectionTrait;
+
+    use crate::routes::resource::compatibility_operation;
+    let (access, _) = authorization_app(Effect::Deny).await;
+    let actor = "zero.ai.dhttp.net";
+    let local = "usopp.li.dhttp.net";
+    let visitor = Visitor::new(actor, SubjectId::new(b"aa").unwrap());
+    access.database().execute_unprepared("INSERT INTO contacts(name,subject_id,status,created_at,updated_at,expired_after) VALUES('zero.ai.dhttp.net',X'6161',2,1,1,2000000000)").await.unwrap();
+    let exact = Grantee::One(actor.into());
+    let post = access_control::Method::Specified(Method::POST);
+    access
+        .set_policy(
+            post.clone(),
+            "/std/comm/message",
+            Effect::Allow,
+            exact.clone(),
+        )
+        .await
+        .unwrap();
+    let different = Visitor::new(actor, SubjectId::new(b"other").unwrap());
+    let file_path = "/std/comm/message/zero.ai/file/001";
+    assert_eq!(
+        compatibility_operation(
+            &access,
+            Method::HEAD,
+            file_path.into(),
+            Some(&different),
+            Some(local)
+        )
+        .await
+        .unwrap(),
+        (Method::HEAD, file_path.into())
+    );
+    let file = "/std/comm/message/zero.ai/file/a1";
+    let resolve = |method: Method, path: &str| {
+        compatibility_operation(
+            &access,
+            method,
+            path.to_owned(),
+            Some(&visitor),
+            Some(local),
+        )
+    };
+    assert_eq!(
+        resolve(Method::GET, file).await.unwrap(),
+        (Method::POST, file.into())
+    );
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            file,
+            Effect::Deny,
+            exact.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve(Method::GET, file).await.unwrap(),
+        (Method::GET, file.into())
+    );
+    assert_eq!(
+        resolve(Method::HEAD, file).await.unwrap(),
+        (Method::POST, file.into())
+    );
+    access
+        .remove_policy(post.clone(), "/std/comm/message", exact.clone())
+        .await
+        .unwrap();
+    access
+        .set_policy(
+            post.clone(),
+            "/std/comm/message/zero.ai",
+            Effect::Allow,
+            exact.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve(Method::HEAD, file).await.unwrap(),
+        (Method::HEAD, file.into())
+    );
+    let group_file = "/std/comm/message/usopp.li~%23dev/file/abc";
+    let conversation = "/std/comm/message/usopp.li~%23dev";
+    access
+        .set_policy(post.clone(), conversation, Effect::Allow, exact.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve(Method::PATCH, group_file).await.unwrap(),
+        (Method::PATCH, group_file.into())
+    );
+    access
+        .set_policy(post, "/std/comm/group", Effect::Allow, exact.clone())
+        .await
+        .unwrap();
+    let member = "/std/comm/group/usopp.li~%23dev/member/zero.ai";
+    assert_eq!(resolve(Method::PUT, member).await.unwrap().0, Method::POST);
+    for verb in [Method::PATCH, Method::DELETE] {
+        let self_intake = resolve(verb.clone(), member).await.unwrap();
+        assert_eq!(self_intake.0, Method::POST);
+        let other = "/std/comm/group/usopp.li~%23dev/member/someone";
+        assert_eq!(
+            resolve(verb.clone(), other).await.unwrap(),
+            (verb.clone(), other.into())
+        );
+        access
+            .set_policy(
+                access_control::Method::Specified(verb.clone()),
+                member,
+                Effect::Deny,
+                exact.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resolve(verb.clone(), member).await.unwrap(),
+            (verb, member.into())
+        );
+    }
+    let other = "/std/comm/group/usopp.li~%23dev/member/another";
+    assert_eq!(
+        resolve(Method::PUT, other).await.unwrap(),
+        (Method::PUT, other.into())
+    );
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::PUT),
+            member,
+            Effect::Review,
+            exact,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve(Method::PUT, member).await.unwrap(),
+        (Method::PUT, member.into())
+    );
+}
+
+#[tokio::test]
+async fn revoking_event_access_closes_an_open_workspace_stream_before_the_next_frame() {
+    use access_control::{Effect, Grantee};
+    use tower::ServiceExt;
+    let (access, _) = authorization_app(Effect::Deny).await;
+    let path = "/std/comm/message/history";
+    let method = access_control::Method::Specified(Method::GET);
+    access
+        .set_policy(method.clone(), path, Effect::Allow, Grantee::Named)
+        .await
+        .unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let resume = release.clone();
+    let handler = axum::routing::get(move || {
+        let resume = resume.clone();
+        async move {
+            let frames = async_stream::stream! {
+                yield Ok::<_,std::convert::Infallible>(bytes::Bytes::from_static(b"data: first\n\n"));
+                resume.notified().await;
+                yield Ok(bytes::Bytes::from_static(b"data: private\n\n"));
+            };
+            http::Response::builder()
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .body(AxumBody::from_stream(frames))
+                .unwrap()
+        }
+    });
+    let app = Router::new()
+        .route(path, handler)
+        .layer(axum::middleware::from_fn_with_state(
+            access.clone(),
+            authorize,
+        ));
+    let peer = crate::test_support::identity::endpoint("zero.ai.dhttp.net");
+    let request = || {
+        Request::get(path)
+            .extension(peer.local_authority().unwrap())
+            .body(AxumBody::empty())
+            .unwrap()
+    };
+    let response = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let mut body = response.into_body();
+    assert_eq!(
+        body.frame().await.unwrap().unwrap().into_data().unwrap(),
+        bytes::Bytes::from_static(b"data: first\n\n")
+    );
+    access
+        .set_policy(method, path, Effect::Deny, Grantee::Named)
+        .await
+        .unwrap();
+    release.notify_one();
+    assert!(body.frame().await.is_none());
+    assert_eq!(app.oneshot(request()).await.unwrap().status(), 403);
+}
