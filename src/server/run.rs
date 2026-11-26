@@ -1,22 +1,16 @@
 //! Drive the process event loop and serial reconciliation of identity servers.
-use std::{
-    collections::BTreeMap,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
 
 use dhttp_home::{DhttpHome, identity::IdentityProfile};
 use futures::{StreamExt, stream::FuturesUnordered};
 use tokio::time::Instant;
 
-use super::{Server, current_router, ocsp::renew_ocsp};
+use super::{OCSP_PERIOD, Server, current_router, ocsp::renew_ocsp};
 use crate::{
     Error, Result, dns,
     sandbox::WasmRuntime,
     setup::{ServerConfig, read_server_config},
 };
-
-const OCSP_PERIOD: Duration = Duration::from_secs(72 * 60 * 60);
 
 pub(super) fn ocsp_ticks() -> tokio::time::Interval {
     let mut interval = tokio::time::interval_at(Instant::now() + OCSP_PERIOD, OCSP_PERIOD);

@@ -9,6 +9,7 @@ use dhttp_home::identity::IdentityProfile;
 
 use crate::{Error, Result, sandbox::Sandbox};
 
+mod access_migrations;
 mod files;
 mod format;
 mod manifest;

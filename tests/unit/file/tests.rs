@@ -130,6 +130,30 @@ async fn resume_digest_idempotence_and_immutable_completion() {
         put(&api, &id, data.len() as u64, b"more").await.status(),
         409
     );
+    let resource = format!("{FILE}/{id}");
+    let head = call(&api, "HEAD", &resource, &[], Body::empty()).await;
+    assert_eq!(head.status(), 200);
+    let tagged = head.headers()[header::ETAG].clone();
+    assert!(
+        head.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+    let partial = call(
+        &api,
+        "GET",
+        &resource,
+        &[("range", "bytes=1-2".into())],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(partial.status(), 206);
+    assert_eq!(partial.headers()[header::ETAG], tagged);
+    let bytes = partial.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], &data[1..=2]);
     let response = call(&api, "GET", &format!("{FILE}?id={id}"), &[], Body::empty()).await;
     assert_eq!(response.status(), 200);
     assert_eq!(
@@ -947,9 +971,16 @@ fn business_database(path: &std::path::Path) -> Connection {
 async fn uploads_share_the_business_database_and_preserve_its_facts() {
     let (dir, api) = setup();
     let db = business_database(&dir.path().join("database"));
-    db.execute_batch("CREATE TABLE messages(id INTEGER PRIMARY KEY, text TEXT); INSERT INTO messages VALUES(1,'hello'); PRAGMA user_version=6;").unwrap();
+    db.execute_batch(
+        "CREATE TABLE messages(id INTEGER PRIMARY KEY, text TEXT);
+         CREATE TABLE chat_changes(summary TEXT CHECK (summary IS NULL OR json_valid(summary)));
+         INSERT INTO messages VALUES(1,'hello');
+         PRAGMA user_version=6;",
+    )
+    .unwrap();
     let id = make(&api, "shared", 3).await;
     assert_eq!(put(&api, &id, 0, b"abc").await.status(), 204);
+    assert_eq!(facts(&api, &id).await["size"], 3);
     assert!(!dir.path().join(".file/database").exists());
     assert_eq!(
         db.query_row("SELECT offset FROM native_files WHERE id=?1", [&id], |r| {

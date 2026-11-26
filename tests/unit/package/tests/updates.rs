@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use serde_json::{Value, json};
 
 use super::*;
-fn install_packages(
+pub(crate) fn install_packages(
     profile: &IdentityProfile,
     packages: &[(String, Vec<u8>)],
     sandbox: &mut Sandbox,
@@ -553,4 +553,50 @@ fn upgrade_reclaims_unreferenced_cycles_and_original_archives_after_preview() {
     assert_eq!(std::fs::read(data).unwrap(), b"existing data");
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.versions.len(), 2);
+}
+
+#[test]
+fn broadcast_migration_checks_the_signed_message_dependency_before_publication() {
+    let author = "dev.genmeta.tech.dhttp.net";
+    let signer = publisher(author, 'a');
+    let group = "std/comm/group";
+    let message = "std/comm/message";
+    let backend = include_bytes!("../../../fixtures/wasi-http-read-request-then-respond.wasm");
+    for operation in ["sendWorkspaceMessage", "submitConversationMessage"] {
+        let root = tempfile::tempdir().unwrap();
+        let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
+        crate::setup::load_server_config(&profile).unwrap();
+        let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+        let mut source: Value = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/access_migrations/group_broadcast.json"
+        ))
+        .unwrap();
+        source["info"]["license"] = json!({"name":"MIT"});
+        source["x-pishoo"] = json!({"kind":"lib","publisher":author,"name":group,
+            "dependencies":[{"name":message,"version":"0.3.8"}]});
+        let target = json!({"openapi":"3.1.0","info":{"title":"Message","description":"Message test","license":{"name":"MIT"},"version":"0.3.8"},
+            "x-pishoo":{"kind":"lib","publisher":author,"name":message,"dependencies":[{"name":group,"version":"0.1.5"}]},
+            "paths":{"/comm/message/{name}":{"post":{"operationId":operation,"summary":"Submit message","responses":{"201":{"description":"Accepted"}}}}}});
+        let releases = [(message, target), (group, source)].map(|(name, doc)| {
+            (
+                format!("{author}/{name}"),
+                package_fixture(&doc, backend, BTreeMap::new(), &signer),
+            )
+        });
+        for (id, bytes) in &releases {
+            crate::package::read_package(bytes).unwrap_or_else(|error| panic!("{id}: {error}"));
+        }
+        let result = install_packages(&profile, &releases, &mut sandbox);
+        if operation == "submitConversationMessage" {
+            result.unwrap();
+            assert!(sandbox.libs.contains_key(&format!("{author}/{group}")));
+        } else {
+            assert!(
+                matches!(result, Err(Error::InvalidComponent(_))),
+                "{result:?}"
+            );
+            assert!(sandbox.libs.is_empty());
+            assert!(facts(&profile).as_array().unwrap().is_empty());
+        }
+    }
 }

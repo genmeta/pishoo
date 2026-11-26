@@ -1632,3 +1632,48 @@ mod management_permissions;
 mod network;
 #[path = "tests/review.rs"]
 mod review;
+
+#[tokio::test]
+async fn existing_communication_rule_aliases_merge_without_widening_conflicting_decisions() {
+    use sea_orm::ConnectionTrait;
+    let temp = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(temp.path().join("usopp.li")).unwrap();
+    std::fs::create_dir_all(profile.join(".volume/sys/access")).unwrap();
+    let subject = access_control::SubjectId::new("a".repeat(64).as_bytes()).unwrap();
+    let original = load_access(&profile, &subject).await.unwrap();
+    original.database().execute_unprepared(
+        "INSERT INTO access_rules(method,api,effect,grantee_type,grantee,updated_at,created_at) VALUES
+        ('POST','/std/comm/message/zero.ai.dhttp.net','deny',2,'**',1,1),
+        ('POST','/std/comm/message/zero.ai','allow',0,'zero.ai.dhttp.net',1,1),
+        ('GET','/std/comm/message/%7Aero.ai/file','review',4,'*?',1,1),
+        ('GET','/std/comm/message/zero.ai/file','allow',2,'**',1,1)"
+    ).await.unwrap();
+    drop(original);
+    for _ in 0..2 {
+        let service = load_access(&profile, &subject).await.unwrap();
+        let count = |query: &str| {
+            let db =
+                rusqlite::Connection::open(profile.join(".volume/sys/access/database")).unwrap();
+            db.query_row(query, [], |r| r.get::<_, i64>(0)).unwrap()
+        };
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM access_rules WHERE api IN ('/std/comm/message/zero.ai.dhttp.net','/std/comm/message/%7Aero.ai/file')"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM access_rules WHERE api='/std/comm/message/zero.ai' AND grantee='zero.ai.dhttp.net' AND effect='deny'"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM access_rules WHERE api='/std/comm/message/zero.ai/file' AND grantee IN ('**','?') AND effect='review'"
+            ),
+            2
+        );
+        drop(service);
+    }
+}

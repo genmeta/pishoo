@@ -20,6 +20,7 @@ pub(crate) use packages::{package_component, package_fixture, publisher};
 mod pkg;
 #[path = "tests/updates.rs"]
 mod updates;
+pub(crate) use updates::install_packages as install_fixture_packages;
 
 #[path = "tests/renames.rs"]
 mod renames;

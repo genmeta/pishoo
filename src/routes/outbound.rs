@@ -11,39 +11,33 @@ pub(crate) async fn forward_dhttp(
     request: Request<AxumBody>,
 ) -> Response {
     let result: Result<Response> = async {
-        if let Some(handshake) = request.extensions().get::<dhttp::HandshakeSummary>() {
-            let local = handshake.local.as_ref().ok_or(Error::MissingHandshake)?;
-            let remote = handshake.remote.as_ref().ok_or(Error::Denied)?;
-            if dhttp_home::normalize_name(local.name()).as_deref() != Some(endpoint.name())
-                || dhttp_home::normalize_name(remote.name()).as_deref() != Some(endpoint.name())
+        // authorize installs Visitor from the authenticated peer after checking
+        // access to the incoming forward path. The outbound identity is the host.
+        let local = if let Some(handshake) = request.extensions().get::<dhttp::HandshakeSummary>() {
+            if handshake.remote.is_none()
+                || request
+                    .extensions()
+                    .get::<access_control::Visitor>()
+                    .is_none()
             {
                 return Err(Error::Denied);
             }
-            let local_ski =
-                dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
-                    .map_err(|_| Error::Denied)?;
-            let remote_ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(
-                remote.certificates(),
-            )
-            .map_err(|_| Error::Denied)?;
-            if local_ski.owner_hash() != remote_ski.owner_hash() {
-                return Err(Error::Denied);
-            }
-        } else if let Some(local) = request.extensions().get::<dhttp::LocalAuthority>() {
-            let actual = endpoint.local_authority()?;
-            let local_ski =
-                dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
-                    .map_err(|_| Error::Denied)?;
-            let actual_ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(
-                actual.certificates(),
-            )
-            .map_err(|_| Error::Denied)?;
-            if local.name() != endpoint.name() || local_ski.owner_hash() != actual_ski.owner_hash()
-            {
-                return Err(Error::Denied);
-            }
+            handshake.local.as_ref().ok_or(Error::MissingHandshake)?
         } else {
-            return Err(Error::MissingHandshake);
+            request
+                .extensions()
+                .get::<dhttp::LocalAuthority>()
+                .ok_or(Error::MissingHandshake)?
+        };
+        let actual = endpoint.local_authority()?;
+        let local_ski =
+            dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
+                .map_err(|_| Error::Denied)?;
+        let actual_ski =
+            dhttp_home::certificate::extract_dhttp_subject_key_identifier(actual.certificates())
+                .map_err(|_| Error::Denied)?;
+        if local.name() != actual.name() || local_ski.owner_hash() != actual_ski.owner_hash() {
+            return Err(Error::Denied);
         }
         if request.headers().contains_key(header::TRAILER) {
             return Err(Error::BadRequest(
@@ -63,7 +57,15 @@ pub(crate) async fn forward_dhttp(
                 .map_err(|_| Error::BadRequest("invalid DHTTP target".into()))?,
         );
         let outbound = Request::from_parts(parts, dhttp::WndBuf::new(64 * 1024));
-        let (mut writer, response) = endpoint.from_request(outbound).await?;
+        let mut exchange = endpoint.from_request(outbound);
+        if authority.split(':').next() == Some(endpoint.name()) {
+            let local = endpoint.local_authority()?;
+            let ski =
+                dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
+                    .map_err(|_| Error::Denied)?;
+            exchange = exchange.expect_remote_owner_hash(ski.owner_hash().clone());
+        }
+        let (mut writer, response) = exchange.await?;
         let upload = scopeguard::guard(
             tokio::spawn(async move {
                 if let Err(error) = upload_body(body, &mut writer).await {
@@ -78,6 +80,18 @@ pub(crate) async fn forward_dhttp(
         // The two stream directions remain independent after response delivery.
         drop(scopeguard::ScopeGuard::into_inner(upload));
         clean_hop_headers(response.headers_mut());
+        if matches!(response.status().as_u16(), 202 | 400) {
+            let hops = response
+                .headers()
+                .get("pishoo-review-hops")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0)
+                .saturating_add(1);
+            response
+                .headers_mut()
+                .insert("pishoo-review-hops", hops.into());
+        }
         Ok(response.map(AxumBody::new))
     }
     .await;
@@ -103,32 +117,37 @@ async fn upload_body(
     Ok(())
 }
 
-fn outbound_uri(uri: &Uri) -> Result<(Uri, String)> {
-    let path = uri
-        .path()
-        .strip_prefix(DHTTP_PREFIX)
-        .ok_or(Error::RouteNotFound)?;
-    let (target, suffix) = path.split_once('/').unwrap_or((path, ""));
+pub(super) fn target_authority(target: &str) -> Result<String> {
     let (name, sequence) = match target.split_once(':') {
         Some((name, sequence)) => (name, Some(sequence)),
         None => (target, None),
     };
     let name = dhttp_home::normalize_name(name)
         .ok_or_else(|| Error::BadRequest("invalid DHTTP target".into()))?;
-    let authority = match sequence {
+    Ok(match sequence {
         Some(sequence) => {
             let number = sequence
                 .parse::<u64>()
                 .map_err(|_| Error::BadRequest("invalid DHTTP target sequence".into()))?;
             dhttp_home::certificate::CertificateSequence::try_from(number)
                 .map_err(|_| Error::BadRequest("invalid DHTTP target sequence".into()))?;
-            format!("{name}:{sequence}")
+            format!("{name}:{number}")
         }
         None => name,
-    };
+    })
+}
+
+fn outbound_uri(uri: &Uri) -> Result<(Uri, String)> {
+    let path = uri
+        .path()
+        .strip_prefix(DHTTP_PREFIX)
+        .ok_or(Error::RouteNotFound)?;
+    let (target, suffix) = path.split_once('/').unwrap_or((path, ""));
+    let authority = target_authority(target)?;
+    let path = super::resource::canonical(&format!("/{suffix}"))?;
     let path = match uri.query() {
-        Some(query) => format!("/{suffix}?{query}"),
-        None => format!("/{suffix}"),
+        Some(query) => format!("{path}?{query}"),
+        None => path,
     };
     let uri = format!("https://{authority}{path}")
         .parse()

@@ -27,10 +27,12 @@ SOURCE_ROOT ?= /workspace
 
 # TODO: Remove this cargo-zigbuild workaround after rustc/Zig agree on the
 # Cortex-A53 843419 mitigation linker argument.
+# Pass the PAM search directory only to the final linker. A rustc -L here
+# can embed the distribution's libsqlite3.a into the libsqlite3-sys rlib.
 override_dh_auto_build:
 ifdef TRIPLE
 	cd $(SOURCE_ROOT) && \
-	export RUSTFLAGS="$${RUSTFLAGS:-} -L /usr/lib/$(DEB_HOST_MULTIARCH)" && \
+	export RUSTFLAGS="$${RUSTFLAGS:-} -C link-arg=-L/usr/lib/$(DEB_HOST_MULTIARCH)" && \
 	if [ "$(TRIPLE)" = "aarch64-unknown-linux-gnu" ]; then \
 		{ \
 			printf '%s\n' '#!/usr/bin/env bash'; \

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.2-preview.4] - Unreleased
+
+- Refresh the cached OCSP response at startup when it has 72 hours or less remaining before its next update.
+- Authorize communication resources by canonical method and path and verify the Group broadcast migration against the signed Message dependency.
+- Apply resource ACLs to preview Apps and Libs. Forwarding uses the workspace identity for the outbound request. Revoking the forward grant closes a forwarded event stream before another frame is delivered.
+
 ## [0.9.2-preview.3] - Unreleased
 
 - Admit reads between verified local standard libraries using their running package identities. Allow local standard libraries to read Contact group bindings.

@@ -75,7 +75,7 @@ migrate when the complete-path destination is absent.
 
 The companion `lib/<name>.preview/` directory identifies local files and retains
 resources displaced by the preview. Host startup reads the retained registered
-release files, then selects local resources for authenticated owner requests.
+release files, then selects local resources for authorized requests.
 
 Pishoo selects local development files independently of the identity name.
 Normal application URLs select these files on the chosen identity; there is no `/dev` URL alias. Standard guests
@@ -84,8 +84,7 @@ standard Lib by its exact declared path and method, then removes `/std` before
 execution. Package names identify artifacts and data directories independently of
 these paths. Ordinary guests receive the suffix after their name. Native services
 retain precedence. Installed dependencies keep
-their normal URLs and authorization. Local files require the authenticated real
-owner, even when ACL rules allow visitors. Jade selects a development child with its own
+their normal URLs and authorization. Preview App reads and Lib requests use the same resource ACL as installed packages. The host verifies ownership of preview files when loading them. Jade selects a development child with its own
 native databases and business data, separate from the base identity.
 
 Standard previews refresh local Libs through the existing loader and its

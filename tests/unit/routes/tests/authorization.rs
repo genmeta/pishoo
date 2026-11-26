@@ -141,6 +141,7 @@ async fn app_head_exposes_verified_viewer_without_a_new_endpoint() {
             (
                 [
                     ("pishoo-viewer-name", "stale.dhttp.net"),
+                    ("pishoo-owner-subject", "forged"),
                     ("cache-control", "public, max-age=3600"),
                 ],
                 "page",
@@ -171,6 +172,13 @@ async fn app_head_exposes_verified_viewer_without_a_new_endpoint() {
         assert_eq!(
             response.headers()["pishoo-viewer-name"],
             caller.unwrap_or("")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("pishoo-owner-subject")
+                .map(|v| v.as_bytes().len()),
+            caller.map(|_| 64)
         );
         assert_eq!(response.headers()["cache-control"], "no-store");
     }
@@ -766,6 +774,677 @@ async fn hierarchical_app_pages_and_head_use_the_complete_registered_root_permis
     *request.uri_mut() = "/app/live/other/".parse().unwrap();
     assert_eq!(
         app.oneshot(request).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[test]
+fn communication_resources_share_canonical_path_spelling() {
+    use crate::routes::resource::canonical;
+    for (raw, expected) in [
+        (
+            "/std/comm/message/ZERO.ai.dhttp.net/",
+            "/std/comm/message/zero.ai",
+        ),
+        (
+            "/std/comm/message/histor%79.dhttp.net",
+            "/std/comm/message/history.dhttp.net",
+        ),
+        (
+            "/std/comm/group/usopp.li.dhttp.net~%23dev/member/%7Aero.ai.dhttp.net/",
+            "/std/comm/group/usopp.li~%23dev/member/zero.ai",
+        ),
+        ("/std/contact/list.dhttp.net", "/std/contact/list.dhttp.net"),
+        ("/std/contact/li%73t", "/std/contact/list"),
+        (
+            "/std/forward/BOB~/std/contact/Alice.dhttp.net",
+            "/std/forward/bob.dhttp.net/std/contact/alice",
+        ),
+        (
+            "/std/forward/BOB:007/std/forward/Alice~/std/contact/li%73t",
+            "/std/forward/bob.dhttp.net:7/std/forward/alice.dhttp.net/std/contact/list",
+        ),
+    ] {
+        assert_eq!(canonical(raw).unwrap(), expected);
+    }
+    for tail in [
+        "usopp.li%2Fdev",
+        "usopp.li%252Fdev",
+        "%2e%2e",
+        "zero.ai//file",
+        "usopp.li~%2523dev",
+        "zero%5cai",
+        "%Z1",
+        "%00",
+    ] {
+        assert!(
+            canonical(&format!("/std/comm/message/{tail}")).is_err(),
+            "{tail}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn list_acl_uses_the_event_stream_representation_only_when_accepted() {
+    for (accept, path) in [
+        ("Text/Event-Stream; q=0.8", "/std/comm/message/history"),
+        ("text/event-stream;q=0", "/std/comm/message/list"),
+    ] {
+        let mut request = Request::get("/std/comm/message/list")
+            .header(header::ACCEPT, accept)
+            .body(AxumBody::empty())
+            .unwrap();
+        let selected = crate::routes::resource::operation(&mut request, None, false)
+            .await
+            .unwrap();
+        assert_eq!(selected, Some((Method::GET, path.into())));
+    }
+}
+
+#[tokio::test]
+async fn legacy_and_named_private_messages_use_one_effective_policy() {
+    use access_control::{Effect, Grantee};
+    use tower::ServiceExt;
+    let (access, _) = authorization_app(Effect::Deny).await;
+    let peer = crate::test_support::identity::endpoint("zero.ai.dhttp.net");
+    let endpoint = crate::test_support::identity::endpoint("usopp.li.dhttp.net");
+    let rule = access_control::Method::Specified(Method::POST);
+    access
+        .set_policy(
+            rule.clone(),
+            "/std/comm/message/zero.ai",
+            Effect::Allow,
+            Grantee::Named,
+        )
+        .await
+        .unwrap();
+    let app = Router::new()
+        .fallback(axum::routing::any(|| async { StatusCode::NO_CONTENT }))
+        .layer(axum::middleware::from_fn_with_state(
+            access.clone(),
+            authorize,
+        ))
+        .layer(axum::Extension(endpoint))
+        .layer(axum::middleware::from_fn(normalize_method));
+    let send = |path: &str| {
+        Request::post(path)
+            .extension(peer.local_authority().unwrap().clone())
+            .header("content-type", "application/json")
+            .body(AxumBody::from(
+                r#"{"type":"text","to":"usopp.li","content":"hi","client_message_id":"1"}"#,
+            ))
+            .unwrap()
+    };
+    for (effect, expected) in [
+        (Effect::Allow, 204),
+        (Effect::Deny, 403),
+        (Effect::Review, 202),
+    ] {
+        access
+            .set_policy(
+                rule.clone(),
+                "/std/comm/message/zero.ai",
+                effect,
+                Grantee::Named,
+            )
+            .await
+            .unwrap();
+        let legacy = app
+            .clone()
+            .oneshot(send("/std/comm/message"))
+            .await
+            .unwrap();
+        let resource = app
+            .clone()
+            .oneshot(send("/std/comm/message/zero.ai.dhttp.net/"))
+            .await
+            .unwrap();
+        assert_eq!(legacy.status(), expected);
+        assert_eq!(resource.status(), expected);
+        if expected == 202 {
+            assert_eq!(
+                legacy.headers()[header::LOCATION],
+                resource.headers()[header::LOCATION]
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn legacy_private_file_grants_and_group_intake_do_not_override_specific_decisions() {
+    use access_control::{Effect, Grantee};
+    use sea_orm::ConnectionTrait;
+
+    use crate::routes::resource::compatibility_operation;
+    let (access, _) = authorization_app(Effect::Deny).await;
+    let actor = "zero.ai.dhttp.net";
+    let local = "usopp.li.dhttp.net";
+    let visitor = Visitor::new(actor, SubjectId::new(b"aa").unwrap());
+    access.database().execute_unprepared("INSERT INTO contacts(name,subject_id,status,created_at,updated_at,expired_after) VALUES('zero.ai.dhttp.net',X'6161',2,1,1,2000000000)").await.unwrap();
+    let exact = Grantee::One(actor.into());
+    let post = access_control::Method::Specified(Method::POST);
+    access
+        .set_policy(
+            post.clone(),
+            "/std/comm/message",
+            Effect::Allow,
+            exact.clone(),
+        )
+        .await
+        .unwrap();
+    let different = Visitor::new(actor, SubjectId::new(b"other").unwrap());
+    let file_path = "/std/comm/message/zero.ai/file/001";
+    assert_eq!(
+        compatibility_operation(
+            &access,
+            Method::HEAD,
+            file_path.into(),
+            Some(&different),
+            Some(local)
+        )
+        .await
+        .unwrap(),
+        (Method::HEAD, file_path.into())
+    );
+    let file = "/std/comm/message/zero.ai/file/a1";
+    let resolve = |method: Method, path: &str| {
+        compatibility_operation(
+            &access,
+            method,
+            path.to_owned(),
+            Some(&visitor),
+            Some(local),
+        )
+    };
+    assert_eq!(
+        resolve(Method::GET, file).await.unwrap(),
+        (Method::POST, file.into())
+    );
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            file,
+            Effect::Deny,
+            exact.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve(Method::GET, file).await.unwrap(),
+        (Method::GET, file.into())
+    );
+    assert_eq!(
+        resolve(Method::HEAD, file).await.unwrap(),
+        (Method::POST, file.into())
+    );
+    access
+        .remove_policy(post.clone(), "/std/comm/message", exact.clone())
+        .await
+        .unwrap();
+    access
+        .set_policy(
+            post.clone(),
+            "/std/comm/message/zero.ai",
+            Effect::Allow,
+            exact.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve(Method::HEAD, file).await.unwrap(),
+        (Method::HEAD, file.into())
+    );
+    let group_file = "/std/comm/message/usopp.li~%23dev/file/abc";
+    let conversation = "/std/comm/message/usopp.li~%23dev";
+    access
+        .set_policy(post.clone(), conversation, Effect::Allow, exact.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve(Method::PATCH, group_file).await.unwrap(),
+        (Method::PATCH, group_file.into())
+    );
+    access
+        .set_policy(post, "/std/comm/group", Effect::Allow, exact.clone())
+        .await
+        .unwrap();
+    let member = "/std/comm/group/usopp.li~%23dev/member/zero.ai";
+    assert_eq!(resolve(Method::PUT, member).await.unwrap().0, Method::POST);
+    for verb in [Method::PATCH, Method::DELETE] {
+        let self_intake = resolve(verb.clone(), member).await.unwrap();
+        assert_eq!(self_intake.0, Method::POST);
+        let other = "/std/comm/group/usopp.li~%23dev/member/someone";
+        assert_eq!(
+            resolve(verb.clone(), other).await.unwrap(),
+            (verb.clone(), other.into())
+        );
+        access
+            .set_policy(
+                access_control::Method::Specified(verb.clone()),
+                member,
+                Effect::Deny,
+                exact.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resolve(verb.clone(), member).await.unwrap(),
+            (verb, member.into())
+        );
+    }
+    let other = "/std/comm/group/usopp.li~%23dev/member/another";
+    assert_eq!(
+        resolve(Method::PUT, other).await.unwrap(),
+        (Method::PUT, other.into())
+    );
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::PUT),
+            member,
+            Effect::Review,
+            exact,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve(Method::PUT, member).await.unwrap(),
+        (Method::PUT, member.into())
+    );
+}
+
+#[tokio::test]
+async fn revoking_event_access_closes_an_open_workspace_stream_before_the_next_frame() {
+    check_stream_revocation("/std/comm/message/history", "/std/comm/message/history").await;
+}
+
+#[tokio::test]
+async fn revoking_forward_access_closes_the_remote_event_stream_before_the_next_frame() {
+    check_stream_revocation(
+        "/std/forward/host.dhttp.net/std/comm/message/history",
+        "/std/forward",
+    )
+    .await;
+}
+
+async fn check_stream_revocation(path: &'static str, grant: &str) {
+    use access_control::{Effect, Grantee};
+    use tower::ServiceExt;
+    let (access, _) = authorization_app(Effect::Deny).await;
+    let method = access_control::Method::Unspecified;
+    access
+        .set_policy(method.clone(), grant, Effect::Allow, Grantee::Named)
+        .await
+        .unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let resume = release.clone();
+    let handler = axum::routing::get(move || {
+        let resume = resume.clone();
+        async move {
+            let frames = async_stream::stream! {
+                yield Ok::<_,std::convert::Infallible>(bytes::Bytes::from_static(b"data: first\n\n"));
+                resume.notified().await;
+                yield Ok(bytes::Bytes::from_static(b"data: private\n\n"));
+            };
+            http::Response::builder()
+                .header(header::CONTENT_TYPE, "Text/Event-Stream; charset=utf-8")
+                .body(AxumBody::from_stream(frames))
+                .unwrap()
+        }
+    });
+    let app = Router::new()
+        .route(path, handler)
+        .layer(axum::middleware::from_fn_with_state(
+            access.clone(),
+            authorize,
+        ));
+    let peer = crate::test_support::identity::endpoint("zero.ai.dhttp.net");
+    let request = || {
+        Request::get(path)
+            .extension(peer.local_authority().unwrap())
+            .body(AxumBody::empty())
+            .unwrap()
+    };
+    let response = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let mut body = response.into_body();
+    assert_eq!(
+        body.frame().await.unwrap().unwrap().into_data().unwrap(),
+        bytes::Bytes::from_static(b"data: first\n\n")
+    );
+    access
+        .remove_policy(method, grant, Grantee::Named)
+        .await
+        .unwrap();
+    release.notify_one();
+    assert!(body.frame().await.is_none());
+    assert_eq!(app.oneshot(request()).await.unwrap().status(), 403);
+}
+
+#[tokio::test]
+async fn legacy_group_actions_select_the_matching_membership_resource() {
+    let endpoint = crate::test_support::identity::endpoint("owner.dhttp.net");
+    let actor = Visitor::new("alice.dhttp.net", SubjectId::new(b"alice").unwrap());
+    let group = "/std/comm/group/owner~%23dev";
+    for (method, path, body, expected_method, expected_path) in [
+        (
+            "GET",
+            "?membership=owner~%23dev",
+            "",
+            "GET",
+            format!("{group}/member/owner"),
+        ),
+        (
+            "POST",
+            "",
+            r#"{"type":"request_join","topic":"owner~#dev"}"#,
+            "PUT",
+            format!("{group}/member/owner"),
+        ),
+        (
+            "GET",
+            "/dev/member/list",
+            "",
+            "GET",
+            format!("{group}/member"),
+        ),
+        (
+            "GET",
+            "/dev/member/list.dhttp.net/avatar",
+            "",
+            "GET",
+            format!("{group}/profile/list.dhttp.net/avatar"),
+        ),
+        (
+            "GET",
+            "/dev/member",
+            "",
+            "GET",
+            format!("{group}/member/alice"),
+        ),
+        ("GET", "/dev", "", "GET", format!("{group}/member/alice")),
+        ("GET", "/dev/avatar", "", "GET", format!("{group}/avatar")),
+        ("DELETE", "/dev", "", "DELETE", group.into()),
+        ("POST", "/dev", r#"{"type":"create"}"#, "PUT", group.into()),
+        (
+            "POST",
+            "/dev/broadcast",
+            "{}",
+            "POST",
+            "/std/comm/message/owner~%23dev".into(),
+        ),
+        (
+            "POST",
+            "/dev/member",
+            r#"{"type":"apply"}"#,
+            "PUT",
+            format!("{group}/member/alice"),
+        ),
+        (
+            "POST",
+            "/dev/member",
+            r#"{"type":"invite","group":"other~#room","name":"bob"}"#,
+            "PUT",
+            "/std/comm/group/other~%23room/member/bob".into(),
+        ),
+        (
+            "POST",
+            "/dev/member",
+            r#"{"type":"resend","name":"bob"}"#,
+            "PUT",
+            format!("{group}/member/bob"),
+        ),
+        (
+            "POST",
+            "/dev/member",
+            r#"{"type":"remove","name":"bob"}"#,
+            "DELETE",
+            format!("{group}/member/bob"),
+        ),
+        (
+            "POST",
+            "/dev/member",
+            r#"{"type":"leave"}"#,
+            "DELETE",
+            format!("{group}/member/alice"),
+        ),
+        (
+            "POST",
+            "/dev/member",
+            r#"{"type":"nickname"}"#,
+            "PATCH",
+            format!("{group}/member/alice"),
+        ),
+    ] {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(format!("/std/comm/group{path}"))
+            .extension(endpoint.clone())
+            .body(AxumBody::from(body))
+            .unwrap();
+        let selected = resource::operation(&mut request, Some(&actor), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            selected,
+            Some((expected_method.parse().unwrap(), expected_path)),
+            "{path} {body}"
+        );
+        assert_eq!(
+            request
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
+            body.as_bytes()
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_conversation_actions_use_the_actor_and_file_operation() {
+    let endpoint = crate::test_support::identity::endpoint("owner.dhttp.net");
+    for (actor, body, method, tail) in [
+        (
+            "owner.dhttp.net",
+            r#"{"type":"text","to":"bob"}"#,
+            "POST",
+            "bob",
+        ),
+        (
+            "alice.dhttp.net",
+            r#"{"type":"image","to":"owner"}"#,
+            "POST",
+            "alice",
+        ),
+        (
+            "alice.dhttp.net",
+            r#"{"type":"file","from":"owner~#dev"}"#,
+            "POST",
+            "owner~%23dev",
+        ),
+        (
+            "owner.dhttp.net",
+            r#"{"type":"group_history","topic":"owner~#dev"}"#,
+            "GET",
+            "owner~%23dev",
+        ),
+        (
+            "alice.dhttp.net",
+            r#"{"type":"group_push","from":"owner~#dev"}"#,
+            "POST",
+            "owner~%23dev",
+        ),
+        (
+            "owner.dhttp.net",
+            r#"{"type":"retry","to":"alice"}"#,
+            "POST",
+            "alice",
+        ),
+        (
+            "owner.dhttp.net",
+            r#"{"type":"upload","peer":"alice"}"#,
+            "POST",
+            "alice/file",
+        ),
+        (
+            "alice.dhttp.net",
+            r#"{"type":"file_read","id":"abc"}"#,
+            "GET",
+            "alice/file/abc",
+        ),
+        (
+            "alice.dhttp.net",
+            r#"{"type":"file_info","id":"abc"}"#,
+            "HEAD",
+            "alice/file/abc",
+        ),
+    ] {
+        let visitor = Visitor::new(actor, SubjectId::new(b"actor").unwrap());
+        let mut request = Request::post("/std/comm/message")
+            .extension(endpoint.clone())
+            .body(AxumBody::from(body))
+            .unwrap();
+        assert_eq!(
+            resource::operation(&mut request, Some(&visitor), false)
+                .await
+                .unwrap(),
+            Some((method.parse().unwrap(), format!("/std/comm/message/{tail}"))),
+            "{body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn contact_operations_preserve_receipts_and_authenticated_names() {
+    let endpoint = crate::test_support::identity::endpoint("owner.dhttp.net");
+    for (method, path, body, actor, expected) in [
+        (
+            "GET",
+            "/std/contact?application_id=receipt",
+            "",
+            "alice.dhttp.net",
+            "/std/contact/requests/receipt",
+        ),
+        (
+            "PATCH",
+            "/std/contact?name=Bob.dhttp.net",
+            "{}",
+            "owner.dhttp.net",
+            "/std/contact/bob",
+        ),
+        (
+            "POST",
+            "/std/contact",
+            r#"{"to":"Bob.dhttp.net"}"#,
+            "owner.dhttp.net",
+            "/std/contact/bob",
+        ),
+        (
+            "POST",
+            "/std/contact",
+            r#"{"to":"owner"}"#,
+            "alice.dhttp.net",
+            "/std/contact/alice",
+        ),
+        (
+            "GET",
+            "/std/comm/message/list?view=conversations",
+            "",
+            "owner.dhttp.net",
+            "/std/comm/message/list",
+        ),
+        (
+            "GET",
+            "/std/comm/message/list?name=Bob.dhttp.net",
+            "",
+            "owner.dhttp.net",
+            "/std/comm/message/bob",
+        ),
+    ] {
+        let visitor = Visitor::new(actor, SubjectId::new(b"caller").unwrap());
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .extension(endpoint.clone())
+            .body(AxumBody::from(body))
+            .unwrap();
+        assert_eq!(
+            resource::operation(&mut request, Some(&visitor), false)
+                .await
+                .unwrap(),
+            Some((method.parse().unwrap(), expected.into()))
+        );
+    }
+    let mut ambiguous = Request::get("/std/contact?name=alice&name=bob")
+        .body(AxumBody::empty())
+        .unwrap();
+    assert!(
+        resource::operation(&mut ambiguous, None, false)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn message_file_resolution_is_deferred_to_the_declared_provider() {
+    for kind in [
+        "file_read",
+        "file_info",
+        "retry",
+        "upload_status",
+        "group_attachment_offer",
+    ] {
+        let mut request = Request::post("/std/comm/message")
+            .body(AxumBody::from(serde_json::json!({"type":kind}).to_string()))
+            .unwrap();
+        assert_eq!(
+            resource::operation(&mut request, None, true).await.unwrap(),
+            None
+        );
+    }
+    let mut multipart = Request::post("/std/comm/message")
+        .header(header::CONTENT_TYPE, "multipart/form-data; boundary=abc")
+        .body(AxumBody::empty())
+        .unwrap();
+    assert_eq!(
+        resource::operation(&mut multipart, None, true)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn forward_validates_the_local_identity_before_dialing() {
+    let endpoint = crate::test_support::identity::endpoint("owner.dhttp.net");
+    let other = crate::test_support::identity::endpoint("other.dhttp.net");
+    let path = "/std/forward/destination/std/contact/list";
+    let mismatched = Request::get(path)
+        .extension(other.local_authority().unwrap())
+        .body(AxumBody::empty())
+        .unwrap();
+    assert_eq!(
+        outbound::forward_dhttp(endpoint.clone(), mismatched)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let trailers = Request::get(path)
+        .extension(endpoint.local_authority().unwrap())
+        .header(header::TRAILER, "digest")
+        .body(AxumBody::empty())
+        .unwrap();
+    assert_eq!(
+        outbound::forward_dhttp(endpoint.clone(), trailers)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let anonymous = anonymous_request();
+    assert_eq!(
+        outbound::forward_dhttp(endpoint, anonymous).await.status(),
         StatusCode::FORBIDDEN
     );
 }

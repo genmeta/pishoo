@@ -105,5 +105,31 @@ fn namespaced_path_parameters_match_one_segment_and_detect_overlap() {
         "/comm/group/{topic}/nickname"
     ));
     let overlapping=br#"{"openapi":"3.1.0","info":{"title":"Group","version":"1"},"paths":{"/comm/group/{topic}":{},"/comm/group/list":{}}}"#;
-    assert!(validate_openapi(overlapping).is_err());
+    assert!(validate_openapi(overlapping).is_ok());
+    let member_list=br#"{"openapi":"3.1.0","info":{"title":"Group","version":"1"},"paths":{"/comm/group/{topic}/member/{name}":{},"/comm/group/{topic}/member/list":{}}}"#;
+    assert!(validate_openapi(member_list).is_ok());
+    let crossing=br#"{"openapi":"3.1.0","info":{"title":"Group","version":"1"},"paths":{"/comm/group/{topic}/member/fixed":{},"/comm/group/dev/member/{name}":{}}}"#;
+    assert!(validate_openapi(crossing).is_err());
+    let ambiguous=br#"{"openapi":"3.1.0","info":{"title":"Group","version":"1"},"paths":{"/comm/group/{topic}":{},"/comm/group/{name}":{}}}"#;
+    assert!(validate_openapi(ambiguous).is_err());
+}
+
+#[test]
+fn group_broadcast_migration_binds_the_owner_and_inbound_operation() {
+    let sample = include_bytes!("../../../fixtures/access_migrations/group_broadcast.json");
+    let valid: serde_json::Value = serde_json::from_slice(sample).unwrap();
+    assert!(validate_openapi(sample).is_ok());
+    for change_target in [false, true] {
+        let mut invalid = valid.clone();
+        let migration = &mut invalid["x-pishoo-access-migrations"][0];
+        if change_target {
+            migration["target"]["operationId"] = "sendWorkspaceMessage".into();
+        } else {
+            migration["bindings"]["name"]
+                .as_object_mut()
+                .unwrap()
+                .remove("owner_subject");
+        }
+        assert!(validate_lib(&component(&invalid.to_string())).is_err());
+    }
 }

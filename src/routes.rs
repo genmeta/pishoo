@@ -10,6 +10,8 @@ use crate::{Error, Result, setup::ProxyLocation};
 mod access;
 mod capabilities;
 mod outbound;
+mod resource;
+pub(crate) use resource::{canonical as canonical_communication_path, identity_segment};
 
 mod proxy;
 
@@ -63,7 +65,43 @@ pub(crate) async fn normalize_method(
         *request.method_mut() = method.unwrap();
         request.headers_mut().remove("x-http-method-override");
     }
+    match resource::normalize_uri(request.uri()) {
+        Ok(uri) => *request.uri_mut() = uri,
+        Err(error) => {
+            return ([(header::CACHE_CONTROL, "no-store")], reject(error)).into_response();
+        }
+    }
     next.run(request).await
+}
+
+pub(crate) fn event_stream_content_type(value: &str) -> bool {
+    value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("text/event-stream")
+}
+
+pub(crate) fn accepts_events(value: &str) -> bool {
+    value.split(',').any(|range| {
+        let mut parts = range.split(';');
+        parts
+            .next()
+            .unwrap_or("")
+            .trim()
+            .eq_ignore_ascii_case("text/event-stream")
+            && parts.all(|parameter| {
+                let Some((name, value)) = parameter.trim().split_once('=') else {
+                    return false;
+                };
+                !name.trim().eq_ignore_ascii_case("q")
+                    || value
+                        .trim()
+                        .parse::<f64>()
+                        .is_ok_and(|quality| quality > 0.0 && quality <= 1.0)
+            })
+    })
 }
 
 fn reject(error: Error) -> Response {

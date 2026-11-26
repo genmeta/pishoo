@@ -28,26 +28,59 @@ fn environment_named(name: &str) -> (tempfile::TempDir, IdentityProfile, Arc<RwL
     ))));
     (root, profile, sandbox)
 }
-fn app(profile: &IdentityProfile, sandbox: &Arc<RwLock<Sandbox>>) -> Router {
+async fn app(profile: &IdentityProfile, sandbox: &Arc<RwLock<Sandbox>>) -> Router {
+    authorized_app(profile, sandbox).await.0
+}
+
+async fn authorized_app(
+    profile: &IdentityProfile,
+    sandbox: &Arc<RwLock<Sandbox>>,
+) -> (Router, Arc<access_control::AccessService>) {
     let endpoint = crate::test_support::identity::endpoint(profile.name());
-    let access = Arc::new(access_control::AccessService::new(
-        sea_orm::DatabaseConnection::default(),
-        profile.name(),
-    ));
+    let local = endpoint.local_authority().unwrap();
+    let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
+        .unwrap();
+    let subject = access_control::SubjectId::new(ski.owner_hash().as_str().as_bytes()).unwrap();
+    let access = Arc::new(
+        access_control::AccessService::load_from_db("sqlite::memory:", profile.name(), &subject)
+            .await
+            .unwrap(),
+    );
     let fallback = Sandbox::api_router(
         sandbox.clone(),
         endpoint.clone(),
         access.clone(),
         Router::new(),
     );
-    router(
+    let routes = router(
         profile.clone(),
         sandbox.clone(),
-        endpoint,
-        access,
+        endpoint.clone(),
+        access.clone(),
         Router::new(),
         fallback,
     )
+    // CLI requests in this fixture carry LocalAuthority. Supply the guest-side
+    // handshake after the production ACL has authenticated that authority.
+    .layer(axum::middleware::from_fn(
+        |mut req: Request<Body>, next: axum::middleware::Next| async move {
+            if let Some(local) = req.extensions().get::<dhttp::LocalAuthority>().cloned() {
+                req.extensions_mut().insert(dhttp::HandshakeSummary {
+                    local: Some(local),
+                    remote: None,
+                    alpn: None,
+                });
+            }
+            next.run(req).await
+        },
+    ))
+    .layer(axum::middleware::from_fn_with_state(
+        access.clone(),
+        crate::routes::authorize,
+    ))
+    .layer(axum::Extension(profile.clone()))
+    .layer(axum::Extension(endpoint));
+    (routes, access)
 }
 fn request(path: &str, owner: bool) -> Request<Body> {
     request_named("dev.test.sky.lee.dhttp.net", path, owner)
@@ -55,17 +88,13 @@ fn request(path: &str, owner: bool) -> Request<Body> {
 fn request_named(name: &str, path: &str, owner: bool) -> Request<Body> {
     let endpoint = crate::test_support::identity::endpoint(name);
     let local = endpoint.local_authority().unwrap();
-    let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
-        .unwrap();
-    let subject = access_control::SubjectId::new(ski.owner_hash().as_str().as_bytes()).unwrap();
     let mut request = Request::builder()
         .uri(format!("https://{name}{path}"))
         .body(Body::empty())
         .unwrap();
     if owner {
-        request
-            .extensions_mut()
-            .insert(access_control::Visitor::new(endpoint.name(), subject));
+        request.extensions_mut().insert(local.clone());
+        return request;
     }
     request.extensions_mut().insert(dhttp::HandshakeSummary {
         alpn: None,
@@ -136,7 +165,7 @@ fn standard_files(profile: &IdentityProfile, name: &str, path: &str) -> std::pat
 async fn local_app_ranges_conditions_redirects_and_errors_remain_no_store() {
     let (_temp, profile, sandbox) = environment();
     std::fs::write(profile.join("app/hello.1.0.0/index.html"), b"0123456789").unwrap();
-    let app = app(&profile, &sandbox);
+    let app = app(&profile, &sandbox).await;
     let initial = app
         .clone()
         .oneshot(request("/app/hello/", true))
@@ -183,6 +212,7 @@ async fn files_are_discovered_without_registration_and_survive_router_restart() 
     std::fs::write(profile.join("app/hello.1.0.0/index.html"), "hello").unwrap();
     for _ in 0..2 {
         let response = app(&profile, &sandbox)
+            .await
             .oneshot(request("/app/hello/", true))
             .await
             .unwrap();
@@ -194,6 +224,7 @@ async fn files_are_discovered_without_registration_and_survive_router_restart() 
     assert!(!profile.join(".volume/sys/pkg/database").exists());
     assert_eq!(
         app(&profile, &sandbox)
+            .await
             .oneshot(request("/dev/app/hello/", true))
             .await
             .unwrap()
@@ -206,7 +237,7 @@ async fn files_are_discovered_without_registration_and_survive_router_restart() 
 async fn directory_replacement_and_removal_affect_new_requests_only() {
     let (_temp, profile, sandbox) = environment();
     std::fs::write(profile.join("app/hello.1.0.0/index.html"), "old").unwrap();
-    let api = app(&profile, &sandbox);
+    let api = app(&profile, &sandbox).await;
     let response = api
         .clone()
         .oneshot(request("/app/hello/", true))
@@ -255,10 +286,10 @@ async fn directory_replacement_and_removal_affect_new_requests_only() {
 }
 
 #[tokio::test]
-async fn development_files_require_owner_and_reject_path_escape() {
+async fn development_files_reject_ungranted_reads_and_path_escape() {
     let (_temp, profile, sandbox) = environment();
     std::fs::write(profile.join("app/hello.1.0.0/index.html"), "private").unwrap();
-    let api = app(&profile, &sandbox);
+    let api = app(&profile, &sandbox).await;
     for path in ["/app/hello/", "/hello/read"] {
         assert_eq!(
             api.clone()
@@ -309,7 +340,7 @@ async fn development_files_require_owner_and_reject_path_escape() {
 async fn development_frontend_preserves_redirect_head_and_spa_behavior() {
     let (_temp, profile, sandbox) = environment();
     std::fs::write(profile.join("app/hello.1.0.0/index.html"), "page").unwrap();
-    let api = app(&profile, &sandbox);
+    let api = app(&profile, &sandbox).await;
     let response = api
         .clone()
         .oneshot(request("/app/hello?x=1", true))
@@ -391,7 +422,11 @@ async fn development_api_executes_wasm_with_prefix_removed_and_streaming_body_pr
             Ok(http_body::Frame::trailers(trailers)),
         ],
     )));
-    let response = app(&profile, &sandbox).oneshot(request).await.unwrap();
+    let response = app(&profile, &sandbox)
+        .await
+        .oneshot(request)
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     assert_eq!(text(response).await, b"world-world-".repeat(64));
 }
@@ -464,7 +499,7 @@ async fn jade_publishes_without_a_control_connection_and_cleans_up_on_stop() {
         crate::WasmRuntime::new().unwrap(),
     ))));
     load(&profile, &sandbox, "dev.test.sky.lee.dhttp.net", "hello").unwrap();
-    let api = app(&profile, &sandbox);
+    let api = app(&profile, &sandbox).await;
     assert_eq!(
         text(
             api.clone()
@@ -542,7 +577,7 @@ async fn jade_publishes_without_a_control_connection_and_cleans_up_on_stop() {
 }
 
 #[tokio::test]
-async fn previews_require_the_owner_for_every_identity_name() {
+async fn preview_default_policy_applies_on_every_identity_name() {
     for name in [
         "alex.chen.dhttp.net",
         "dev.wang.dhttp.net",
@@ -551,7 +586,7 @@ async fn previews_require_the_owner_for_every_identity_name() {
     ] {
         let (_temp, profile, sandbox) = environment_named(name);
         std::fs::write(profile.join("app/hello.1.0.0/index.html"), "private").unwrap();
-        let routes = app(&profile, &sandbox);
+        let routes = app(&profile, &sandbox).await;
         let response = routes
             .clone()
             .oneshot(request_named(name, "/app/hello/", true))
@@ -592,6 +627,7 @@ async fn standard_local_library_uses_normal_namespace_and_private_volume() {
     // A standard library never gains the ordinary short-name route.
     assert_eq!(
         app(&profile, &sandbox)
+            .await
             .oneshot(request("/hello/read", true))
             .await
             .unwrap()
@@ -600,6 +636,7 @@ async fn standard_local_library_uses_normal_namespace_and_private_volume() {
     );
     assert_eq!(
         app(&profile, &sandbox)
+            .await
             .oneshot(request("/std/hello/read", true))
             .await
             .unwrap()
@@ -618,7 +655,7 @@ async fn standard_local_library_uses_normal_namespace_and_private_volume() {
             Ok(http_body::Frame::trailers(trailers)),
         ],
     )));
-    let response = app(&profile, &sandbox).oneshot(call).await.unwrap();
+    let response = app(&profile, &sandbox).await.oneshot(call).await.unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     assert_eq!(text(response).await, b"world-world-".repeat(64));
 }
@@ -678,10 +715,10 @@ fn component_request(path: &str) -> Request<Body> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn standard_declarations_select_arbitrary_package_names_and_require_owner() {
+async fn standard_declarations_select_packages_after_resource_authorization() {
     let (_temp, profile, sandbox) = environment();
     standard_files(&profile, "comm", "/rooms/send");
-    let routes = app(&profile, &sandbox);
+    let routes = app(&profile, &sandbox).await;
     assert_eq!(
         status(&routes, "/std/rooms/send", false).await,
         StatusCode::FORBIDDEN
@@ -728,7 +765,7 @@ async fn standard_preview_path_changes_retire_code_and_keep_installed_dependenci
         .unwrap()
         .libs
         .insert("dev.genmeta.tech.dhttp.net/dependency".into(), installed);
-    let routes = app(&profile, &sandbox);
+    let routes = app(&profile, &sandbox).await;
     assert_eq!(
         status(&routes, "/std/comm/group", true).await,
         StatusCode::METHOD_NOT_ALLOWED
@@ -783,6 +820,7 @@ async fn standard_preview_rejects_duplicate_providers_and_keeps_native_precedenc
     standard_files(&profile, "two", "/comm/group");
     assert_eq!(
         app(&profile, &sandbox)
+            .await
             .oneshot(request("/std/comm/group", true))
             .await
             .unwrap()
@@ -790,7 +828,7 @@ async fn standard_preview_rejects_duplicate_providers_and_keeps_native_precedenc
         StatusCode::CONFLICT
     );
     std::fs::remove_dir_all(profile.join("lib/two.preview")).unwrap();
-    let routes = app(&profile, &sandbox);
+    let routes = app(&profile, &sandbox).await;
     for (version, expected) in [
         ("invalid", StatusCode::BAD_REQUEST),
         ("2.0.0", StatusCode::NOT_ACCEPTABLE),
@@ -858,12 +896,12 @@ async fn hierarchical_standard_preview_uses_complete_identity_and_isolated_volum
     std::fs::create_dir_all(profile.join("lib/std/comm")).unwrap();
     std::fs::write(
         profile.join("lib/std/comm/group.wasm.1.0.0"),
-        wasm_with_path("1.0.0", "/comm/group"),
+        wasm_with_path("1.0.0", "/rooms/test"),
     )
     .unwrap();
     load_standard_libraries(&profile, &sandbox).unwrap();
-    let routes = app(&profile, &sandbox);
-    let mut input = request("/std/comm/group?probe=ok", true);
+    let routes = app(&profile, &sandbox).await;
+    let mut input = request("/std/rooms/test?probe=ok", true);
     *input.method_mut() = http::Method::POST;
     let mut trailers = http::HeaderMap::new();
     trailers.append("x-request-trailer", "preserved".parse().unwrap());
@@ -938,6 +976,7 @@ async fn frontend_fallback_keeps_a_backend_only_preview_running() {
     let lib = load(&profile, &sandbox, profile.name(), "hello").unwrap();
     assert_eq!(
         app(&profile, &sandbox)
+            .await
             .oneshot(request("/app/hello/", true))
             .await
             .unwrap()
@@ -991,4 +1030,67 @@ fn local_runtime_dependencies_allow_cycles_and_release_all_instances() {
     drop(state);
     drop(sandbox);
     assert!(weak.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn preview_reads_follow_acl_grant_and_revocation() {
+    use access_control::{Effect, Grantee, Method};
+    let (_temp, profile, sandbox) = environment();
+    std::fs::write(profile.join("app/hello.1.0.0/index.html"), "preview").unwrap();
+    let (routes, access) = authorized_app(&profile, &sandbox).await;
+    let peer = crate::test_support::identity::endpoint("peer.example")
+        .local_authority()
+        .unwrap();
+    let request = || {
+        let mut req = Request::builder()
+            .uri("/app/hello/index.html")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(peer.clone());
+        req
+    };
+    let method = Method::Specified(http::Method::GET);
+    assert_eq!(
+        routes.clone().oneshot(request()).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    access
+        .set_policy(method.clone(), "/app/hello", Effect::Allow, Grantee::Named)
+        .await
+        .unwrap();
+    assert_eq!(
+        text(routes.clone().oneshot(request()).await.unwrap()).await,
+        b"preview"
+    );
+    access
+        .remove_policy(method, "/app/hello", Grantee::Named)
+        .await
+        .unwrap();
+    assert_eq!(
+        routes.oneshot(request()).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[test]
+fn a_provider_reloaded_after_authorization_requires_a_new_request() {
+    let (_temp, profile, sandbox) = environment();
+    let file = standard_files(&profile, "comm", "/rooms/read");
+    let endpoint = crate::test_support::identity::endpoint(profile.name());
+    load_standard_libraries(&profile, &sandbox).unwrap();
+    let mut call = request("/std/rooms/read", false);
+    let first = crate::sandbox::select_library(&sandbox.read().unwrap(), &endpoint, &call)
+        .unwrap()
+        .0;
+    call.extensions_mut()
+        .insert(crate::sandbox::AuthorizedProvider(first));
+    replace(&file, &wasm_with_path("1.0.0", "/rooms/read"));
+    load_standard_libraries(&profile, &sandbox).unwrap();
+    assert!(matches!(
+        crate::sandbox::select_library(&sandbox.read().unwrap(), &endpoint, &call),
+        Err(Error::PackagePolicy {
+            code: "package_changed_during_authorization",
+            ..
+        })
+    ));
 }

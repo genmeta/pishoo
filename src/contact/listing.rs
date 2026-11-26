@@ -118,11 +118,19 @@ pub(super) fn read(profile: &IdentityProfile, target: &str, kind: &str) -> Resul
         r#"{DIRECTORY}, page AS (
         SELECT * FROM filtered ORDER BY {sort} {order},name {order} LIMIT ?4 OFFSET ?5
     )
-    SELECT totals.total,p.*,coalesce(c.description,d.description) AS description,subject_text(c.subject_id) AS subject_id,c.alias AS contact_alias,c.status,c.expired_after,c.requests,c.grants,c.offers,
+    SELECT totals.total,p.*,coalesce(c.description,d.description) AS description,subject_text(c.subject_id) AS subject_id,c.alias AS contact_alias,c.status,c.expired_after,c.requests,
+           CASE WHEN c.status=2 THEN (SELECT json_group_object(api,json_object('allow',json(allowed),'review',json(reviewed),'deny',json(denied))) FROM
+             (SELECT api,json_group_array(method) FILTER (WHERE effect='allow') AS allowed,
+                         json_group_array(method) FILTER (WHERE effect='review') AS reviewed,
+                         json_group_array(method) FILTER (WHERE effect='deny') AS denied
+              FROM (SELECT api,method,effect FROM access_rules WHERE grantee_type=0 AND grantee=c.name ORDER BY api,method) GROUP BY api))
+           ELSE c.grants END AS grants,c.offers,
            EXISTS(SELECT 1 FROM contact_applications a WHERE a.applicant_name=p.name AND a.applicant_sid=c.subject_id) AS incoming,
+           a.application_id AS incoming_application_id,a.received_at AS incoming_received_at,a.expired_after AS incoming_valid_before,
            d.state,d.last_error,min(d.local_deadline,coalesce(d.remote_deadline,d.local_deadline)) AS deadline
     FROM (SELECT count(*) AS total FROM filtered) totals LEFT JOIN page p ON true
     LEFT JOIN contacts c ON c.id=p.id
+    LEFT JOIN contact_applications a ON a.applicant_name=p.name AND a.applicant_sid=c.subject_id AND a.status='pending'
     LEFT JOIN drafts.outbound_contact_request d ON d.application_id=p.application_id
     ORDER BY p.{sort} {order},p.name {order}"#
     );
@@ -196,6 +204,19 @@ fn item(row: &rusqlite::Row<'_>) -> Result<Value, Failure> {
             None => json!({}),
         };
     }
+    if let Some(id) = row
+        .get::<_, Option<String>>("incoming_application_id")
+        .map_err(storage)?
+    {
+        doc["incoming_application_id"] = json!(id);
+        doc["incoming_received_at"] =
+            json!(row.get::<_, i64>("incoming_received_at").map_err(storage)?);
+        doc["incoming_valid_before"] = json!(
+            row.get::<_, i64>("incoming_valid_before")
+                .map_err(storage)?
+        );
+        doc["application_id"] = json!(id);
+    }
     if let Some(application) = row
         .get::<_, Option<String>>("application_id")
         .map_err(storage)?
@@ -207,5 +228,6 @@ fn item(row: &rusqlite::Row<'_>) -> Result<Value, Failure> {
                 .map_err(storage)?
         );
     }
+    super::capabilities::incoming_request(&mut doc);
     Ok(doc)
 }

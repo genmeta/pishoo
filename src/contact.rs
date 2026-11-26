@@ -14,6 +14,7 @@ use tower::ServiceExt;
 
 mod access;
 mod capabilities;
+mod decisions;
 mod delivery;
 mod directory;
 mod listing;
@@ -138,40 +139,65 @@ pub(crate) fn contact_router(
     endpoint: dhttp::Endpoint,
     access: Arc<AccessService>,
 ) -> Router {
-    crate::routes::access_router(access.clone()).layer(axum::middleware::from_fn(
-        move |request: Request<Body>, next: axum::middleware::Next| {
-            let contact_db = contact_db.clone();
-            let (profile, endpoint, access) = (profile.clone(), endpoint.clone(), access.clone());
-            async move {
-                let path = request.uri().path();
-                if !((path == "/std/contact"
-                    && matches!(
-                        *request.method(),
-                        Method::GET | Method::POST | Method::PUT | Method::PATCH | Method::DELETE
-                    ))
-                    || path == "/std/contact/list" && *request.method() == Method::GET)
-                {
-                    return next.run(request).await;
-                }
-                let result = dispatch(contact_db, profile, endpoint, access, request).await;
-                let mut response = match result {
-                    Ok((204, _)) => StatusCode::NO_CONTENT.into_response(),
-                    Ok((status, value)) => {
-                        (StatusCode::from_u16(status).unwrap(), axum::Json(value)).into_response()
+    crate::routes::access_router(access.clone())
+        .route(
+            "/std/contact/{name}",
+            axum::routing::any(|| async { StatusCode::METHOD_NOT_ALLOWED }),
+        )
+        .route(
+            "/std/contact/requests/{id}",
+            axum::routing::any(|| async { StatusCode::METHOD_NOT_ALLOWED }),
+        )
+        .layer(axum::middleware::from_fn(
+            move |request: Request<Body>, next: axum::middleware::Next| {
+                let contact_db = contact_db.clone();
+                let (profile, endpoint, access) =
+                    (profile.clone(), endpoint.clone(), access.clone());
+                async move {
+                    let path = request.uri().path();
+                    if !((path == "/std/contact"
+                        && matches!(
+                            *request.method(),
+                            Method::GET
+                                | Method::POST
+                                | Method::PUT
+                                | Method::PATCH
+                                | Method::DELETE
+                        ))
+                        || path.starts_with("/std/contact/"))
+                    {
+                        return next.run(request).await;
                     }
-                    Err((status, message)) => (
-                        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                        axum::Json(json!({"error":message})),
-                    )
-                        .into_response(),
-                };
-                response
-                    .headers_mut()
-                    .insert(http::header::CACHE_CONTROL, "no-store".parse().unwrap());
-                response
-            }
-        },
-    ))
+                    let group_resource = path.starts_with("/std/contact/") && path.contains("~%23");
+                    let result = dispatch(contact_db, profile, endpoint, access, request).await;
+                    let mut response = match result {
+                        Ok((204, _)) => StatusCode::NO_CONTENT.into_response(),
+                        Ok((status, value)) => {
+                            let tag = group_resource.then(|| directory::etag(&value)).flatten();
+                            let mut response =
+                                (StatusCode::from_u16(status).unwrap(), axum::Json(value))
+                                    .into_response();
+                            if let Some(tag) = tag {
+                                response
+                                    .headers_mut()
+                                    .insert(http::header::ETAG, tag.parse().unwrap());
+                            }
+                            response
+                        }
+                        Err((status, message)) => (
+                            StatusCode::from_u16(status)
+                                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                            axum::Json(json!({"error":message})),
+                        )
+                            .into_response(),
+                    };
+                    response
+                        .headers_mut()
+                        .insert(http::header::CACHE_CONTROL, "no-store".parse().unwrap());
+                    response
+                }
+            },
+        ))
 }
 
 async fn dispatch(
@@ -209,16 +235,20 @@ async fn dispatch(
     {
         return Err(fail(403, "cross-origin request denied"));
     }
-    let target = request.uri().path_and_query().unwrap().as_str().to_owned();
-    let path = request.uri().path().to_owned();
+    let mut target = request.uri().path_and_query().unwrap().as_str().to_owned();
+    let mut path = request.uri().path().to_owned();
+    let if_match = request
+        .headers()
+        .get("if-match")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
     let request_query = request.uri().query().unwrap_or("").to_owned();
-    let bytes = axum::body::to_bytes(
+    let mut bytes = axum::body::to_bytes(
         request.into_body(),
         if matches!(
             method,
             Method::POST | Method::PUT | Method::PATCH | Method::DELETE
-        ) && path == "/std/contact"
-        {
+        ) {
             65536
         } else {
             0
@@ -226,6 +256,112 @@ async fn dispatch(
     )
     .await
     .map_err(|_| fail(400, "invalid request body"))?;
+    let resource = path
+        .strip_prefix("/std/contact/")
+        .filter(|p| *p != "list")
+        .map(str::to_owned);
+    if let Some(resource) = &resource {
+        if !request_query.is_empty() {
+            return Err(fail(400, "unexpected contact resource query"));
+        }
+        if let Some(id) = resource.strip_prefix("requests/") {
+            if !decisions::valid_id(id) {
+                return Err(fail(400, "invalid application_id"));
+            }
+            let person = visitor
+                .as_ref()
+                .ok_or_else(|| fail(403, "verified visitor required"))?;
+            return match method {
+                Method::GET => Ok((
+                    200,
+                    access::receipt(&access, &verified_owner, person, id).await?,
+                )),
+                Method::PATCH if owner && service.is_none() => {
+                    let body: Value =
+                        serde_json::from_slice(&bytes).map_err(|_| fail(400, "invalid JSON"))?;
+                    let applicant = decisions::decide(&access, id, &body).await?;
+                    Ok((
+                        200,
+                        access::receipt(&access, &verified_owner, &applicant, id).await?,
+                    ))
+                }
+                Method::PATCH => Err(fail(403, "verified owner required")),
+                _ => Err(fail(405, "method not allowed")),
+            };
+        }
+        if resource.contains('/') || resource == "requests" {
+            return Err(fail(404, "contact not found"));
+        }
+        let person = if resource.contains("~%23") {
+            directory::group_name(&resource.replace("~%23", "~#"))?
+        } else {
+            name(resource)?
+        };
+        target = format!("/std/contact?name={}", access::encoded(&person));
+        path = "/std/contact".to_owned();
+        if person.contains("~#") {
+            if method == Method::PUT {
+                let mut doc: Value =
+                    serde_json::from_slice(&bytes).map_err(|_| fail(400, "invalid JSON"))?;
+                if doc
+                    .as_object()
+                    .is_none_or(|o| o.len() != 1 || !o.contains_key("bound_subject"))
+                {
+                    return Err(fail(400, "expected bound_subject"));
+                }
+                doc["kind"] = "group".into();
+                doc["name"] = person.into();
+                return Ok((
+                    200,
+                    directory::put(&access, &doc, service.as_ref(), now()).await?,
+                ));
+            }
+            if method == Method::DELETE {
+                if !service
+                    .as_ref()
+                    .is_some_and(|s| directory::is_group_provider(&s.0))
+                {
+                    return Err(fail(403, "local_group_required"));
+                }
+                directory::remove(&access, &person, if_match.as_deref()).await?;
+                return Ok((204, Value::Null));
+            }
+        } else if method == Method::POST {
+            let mut doc: Value =
+                serde_json::from_slice(&bytes).map_err(|_| fail(400, "invalid JSON"))?;
+            let fields = doc
+                .as_object_mut()
+                .ok_or_else(|| fail(400, "invalid application"))?;
+            if fields.contains_key("from") || fields.contains_key("to") {
+                return Err(fail(400, "application identities come from the path"));
+            }
+            if owner && service.is_none() && !fields.contains_key("application_id") {
+                fields.insert("from".into(), endpoint.name().into());
+                fields.insert("to".into(), person.into());
+                fields
+                    .entry("requested_capabilities")
+                    .or_insert_with(|| json!([]));
+                fields
+                    .entry("offered_capabilities")
+                    .or_insert_with(|| json!([]));
+            } else {
+                if service.is_some() || visitor.as_ref().is_none_or(|v| v.name() != person) {
+                    return Err(fail(403, "applicant does not match the verified caller"));
+                }
+                fields.insert("from".into(), person.into());
+                fields.insert("to".into(), endpoint.name().into());
+                fields.entry("class").or_insert_with(|| json!("Human"));
+            }
+            bytes = serde_json::to_vec(&doc)
+                .map_err(|_| fail(400, "invalid application"))?
+                .into();
+        } else if method == Method::PUT {
+            return Err(fail(405, "method not allowed"));
+        }
+    }
+    if path == "/std/contact/list" && method != Method::GET {
+        return Err(fail(405, "method not allowed"));
+    }
     let native = |method: Method, uri: String, body: Option<Value>| {
         let access = access.clone();
         let visitor = visitor.clone();
@@ -357,10 +493,20 @@ async fn dispatch(
     if !["name", "group", "all"].contains(&kind.as_str()) {
         return Err(fail(400, "invalid contact kind"));
     }
+    if path == "/std/contact/list" && method == Method::GET {
+        // The incoming router has already consumed any one-shot permission for
+        // this list. Rechecking it here would spend a second approval.
+        let list = tokio::task::spawn_blocking(move || listing::read(&profile, &target, &kind))
+            .await
+            .map_err(|e| fail(500, e.to_string()))??;
+        return Ok((200, list));
+    }
     if kind != "name" && (!owner || service.is_some()) {
         return Err(fail(403, "verified owner required"));
     }
-    let manager = if let Some(visitor) = &visitor {
+    let manager = if method == Method::GET
+        && let Some(visitor) = &visitor
+    {
         matches!(
             access
                 .auth(
@@ -381,11 +527,35 @@ async fn dispatch(
     };
     if method == Method::GET {
         if !manager {
+            if service.is_none()
+                && let Some(person) = visitor.as_ref()
+                && let Some(other) = parameter(&target, "name")?
+            {
+                let other = name(&other)?;
+                let segment = crate::routes::identity_segment(&other, &["list", "requests"])
+                    .map_err(|_| fail(400, "invalid contact name"))?;
+                if person.name() != other
+                    && access::shared_detail(&access, person, &segment).await?
+                {
+                    let mut detail = contact(&access, &endpoint, &other).await?;
+                    detail["kind"] = "name".into();
+                    if resource.is_some()
+                        && detail["status"] == "active"
+                        && let Some(subject) = detail["subject_id"].as_str()
+                    {
+                        detail["granted_access"] =
+                            access::current_grants(access.database(), &other, subject.as_bytes())
+                                .await?;
+                    }
+                    return Ok((200, detail));
+                }
+            }
             return native(method, target, None).await;
         }
         if path == "/std/contact" {
             let name =
                 name(&parameter(&target, "name")?.ok_or_else(|| fail(400, "name is required"))?)?;
+            let applicant_name = name.clone();
             let draft = tokio::task::spawn_blocking(move || {
                 let db = contact_db
                     .lock()
@@ -400,6 +570,34 @@ async fn dispatch(
                     value["kind"] = "name".into();
                     (status, value)
                 });
+            let response = match response {
+                Ok((status, mut value)) => {
+                    if resource.is_some()
+                        && value["status"] == "active"
+                        && let Some(subject) = value["subject_id"].as_str()
+                    {
+                        value["granted_access"] = access::current_grants(
+                            access.database(),
+                            &applicant_name,
+                            subject.as_bytes(),
+                        )
+                        .await?;
+                    }
+                    if let Some(subject) = value["subject_id"].as_str()
+                        && let Some((id, received, deadline)) =
+                            decisions::pending_application(&access, &applicant_name, subject)
+                                .await?
+                    {
+                        value["incoming_application_id"] = id.clone().into();
+                        value["incoming_received_at"] = received.into();
+                        value["incoming_valid_before"] = deadline.into();
+                        value["application_id"] = id.into();
+                        capabilities::incoming_request(&mut value);
+                    }
+                    Ok((status, value))
+                }
+                error => error,
+            };
             return match (response, draft.as_ref()) {
                 (Ok((status, value)), Some(draft)) => Ok((status, project_contact(value, draft))),
                 (Err((404, _)), Some(draft)) if draft["_contact_id"].is_null() => {
@@ -408,12 +606,10 @@ async fn dispatch(
                 (response, _) => response,
             };
         }
-        let list = tokio::task::spawn_blocking(move || listing::read(&profile, &target, &kind))
-            .await
-            .map_err(|error| fail(500, error.to_string()))??;
-        return Ok((200, list));
+        return Err(fail(404, "contact not found"));
     }
     if method == Method::DELETE {
+        let batch = parameter(&target, "name")?.is_none();
         let names = if let Some(name_value) = parameter(&target, "name")? {
             if !bytes.is_empty() {
                 return Err(fail(400, "provide name or names, not both"));
@@ -439,6 +635,29 @@ async fn dispatch(
                 })
                 .collect::<Result<Vec<_>, _>>()?
         };
+        if batch {
+            let person = visitor
+                .as_ref()
+                .ok_or_else(|| fail(403, "verified visitor required"))?;
+            for name in &names {
+                let segment = crate::routes::identity_segment(name, &["list", "requests"])
+                    .map_err(|_| fail(400, "invalid name"))?;
+                let headers = access_control::Headers {
+                    method: Method::DELETE,
+                    path: format!("/std/contact/{segment}"),
+                    fields: Default::default(),
+                };
+                if !matches!(
+                    access
+                        .auth(headers, Some(person.name()), Some(person.subject_id()))
+                        .await
+                        .map_err(|e| fail(500, e.to_string()))?,
+                    access_control::AuthResult::Allowed
+                ) {
+                    return Err(fail(403, "contact deletion denied by ACL"));
+                }
+            }
+        }
         let db = database(&profile)?;
         db.execute_batch("BEGIN IMMEDIATE").map_err(storage)?;
         let mut persisted = Vec::new();
@@ -490,19 +709,24 @@ async fn dispatch(
             if to != endpoint.name() {
                 return Err(fail(400, "contact recipient does not match this identity"));
             }
-            return native(Method::POST, "/std/contact".into(), Some(doc)).await;
+            let applicant = visitor
+                .as_ref()
+                .filter(|p| p.name() == from)
+                .ok_or_else(|| fail(403, "verified applicant required"))?;
+            let id = string(&doc, "application_id")?.to_owned();
+            decisions::install_application_trigger(&access).await?;
+            let (status, _) = native(Method::POST, "/std/contact".into(), Some(doc)).await?;
+            return Ok((
+                status,
+                access::receipt(&access, &verified_owner, applicant, &id).await?,
+            ));
         }
-        if service.is_some() {
-            return Err(fail(403, "direct owner required"));
+        if service.is_some() || !owner {
+            return Err(fail(403, "verified owner required"));
         }
-        let verified_owner = access::owner(&endpoint)?;
         let visitor = visitor
             .as_ref()
-            .filter(|visitor| {
-                visitor.name() == verified_owner.name()
-                    && visitor.subject_id() == verified_owner.subject_id()
-            })
-            .ok_or_else(|| fail(403, "verified owner required"))?;
+            .ok_or_else(|| fail(403, "verified visitor required"))?;
         if doc.as_object().is_none_or(|object| {
             object.keys().any(|key| {
                 ![
@@ -526,6 +750,15 @@ async fn dispatch(
         let description = string(&doc, "description")?;
         if description.chars().count() > 80 || description.chars().any(char::is_control) {
             return Err(fail(400, "invalid description"));
+        }
+        if resource.is_some() {
+            let db = database(&profile)?;
+            let pending:Option<(String,String)>=db.query_row("SELECT application_id,state FROM outbound_contact_request
+                WHERE target_name=? AND state IN ('queued','pending') AND min(local_deadline,coalesce(remote_deadline,local_deadline))>unixepoch()",
+                [&target],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
+            if let Some((id, state)) = pending {
+                return Ok((202, json!({"application_id":id,"state":state})));
+            }
         }
         let existing = match contact(&access, &endpoint, &target).await {
             Ok(contact) => Some(contact),
@@ -558,7 +791,8 @@ async fn dispatch(
             {
                 Ok((_, catalog, sid)) => {
                     catalog_subject = Some(sid);
-                    let ops = capabilities::expand(&catalog, selection)?;
+                    let mut ops = capabilities::expand(&catalog, selection)?;
+                    capabilities::bind_peer(&mut ops, endpoint.name())?;
                     json!({"groups":ops.iter().map(|c|&c["id"]).collect::<Vec<_>>(),"access":capabilities::requested(&ops)})
                 }
                 Err(e) if matches!(e.0, 502 | 503 | 504) && expected.is_some() => {
@@ -577,13 +811,14 @@ async fn dispatch(
             }
         };
         let valid_before = request_expiry(&doc)?;
-        let offered_capabilities = selected(
+        let mut offered_capabilities = selected(
             &profile,
             &endpoint,
             &doc["offered_capabilities"],
             endpoint.name(),
         )
         .await?;
+        capabilities::bind_peer(&mut offered_capabilities, &target)?;
         let operations = if offered_capabilities.is_empty() {
             Vec::new()
         } else {
@@ -615,6 +850,16 @@ async fn dispatch(
         let pending:Option<String>=db.query_row("SELECT application_id FROM outbound_contact_request WHERE target_name=?1 AND state IN ('queued','pending')",
             [&target],|r|r.get(0)).optional().map_err(storage)?;
         if let Some(id) = pending {
+            if resource.is_some() {
+                let state: String = db
+                    .query_row(
+                        "SELECT state FROM outbound_contact_request WHERE application_id=?",
+                        [&id],
+                        |r| r.get(0),
+                    )
+                    .map_err(storage)?;
+                return Ok((202, json!({"application_id":id,"state":state})));
+            }
             return Ok((
                 409,
                 json!({"error":"contact request already pending","application_id":id}),
@@ -654,6 +899,12 @@ async fn dispatch(
         let draft =
             outbound_request(&db, &target)?.ok_or_else(|| fail(500, "missing inserted request"))?;
         db.execute_batch("COMMIT").map_err(storage)?;
+        if resource.is_some() {
+            return Ok((
+                202,
+                json!({"application_id":draft["application_id"],"state":"queued"}),
+            ));
+        }
         return Ok((202, project_contact(current.unwrap_or(Value::Null), &draft)));
     }
     Err(fail(405, "method not allowed"))

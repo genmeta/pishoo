@@ -59,6 +59,9 @@ pub(crate) fn capabilities_router(profile: IdentityProfile) -> Router {
                     http::HeaderValue::from_static("no-store"),
                 );
                 response
+                    .headers_mut()
+                    .insert("pishoo-contact-resources", "1".parse().unwrap());
+                response
             }
         })
         .put(write.clone())
