@@ -597,35 +597,14 @@ async fn contact_submission_without_capabilities_queues_without_contacting_the_p
         )
         .await
         .unwrap();
-    for _ in 0..2 {
-        let response = router
-            .clone()
-            .oneshot(request(target_path, application.clone()))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-    }
-    assert_eq!(queued.query_row("SELECT count(*) FROM outbound_contact_request WHERE target_name='one.ai.dhttp.net' AND state='queued'", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
-    directory::put(&access, &group_entry(), Some(&group_service()), now())
+    // Even a named root grant does not turn the authenticated peer into this owner.
+    let response = router
+        .clone()
+        .oneshot(request(target_path, application.clone()))
         .await
         .unwrap();
-    let change_note = Request::patch("/std/contact/alice~%23dev")
-        .extension(manager.local_authority().unwrap().clone())
-        .body(Body::from(r#"{"alias":"Work"}"#))
-        .unwrap();
-    assert_eq!(
-        router.clone().oneshot(change_note).await.unwrap().status(),
-        StatusCode::OK
-    );
-    let group_detail = Request::get("/std/contact/alice~%23dev")
-        .extension(manager.local_authority().unwrap().clone())
-        .body(Body::empty())
-        .unwrap();
-    let response = router.clone().oneshot(group_detail).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let group: Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(group["alias"], "Work");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(queued.query_row("SELECT count(*) FROM outbound_contact_request WHERE target_name='one.ai.dhttp.net'", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
     let spoofed = json!({"application_id":"a".repeat(64),"description":"test"});
     assert_eq!(
         router
