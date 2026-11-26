@@ -784,7 +784,9 @@ async fn message_file_acl_probe_requires_the_actual_local_service_and_never_runs
     Arc::get_mut(&mut source).unwrap().id = "dev.genmeta.tech.dhttp.net/std/comm/message".into();
     let path = "/std/comm/message/zero.ai/file/001";
     let app = axum::Router::new()
-        .fallback(axum::routing::any(|| async { http::StatusCode::IM_A_TEAPOT }))
+        .fallback(axum::routing::any(|| async {
+            http::StatusCode::IM_A_TEAPOT
+        }))
         .layer(axum::middleware::from_fn_with_state(
             access.clone(),
             crate::routes::authorize,

@@ -1501,6 +1501,35 @@ async fn active_directory_and_detail_report_current_grants_after_revocation() {
         )
         .await
         .unwrap();
+    let viewer = access_control::Visitor::new(
+        "viewer.dhttp.net",
+        access_control::SubjectId::new(b"viewer").unwrap(),
+    );
+    let detail_path = "/std/contact/zero.ai";
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            detail_path,
+            access_control::Effect::Allow,
+            access_control::Grantee::All,
+        )
+        .await
+        .unwrap();
+    let shared = app
+        .clone()
+        .oneshot(
+            Request::get(detail_path)
+                .extension(viewer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shared.status(), 200);
+    let detail: Value =
+        serde_json::from_slice(&shared.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(detail["name"], peer);
+    assert_eq!(detail["granted_access"][path]["allow"], json!(["POST"]));
     for granted in [true, false] {
         if !granted {
             access
@@ -1553,5 +1582,135 @@ fn received_legacy_permission_templates_display_only_the_applicants_resources() 
     assert_eq!(
         row["requested_access"],
         json!({"/std/comm/message/zero.ai":["POST"],"/std/comm/message/zero.ai/file":["HEAD","GET"]})
+    );
+}
+
+#[tokio::test]
+async fn named_group_contact_requires_the_service_and_current_etag_for_removal() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let endpoint = crate::test_support::identity::endpoint("alice.dhttp.net");
+    let caller = owner(&endpoint).unwrap();
+    let access = Arc::new(
+        AccessService::load_from_db("sqlite::memory:", endpoint.name(), caller.subject_id())
+            .await
+            .unwrap(),
+    );
+    let app = contact_router(
+        Arc::new(Mutex::new(database(&profile).unwrap())),
+        profile,
+        endpoint,
+        access,
+    );
+    // Attach test metadata to the HTTP component the sandbox uses in its own tests.
+    let mut bytes =
+        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm").to_vec();
+    let metadata = wat::parse_str(r#"(component (@custom "pishoo:openapi" "{\"openapi\":\"3.1.0\",\"info\":{\"title\":\"Test\",\"version\":\"1.0.0\"},\"paths\":{}}"))"#).unwrap();
+    bytes.extend_from_slice(&metadata[8..]);
+    let service = Arc::new(
+        crate::sandbox::Lib::load(
+            Arc::new(crate::WasmRuntime::new().unwrap()),
+            group_service().0,
+            &bytes,
+            &root.path().join("group"),
+        )
+        .unwrap(),
+    );
+    let call = |method, as_service, etag: Option<&str>, body: Value| {
+        let mut request = Request::builder()
+            .method(method)
+            .uri("/std/contact/alice~%23dev")
+            .extension(caller.clone());
+        if as_service {
+            request = request.extension(service.clone());
+        }
+        if let Some(value) = etag {
+            request = request.header("if-match", value);
+        }
+        app.clone().oneshot(
+            request
+                .body(if body.is_null() {
+                    Body::empty()
+                } else {
+                    Body::from(body.to_string())
+                })
+                .unwrap(),
+        )
+    };
+    let binding = json!({"bound_subject":"a".repeat(64)});
+    assert_eq!(
+        call(Method::PUT, false, None, binding.clone())
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    let created = call(Method::PUT, true, None, binding.clone())
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 200);
+    let tag = created.headers()["etag"].to_str().unwrap().to_owned();
+    let alias = call(Method::PATCH, false, None, json!({"alias":"Engineering"}))
+        .await
+        .unwrap();
+    assert_eq!(alias.status(), 200);
+    assert_eq!(alias.headers()["etag"], tag.as_str());
+    let detail = call(Method::GET, false, None, Value::Null).await.unwrap();
+    assert_eq!(detail.status(), 200);
+    let doc: Value =
+        serde_json::from_slice(&detail.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(doc["alias"], "Engineering");
+    for (as_service, precondition, status) in [
+        (false, Some(tag.as_str()), 403),
+        (true, None, 428),
+        (true, Some("\"old\""), 412),
+        (true, Some(tag.as_str()), 204),
+    ] {
+        assert_eq!(
+            call(Method::DELETE, as_service, precondition, Value::Null)
+                .await
+                .unwrap()
+                .status(),
+            status
+        );
+    }
+    assert_eq!(
+        call(Method::GET, false, None, Value::Null)
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    let recreated = call(Method::PUT, true, None, binding).await.unwrap();
+    assert_eq!(recreated.status(), 200);
+    assert_ne!(recreated.headers()["etag"], tag.as_str());
+    assert_eq!(
+        call(Method::DELETE, true, Some(&tag), Value::Null)
+            .await
+            .unwrap()
+            .status(),
+        412
+    );
+}
+
+#[test]
+fn catalog_peer_binding_preserves_concrete_message_and_file_permissions() {
+    let mut groups = [json!({"endpoints":[
+        {"method":"POST","path":"/std/comm/message"},
+        {"method":"POST","path":"/std/comm/message/{name}"},
+        {"method":"HEAD","path":"/std/comm/message/{name}/file/{file_id}"},
+        {"method":"GET","path":"/std/comm/message/{name}/file/{file_id}"},
+        {"method":"GET","path":"/std/comm/group/{topic}/member/{name}"},
+        {"method":"GET","path":"/std/profile/avatar"}
+    ]})];
+    capabilities::bind_peer(&mut groups, "history.dhttp.net").unwrap();
+    assert_eq!(
+        groups[0]["endpoints"],
+        json!([
+            {"method":"POST","path":"/std/comm/message/history.dhttp.net"},
+            {"method":"HEAD","path":"/std/comm/message/history.dhttp.net/file"},
+            {"method":"GET","path":"/std/comm/message/history.dhttp.net/file"},
+            {"method":"GET","path":"/std/profile/avatar"}
+        ])
     );
 }

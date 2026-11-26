@@ -2034,7 +2034,9 @@ pub(super) fn install_packages(
     }
     for lib in libs.values() {
         super::access_migrations::validate_dependency(lib, |key| {
-            libs.get(key).or_else(|| sandbox.versions.get(key)).map(AsRef::as_ref)
+            libs.get(key)
+                .or_else(|| sandbox.versions.get(key))
+                .map(AsRef::as_ref)
         })?;
     }
     let entry_names = changed

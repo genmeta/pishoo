@@ -3,10 +3,12 @@
 //! Each directory contains profile/, message/ and group/ with component.wasm, openapi.json
 //! and manifest.json (package metadata and dependencies). Point each Workspace development
 //! server at its printed backend port and set VITE_PISHOO_IDENTITY to the matching full name.
+use std::path::Path;
+
+use serde_json::{Value, json};
+
 use super::*;
 use crate::package::tests::{package_fixture, publisher};
-use serde_json::{Value, json};
-use std::path::Path;
 
 fn install_services(artifacts: &Path, profile: &IdentityProfile, runtime: Arc<WasmRuntime>) {
     let author = "dev.genmeta.tech.dhttp.net";

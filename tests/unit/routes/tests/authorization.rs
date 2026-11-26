@@ -1119,3 +1119,332 @@ async fn check_stream_revocation(path: &'static str, grant: &str) {
     assert!(body.frame().await.is_none());
     assert_eq!(app.oneshot(request()).await.unwrap().status(), 403);
 }
+
+#[tokio::test]
+async fn legacy_group_actions_select_the_matching_membership_resource() {
+    let endpoint = crate::test_support::identity::endpoint("owner.dhttp.net");
+    let actor = Visitor::new("alice.dhttp.net", SubjectId::new(b"alice").unwrap());
+    let group = "/std/comm/group/owner~%23dev";
+    for (method, path, body, expected_method, expected_path) in [
+        (
+            "GET",
+            "?membership=owner~%23dev",
+            "",
+            "GET",
+            format!("{group}/member/owner"),
+        ),
+        (
+            "POST",
+            "",
+            r#"{"type":"request_join","topic":"owner~#dev"}"#,
+            "PUT",
+            format!("{group}/member/owner"),
+        ),
+        (
+            "GET",
+            "/dev/member/list",
+            "",
+            "GET",
+            format!("{group}/member"),
+        ),
+        (
+            "GET",
+            "/dev/member/list.dhttp.net/avatar",
+            "",
+            "GET",
+            format!("{group}/profile/list.dhttp.net/avatar"),
+        ),
+        (
+            "GET",
+            "/dev/member",
+            "",
+            "GET",
+            format!("{group}/member/alice"),
+        ),
+        ("GET", "/dev", "", "GET", format!("{group}/member/alice")),
+        ("GET", "/dev/avatar", "", "GET", format!("{group}/avatar")),
+        ("DELETE", "/dev", "", "DELETE", group.into()),
+        ("POST", "/dev", r#"{"type":"create"}"#, "PUT", group.into()),
+        (
+            "POST",
+            "/dev/broadcast",
+            "{}",
+            "POST",
+            "/std/comm/message/owner~%23dev".into(),
+        ),
+        (
+            "POST",
+            "/dev/member",
+            r#"{"type":"apply"}"#,
+            "PUT",
+            format!("{group}/member/alice"),
+        ),
+        (
+            "POST",
+            "/dev/member",
+            r#"{"type":"invite","group":"other~#room","name":"bob"}"#,
+            "PUT",
+            "/std/comm/group/other~%23room/member/bob".into(),
+        ),
+        (
+            "POST",
+            "/dev/member",
+            r#"{"type":"resend","name":"bob"}"#,
+            "PUT",
+            format!("{group}/member/bob"),
+        ),
+        (
+            "POST",
+            "/dev/member",
+            r#"{"type":"remove","name":"bob"}"#,
+            "DELETE",
+            format!("{group}/member/bob"),
+        ),
+        (
+            "POST",
+            "/dev/member",
+            r#"{"type":"leave"}"#,
+            "DELETE",
+            format!("{group}/member/alice"),
+        ),
+        (
+            "POST",
+            "/dev/member",
+            r#"{"type":"nickname"}"#,
+            "PATCH",
+            format!("{group}/member/alice"),
+        ),
+    ] {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(format!("/std/comm/group{path}"))
+            .extension(endpoint.clone())
+            .body(AxumBody::from(body))
+            .unwrap();
+        let selected = resource::operation(&mut request, Some(&actor), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            selected,
+            Some((expected_method.parse().unwrap(), expected_path)),
+            "{path} {body}"
+        );
+        assert_eq!(
+            request
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
+            body.as_bytes()
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_conversation_actions_use_the_actor_and_file_operation() {
+    let endpoint = crate::test_support::identity::endpoint("owner.dhttp.net");
+    for (actor, body, method, tail) in [
+        (
+            "owner.dhttp.net",
+            r#"{"type":"text","to":"bob"}"#,
+            "POST",
+            "bob",
+        ),
+        (
+            "alice.dhttp.net",
+            r#"{"type":"image","to":"owner"}"#,
+            "POST",
+            "alice",
+        ),
+        (
+            "alice.dhttp.net",
+            r#"{"type":"file","from":"owner~#dev"}"#,
+            "POST",
+            "owner~%23dev",
+        ),
+        (
+            "owner.dhttp.net",
+            r#"{"type":"group_history","topic":"owner~#dev"}"#,
+            "GET",
+            "owner~%23dev",
+        ),
+        (
+            "alice.dhttp.net",
+            r#"{"type":"group_push","from":"owner~#dev"}"#,
+            "POST",
+            "owner~%23dev",
+        ),
+        (
+            "owner.dhttp.net",
+            r#"{"type":"retry","to":"alice"}"#,
+            "POST",
+            "alice",
+        ),
+        (
+            "owner.dhttp.net",
+            r#"{"type":"upload","peer":"alice"}"#,
+            "POST",
+            "alice/file",
+        ),
+        (
+            "alice.dhttp.net",
+            r#"{"type":"file_read","id":"abc"}"#,
+            "GET",
+            "alice/file/abc",
+        ),
+        (
+            "alice.dhttp.net",
+            r#"{"type":"file_info","id":"abc"}"#,
+            "HEAD",
+            "alice/file/abc",
+        ),
+    ] {
+        let visitor = Visitor::new(actor, SubjectId::new(b"actor").unwrap());
+        let mut request = Request::post("/std/comm/message")
+            .extension(endpoint.clone())
+            .body(AxumBody::from(body))
+            .unwrap();
+        assert_eq!(
+            resource::operation(&mut request, Some(&visitor), false)
+                .await
+                .unwrap(),
+            Some((method.parse().unwrap(), format!("/std/comm/message/{tail}"))),
+            "{body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn contact_operations_preserve_receipts_and_authenticated_names() {
+    let endpoint = crate::test_support::identity::endpoint("owner.dhttp.net");
+    for (method, path, body, actor, expected) in [
+        (
+            "GET",
+            "/std/contact?application_id=receipt",
+            "",
+            "alice.dhttp.net",
+            "/std/contact/requests/receipt",
+        ),
+        (
+            "PATCH",
+            "/std/contact?name=Bob.dhttp.net",
+            "{}",
+            "owner.dhttp.net",
+            "/std/contact/bob",
+        ),
+        (
+            "POST",
+            "/std/contact",
+            r#"{"to":"Bob.dhttp.net"}"#,
+            "owner.dhttp.net",
+            "/std/contact/bob",
+        ),
+        (
+            "POST",
+            "/std/contact",
+            r#"{"to":"owner"}"#,
+            "alice.dhttp.net",
+            "/std/contact/alice",
+        ),
+        (
+            "GET",
+            "/std/comm/message/list?view=conversations",
+            "",
+            "owner.dhttp.net",
+            "/std/comm/message/list",
+        ),
+        (
+            "GET",
+            "/std/comm/message/list?name=Bob.dhttp.net",
+            "",
+            "owner.dhttp.net",
+            "/std/comm/message/bob",
+        ),
+    ] {
+        let visitor = Visitor::new(actor, SubjectId::new(b"caller").unwrap());
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .extension(endpoint.clone())
+            .body(AxumBody::from(body))
+            .unwrap();
+        assert_eq!(
+            resource::operation(&mut request, Some(&visitor), false)
+                .await
+                .unwrap(),
+            Some((method.parse().unwrap(), expected.into()))
+        );
+    }
+    let mut ambiguous = Request::get("/std/contact?name=alice&name=bob")
+        .body(AxumBody::empty())
+        .unwrap();
+    assert!(
+        resource::operation(&mut ambiguous, None, false)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn message_file_resolution_is_deferred_to_the_declared_provider() {
+    for kind in [
+        "file_read",
+        "file_info",
+        "retry",
+        "upload_status",
+        "group_attachment_offer",
+    ] {
+        let mut request = Request::post("/std/comm/message")
+            .body(AxumBody::from(serde_json::json!({"type":kind}).to_string()))
+            .unwrap();
+        assert_eq!(
+            resource::operation(&mut request, None, true).await.unwrap(),
+            None
+        );
+    }
+    let mut multipart = Request::post("/std/comm/message")
+        .header(header::CONTENT_TYPE, "multipart/form-data; boundary=abc")
+        .body(AxumBody::empty())
+        .unwrap();
+    assert_eq!(
+        resource::operation(&mut multipart, None, true)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn forward_validates_the_local_identity_before_dialing() {
+    let endpoint = crate::test_support::identity::endpoint("owner.dhttp.net");
+    let other = crate::test_support::identity::endpoint("other.dhttp.net");
+    let path = "/std/forward/destination/std/contact/list";
+    let mismatched = Request::get(path)
+        .extension(other.local_authority().unwrap())
+        .body(AxumBody::empty())
+        .unwrap();
+    assert_eq!(
+        outbound::forward_dhttp(endpoint.clone(), mismatched)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let trailers = Request::get(path)
+        .extension(endpoint.local_authority().unwrap())
+        .header(header::TRAILER, "digest")
+        .body(AxumBody::empty())
+        .unwrap();
+    assert_eq!(
+        outbound::forward_dhttp(endpoint.clone(), trailers)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let anonymous = anonymous_request();
+    assert_eq!(
+        outbound::forward_dhttp(endpoint, anonymous).await.status(),
+        StatusCode::FORBIDDEN
+    );
+}
