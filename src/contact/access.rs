@@ -21,6 +21,32 @@ pub(super) fn owner(endpoint: &dhttp::Endpoint) -> Result<access_control::Visito
             .map_err(|_| fail(500, "invalid local subject identity"))?,
     ))
 }
+/// The public contact POST accepts peer applications too. Only a bound
+/// workspace delegate may use that same route to initiate an outbound one.
+pub(super) async fn has_full_access(
+    access: &AccessService,
+    visitor: &access_control::Visitor,
+) -> Result<bool, Failure> {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+    let row = access
+        .database()
+        .query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            "SELECT EXISTS (SELECT 1 FROM access_rules r JOIN contacts c ON c.name=r.grantee
+         WHERE r.method='*' AND r.api='/' AND r.effect='allow' AND r.grantee_type=0
+         AND c.name=?1 AND c.subject_id=?2 AND c.status=2) AS allowed",
+            [
+                visitor.name().into(),
+                visitor.subject_id().as_bytes().to_vec().into(),
+            ],
+        ))
+        .await
+        .map_err(|e| fail(500, e.to_string()))?
+        .ok_or_else(|| fail(500, "missing workspace grant result"))?;
+    row.try_get("", "allowed")
+        .map_err(|e| fail(500, e.to_string()))
+}
+
 pub(super) async fn local_api(
     access: &Arc<AccessService>,
     endpoint: &dhttp::Endpoint,

@@ -1,0 +1,34 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Group",
+    "version": "0.1.5",
+    "description": "One membership table. Contact profiles; Message delivery, history, SSE and attachments."
+  },
+  "x-pishoo-access-migrations": [
+    {
+      "source": {
+        "package": "std/comm/group",
+        "version": "0.1.4",
+        "method": "POST",
+        "path": "/comm/group/{topic}/broadcast"
+      },
+      "target": {
+        "package": "std/comm/message",
+        "version": "0.3.8",
+        "operationId": "submitConversationMessage"
+      },
+      "role": "active_group_member",
+      "bindings": {
+        "name": {
+          "owner": "resource_owner",
+          "owner_subject": "local_identity.subject",
+          "topic": "path.topic"
+        },
+        "speaker": "authenticated_peer",
+        "member_period": "active_membership.period"
+      }
+    }
+  ],
+  "paths": {}
+}

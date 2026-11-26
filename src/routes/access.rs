@@ -105,20 +105,24 @@ pub(crate) async fn authorize(
                 .get::<Arc<std::sync::RwLock<crate::sandbox::Sandbox>>>()
         })
         .zip(request.extensions().get::<dhttp::Endpoint>())
-        .is_some_and(|(sandbox, endpoint)| {
+        .and_then(|(sandbox, endpoint)| {
             crate::sandbox::select_library(&sandbox.read().unwrap(), endpoint, &request)
                 .ok()
-                .is_some_and(|(lib, _)| {
-                    standard_read && standard(&lib.id)
-                        || lib
-                            .openapi
-                            .extensions
-                            .get("pishoo-service-authorization")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(true)
-                })
+                .map(|(lib, _)| lib)
+        })
+        .filter(|lib| {
+            standard_read && standard(&lib.id)
+                || lib
+                    .openapi
+                    .extensions
+                    .get("pishoo-service-authorization")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
         });
-    if service_authorized_provider && !probe {
+    if let Some(provider) = service_authorized_provider.filter(|_| !probe) {
+        request
+            .extensions_mut()
+            .insert(crate::sandbox::AuthorizedProvider(provider));
         return next.run(request).await;
     }
     // Contact authorizes directory writes in its own handler.
@@ -176,63 +180,81 @@ pub(crate) async fn authorize(
         .map(|name| format!("/app/{name}"));
     let app_head = app.is_some() && request.method() == http::Method::HEAD;
     let mut compatibility = None;
-    let (method, path) =
-        if let Some(app) = app {
-            (http::Method::GET, app)
-        } else {
-            let resolves_files = !probe
-                && request.method() == http::Method::POST
-                && request.uri().path() == "/std/comm/message"
-                && request
-                    .extensions()
-                    .get::<Arc<std::sync::RwLock<crate::sandbox::Sandbox>>>()
-                    .zip(request.extensions().get::<dhttp::Endpoint>())
-                    .is_some_and(|(sandbox, endpoint)| {
-                        crate::sandbox::select_library(&sandbox.read().unwrap(), endpoint, &request)
-                            .is_ok_and(|(lib, _)| {
-                                lib.id.split_once('/').is_some_and(|(author, name)| {
-                                    crate::package::is_standard_author(author)
-                                        && name == "std/comm/message"
-                                }) && lib
-                                    .openapi
-                                    .extensions
-                                    .get("pishoo-resource-acl")
-                                    .and_then(serde_json::Value::as_bool)
-                                    == Some(true)
-                            })
-                    });
-            let (method, path) =
-                match super::resource::operation(&mut request, visitor.as_ref(), resolves_files)
-                    .await
-                {
-                    Ok(Some(op)) => op,
-                    Ok(None) => return next.run(request).await,
-                    Err(error) => return reject(error),
-                };
-            let local = request
+    let (method, path) = if let Some(app) = app {
+        (http::Method::GET, app)
+    } else {
+        let file_provider = if !probe
+            && request.method() == http::Method::POST
+            && request.uri().path() == "/std/comm/message"
+        {
+            request
                 .extensions()
-                .get::<dhttp::Endpoint>()
-                .map(dhttp::Endpoint::name);
-            let original = (method, path);
-            match super::resource::compatibility_operation(
-                &access,
-                original.0.clone(),
-                original.1.clone(),
-                visitor.as_ref(),
-                local,
-            )
-            .await
-            {
-                Ok(op) => {
-                    if op != original {
-                        compatibility = Some((original, op.clone()));
-                    }
-                    op
-                }
-                Err(error) => return reject(error),
-            }
+                .get::<Arc<std::sync::RwLock<crate::sandbox::Sandbox>>>()
+                .zip(request.extensions().get::<dhttp::Endpoint>())
+                .and_then(|(sandbox, endpoint)| {
+                    crate::sandbox::select_library(&sandbox.read().unwrap(), endpoint, &request)
+                        .ok()
+                })
+                .map(|(lib, _)| lib)
+                .filter(|lib| {
+                    lib.id.split_once('/').is_some_and(|(author, name)| {
+                        crate::package::is_standard_author(author) && name == "std/comm/message"
+                    }) && lib
+                        .openapi
+                        .extensions
+                        .get("pishoo-resource-acl")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                })
+        } else {
+            None
         };
-    let stream = if method == http::Method::GET && path == "/std/comm/message/history" && !probe {
+        let (method, path) = match super::resource::operation(
+            &mut request,
+            visitor.as_ref(),
+            file_provider.is_some(),
+        )
+        .await
+        {
+            Ok(Some(op)) => op,
+            Ok(None) => {
+                let Some(provider) = file_provider else {
+                    return reject(Error::Denied);
+                };
+                request
+                    .extensions_mut()
+                    .insert(crate::sandbox::AuthorizedProvider(provider));
+                return next.run(request).await;
+            }
+            Err(error) => return reject(error),
+        };
+        let local = request
+            .extensions()
+            .get::<dhttp::Endpoint>()
+            .map(dhttp::Endpoint::name);
+        let original = (method, path);
+        match super::resource::compatibility_operation(
+            &access,
+            original.0.clone(),
+            original.1.clone(),
+            visitor.as_ref(),
+            local,
+        )
+        .await
+        {
+            Ok(op) => {
+                if op != original {
+                    compatibility = Some((original, op.clone()));
+                }
+                op
+            }
+            Err(error) => return reject(error),
+        }
+    };
+    let stream = if method == http::Method::GET
+        && (path == "/std/comm/message/history" || path.starts_with("/std/forward/"))
+        && !probe
+    {
         match stream_rules(&access, &path).await {
             Ok(snapshot) => Some((path.clone(), snapshot)),
             Err(error) => return reject(Error::InvalidConfig(error.to_string())),

@@ -23,6 +23,10 @@ mod runtime;
 
 use crate::package::{app_file, installed_apps, lib_root, package_name};
 
+/// The exact provider whose OpenAPI authorized a guest-side access check.
+#[derive(Clone)]
+pub(crate) struct AuthorizedProvider(pub(crate) Arc<Lib>);
+
 pub(crate) struct Sandbox {
     pub(crate) libs: HashMap<String, Arc<Lib>>,
     pub(crate) versions: HashMap<(String, String), Arc<Lib>>,
@@ -367,7 +371,7 @@ pub(crate) fn requested_version(request: &http::Request<axum::body::Body>) -> Re
 
 pub(crate) fn select_library(
     sandbox: &Sandbox,
-    endpoint: &dhttp::Endpoint,
+    _endpoint: &dhttp::Endpoint,
     request: &http::Request<axum::body::Body>,
 ) -> Result<(Arc<Lib>, String)> {
     let path = request.uri().path();
@@ -469,8 +473,15 @@ pub(crate) fn select_library(
             status: http::StatusCode::SERVICE_UNAVAILABLE,
         })?
     };
-    if preview.is_some_and(|preview| Arc::ptr_eq(preview, lib)) {
-        crate::package::require_owner(endpoint, request)?;
+    if request
+        .extensions()
+        .get::<AuthorizedProvider>()
+        .is_some_and(|checked| !Arc::ptr_eq(&checked.0, lib))
+    {
+        return Err(Error::PackagePolicy {
+            code: "package_changed_during_authorization",
+            status: http::StatusCode::CONFLICT,
+        });
     }
     let lib = Arc::clone(lib);
     let path = if standard {

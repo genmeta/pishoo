@@ -224,6 +224,15 @@ async fn dispatch(
     let owner = visitor.as_ref().is_some_and(|v| {
         v.name() == verified_owner.name() && v.subject_id() == verified_owner.subject_id()
     });
+    let workspace_manager = if owner {
+        true
+    } else if service.is_none()
+        && let Some(person) = visitor.as_ref()
+    {
+        access::has_full_access(&access, person).await?
+    } else {
+        false
+    };
     let method = request.method().clone();
     if matches!(
         method,
@@ -276,7 +285,7 @@ async fn dispatch(
                     200,
                     access::receipt(&access, &verified_owner, person, id).await?,
                 )),
-                Method::PATCH if owner && service.is_none() => {
+                Method::PATCH if workspace_manager && service.is_none() => {
                     let body: Value =
                         serde_json::from_slice(&bytes).map_err(|_| fail(400, "invalid JSON"))?;
                     let applicant = decisions::decide(&access, id, &body).await?;
@@ -285,7 +294,7 @@ async fn dispatch(
                         access::receipt(&access, &verified_owner, &applicant, id).await?,
                     ))
                 }
-                Method::PATCH => Err(fail(403, "direct owner required")),
+                Method::PATCH => Err(fail(403, "workspace contact management required")),
                 _ => Err(fail(405, "method not allowed")),
             };
         }
@@ -335,7 +344,7 @@ async fn dispatch(
             if fields.contains_key("from") || fields.contains_key("to") {
                 return Err(fail(400, "application identities come from the path"));
             }
-            if owner && service.is_none() {
+            if workspace_manager && service.is_none() && !fields.contains_key("application_id") {
                 fields.insert("from".into(), endpoint.name().into());
                 fields.insert("to".into(), person.into());
                 fields
@@ -451,13 +460,13 @@ async fn dispatch(
     if path == "/std/contact"
         && let Some(target) = directory_target
     {
-        if service.is_some() || !owner {
+        if service.is_some() || !workspace_manager {
             if method != Method::GET {
-                return Err(fail(403, "verified owner required"));
+                return Err(fail(403, "workspace contact management required"));
             }
             let source = service
                 .as_ref()
-                .ok_or_else(|| fail(403, "verified owner required"))?;
+                .ok_or_else(|| fail(403, "workspace contact management required"))?;
             if !source.0.split_once('/').is_some_and(|(author, package)| {
                 crate::package::is_standard_author(author) && package.starts_with("std/")
             }) {
@@ -493,9 +502,6 @@ async fn dispatch(
     if !["name", "group", "all"].contains(&kind.as_str()) {
         return Err(fail(400, "invalid contact kind"));
     }
-    if kind != "name" && (!owner || service.is_some()) {
-        return Err(fail(403, "verified owner required"));
-    }
     if path == "/std/contact/list" && method == Method::GET {
         // The incoming router has already consumed any one-shot permission for
         // this list. Rechecking it here would spend a second approval.
@@ -503,6 +509,9 @@ async fn dispatch(
             .await
             .map_err(|e| fail(500, e.to_string()))??;
         return Ok((200, list));
+    }
+    if kind != "name" && (!workspace_manager || service.is_some()) {
+        return Err(fail(403, "workspace contact management required"));
     }
     let manager = if method == Method::GET
         && let Some(visitor) = &visitor
@@ -721,17 +730,12 @@ async fn dispatch(
                 access::receipt(&access, &verified_owner, applicant, &id).await?,
             ));
         }
-        if service.is_some() {
-            return Err(fail(403, "direct owner required"));
+        if service.is_some() || !workspace_manager {
+            return Err(fail(403, "workspace contact management required"));
         }
-        let verified_owner = access::owner(&endpoint)?;
         let visitor = visitor
             .as_ref()
-            .filter(|visitor| {
-                visitor.name() == verified_owner.name()
-                    && visitor.subject_id() == verified_owner.subject_id()
-            })
-            .ok_or_else(|| fail(403, "verified owner required"))?;
+            .ok_or_else(|| fail(403, "verified visitor required"))?;
         if doc.as_object().is_none_or(|object| {
             object.keys().any(|key| {
                 ![

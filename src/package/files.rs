@@ -2032,6 +2032,11 @@ pub(super) fn install_packages(
         package_stage.sync_all()?;
         stages.push(package_stage);
     }
+    for lib in libs.values() {
+        super::access_migrations::validate_dependency(lib, |key| {
+            libs.get(key).or_else(|| sandbox.versions.get(key)).map(AsRef::as_ref)
+        })?;
+    }
     let entry_names = changed
         .iter()
         .zip(&stages)
@@ -2230,6 +2235,11 @@ pub(super) fn activate_installed_version(
             }
             lib = Some(Arc::new(loaded));
         }
+    }
+    if let Some(candidate) = lib.as_deref() {
+        super::access_migrations::validate_dependency(candidate, |key| {
+            sandbox.versions.get(key).map(AsRef::as_ref)
+        })?;
     }
     tx.execute(
         r#"

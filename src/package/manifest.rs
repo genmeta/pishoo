@@ -105,6 +105,7 @@ pub fn validate_openapi(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec> {
             }
         }
     }
+    super::access_migrations::validate_declaration(&openapi)?;
     Ok(openapi)
 }
 

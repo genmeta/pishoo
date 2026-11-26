@@ -83,7 +83,7 @@ async fn communication_workspace_two_identities() {
             let endpoint = endpoint.clone();
             async move {
                 let uri = request.uri().clone();
-                if !uri.path().starts_with("/std/")
+                if !(uri.path().starts_with("/std/") || uri.path().starts_with("/test-peer/std/"))
                     || uri
                         .path()
                         .strip_prefix("/std/forward/")
@@ -91,13 +91,23 @@ async fn communication_workspace_two_identities() {
                 {
                     return StatusCode::NOT_FOUND.into_response();
                 }
-                *request.uri_mut() = format!(
-                    "/std/forward/{}{}",
-                    endpoint.name(),
-                    uri.path_and_query().unwrap()
-                )
-                .parse()
-                .unwrap();
+                let target = uri.path_and_query().unwrap().as_str();
+                let (host, path) = if let Some(path) = target.strip_prefix("/test-peer") {
+                    if path.starts_with("/std/forward/") {
+                        return StatusCode::NOT_FOUND.into_response();
+                    }
+                    (
+                        names
+                            .iter()
+                            .find(|(_, name)| *name != endpoint.name())
+                            .unwrap()
+                            .1,
+                        path,
+                    )
+                } else {
+                    (endpoint.name(), target)
+                };
+                *request.uri_mut() = format!("/std/forward/{host}{path}").parse().unwrap();
                 request
                     .extensions_mut()
                     .insert(endpoint.local_authority().unwrap().clone());
