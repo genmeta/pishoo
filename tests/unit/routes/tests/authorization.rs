@@ -1021,13 +1021,25 @@ async fn legacy_private_file_grants_and_group_intake_do_not_override_specific_de
 
 #[tokio::test]
 async fn revoking_event_access_closes_an_open_workspace_stream_before_the_next_frame() {
+    check_stream_revocation("/std/comm/message/history", "/std/comm/message/history").await;
+}
+
+#[tokio::test]
+async fn revoking_forward_access_closes_the_remote_event_stream_before_the_next_frame() {
+    check_stream_revocation(
+        "/std/forward/host.dhttp.net/std/comm/message/history",
+        "/std/forward",
+    )
+    .await;
+}
+
+async fn check_stream_revocation(path: &'static str, grant: &str) {
     use access_control::{Effect, Grantee};
     use tower::ServiceExt;
     let (access, _) = authorization_app(Effect::Deny).await;
-    let path = "/std/comm/message/history";
-    let method = access_control::Method::Specified(Method::GET);
+    let method = access_control::Method::Unspecified;
     access
-        .set_policy(method.clone(), path, Effect::Allow, Grantee::Named)
+        .set_policy(method.clone(), grant, Effect::Allow, Grantee::Named)
         .await
         .unwrap();
     let release = Arc::new(tokio::sync::Notify::new());
@@ -1067,7 +1079,7 @@ async fn revoking_event_access_closes_an_open_workspace_stream_before_the_next_f
         bytes::Bytes::from_static(b"data: first\n\n")
     );
     access
-        .set_policy(method, path, Effect::Deny, Grantee::Named)
+        .remove_policy(method, grant, Grantee::Named)
         .await
         .unwrap();
     release.notify_one();

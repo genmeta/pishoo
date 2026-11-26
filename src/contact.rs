@@ -285,7 +285,7 @@ async fn dispatch(
                         access::receipt(&access, &verified_owner, &applicant, id).await?,
                     ))
                 }
-                Method::PATCH => Err(fail(403, "direct owner required")),
+                Method::PATCH => Err(fail(403, "verified owner required")),
                 _ => Err(fail(405, "method not allowed")),
             };
         }
@@ -335,7 +335,7 @@ async fn dispatch(
             if fields.contains_key("from") || fields.contains_key("to") {
                 return Err(fail(400, "application identities come from the path"));
             }
-            if owner && service.is_none() {
+            if owner && service.is_none() && !fields.contains_key("application_id") {
                 fields.insert("from".into(), endpoint.name().into());
                 fields.insert("to".into(), person.into());
                 fields
@@ -493,9 +493,6 @@ async fn dispatch(
     if !["name", "group", "all"].contains(&kind.as_str()) {
         return Err(fail(400, "invalid contact kind"));
     }
-    if kind != "name" && (!owner || service.is_some()) {
-        return Err(fail(403, "verified owner required"));
-    }
     if path == "/std/contact/list" && method == Method::GET {
         // The incoming router has already consumed any one-shot permission for
         // this list. Rechecking it here would spend a second approval.
@@ -503,6 +500,9 @@ async fn dispatch(
             .await
             .map_err(|e| fail(500, e.to_string()))??;
         return Ok((200, list));
+    }
+    if kind != "name" && (!owner || service.is_some()) {
+        return Err(fail(403, "verified owner required"));
     }
     let manager = if method == Method::GET
         && let Some(visitor) = &visitor
@@ -721,17 +721,12 @@ async fn dispatch(
                 access::receipt(&access, &verified_owner, applicant, &id).await?,
             ));
         }
-        if service.is_some() {
-            return Err(fail(403, "direct owner required"));
+        if service.is_some() || !owner {
+            return Err(fail(403, "verified owner required"));
         }
-        let verified_owner = access::owner(&endpoint)?;
         let visitor = visitor
             .as_ref()
-            .filter(|visitor| {
-                visitor.name() == verified_owner.name()
-                    && visitor.subject_id() == verified_owner.subject_id()
-            })
-            .ok_or_else(|| fail(403, "verified owner required"))?;
+            .ok_or_else(|| fail(403, "verified visitor required"))?;
         if doc.as_object().is_none_or(|object| {
             object.keys().any(|key| {
                 ![

@@ -1,4 +1,4 @@
-//! Owner-only development routes backed directly by local files.
+//! Development routes backed by local files and protected by the identity router ACL.
 use std::{
     collections::HashSet,
     fs::{File, Metadata},
@@ -52,10 +52,9 @@ pub(crate) fn router(
 ) -> Router {
     let preview_api = Sandbox::api_router(sandbox.clone(), endpoint.clone(), access, native_api);
     let route = any(move |request: Request<Body>| {
-        let (profile, sandbox, endpoint, preview_api, fallback) = (
+        let (profile, sandbox, preview_api, fallback) = (
             profile.clone(),
             sandbox.clone(),
-            endpoint.clone(),
             preview_api.clone(),
             fallback.clone(),
         );
@@ -117,7 +116,6 @@ pub(crate) fn router(
                         .await
                         .expect("Router is infallible"));
                 }
-                package::require_owner(&endpoint, &request)?;
                 if frontend {
                     let mut response = tokio::task::spawn_blocking(move || {
                         let root = root(&profile)?;

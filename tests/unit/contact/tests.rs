@@ -419,20 +419,23 @@ async fn contact_routes_follow_acl_and_accept_an_authorized_manager() {
         access.clone(),
         crate::routes::authorize,
     ));
-    let request = || {
-        let mut request = Request::builder()
-            .uri("/std/contact/list")
-            .body(Body::empty())
-            .unwrap();
+    let request = |uri: &str| {
+        let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
         request
             .extensions_mut()
             .insert(manager.local_authority().unwrap());
         request
     };
-    assert_eq!(
-        router.clone().oneshot(request()).await.unwrap().status(),
-        StatusCode::FORBIDDEN
-    );
+    for uri in [
+        "/std/contact/list",
+        "/std/contact/list?kind=group",
+        "/std/contact/list?kind=all",
+    ] {
+        assert_eq!(
+            router.clone().oneshot(request(uri)).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
     access
         .set_policy(
             access_control::Method::Specified(Method::GET),
@@ -442,10 +445,16 @@ async fn contact_routes_follow_acl_and_accept_an_authorized_manager() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        router.clone().oneshot(request()).await.unwrap().status(),
-        StatusCode::OK
-    );
+    for uri in [
+        "/std/contact/list",
+        "/std/contact/list?kind=group",
+        "/std/contact/list?kind=all",
+    ] {
+        assert_eq!(
+            router.clone().oneshot(request(uri)).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
     let mut cross_site = Request::builder()
         .method(Method::POST)
         .uri("/std/contact")
@@ -545,6 +554,79 @@ async fn contact_submission_without_capabilities_queues_without_contacting_the_p
         assert_eq!(entry["delivery_status"], "queued");
         assert!(entry["subject_id"].is_null());
     }
+    // Public contact POST permits an inbound application, not delegation.
+    let manager = crate::test_support::identity::endpoint("zero.ai.dhttp.net");
+    let actor = owner(&manager).unwrap();
+    let target_path = "/std/contact/one.ai";
+    let request = |uri: &str, doc: Value| {
+        Request::post(uri)
+            .extension(manager.local_authority().unwrap().clone())
+            .body(Body::from(doc.to_string()))
+            .unwrap()
+    };
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::POST),
+            "/std/contact",
+            access_control::Effect::Allow,
+            access_control::Grantee::Named,
+        )
+        .await
+        .unwrap();
+    let application =
+        json!({"description":"test","requested_capabilities":[],"offered_capabilities":[]});
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request(target_path, application.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let contacts = Connection::open(profile.join(".volume/sys/access/database")).unwrap();
+    contacts.execute("INSERT INTO contacts(name,subject_id,class,status,expired_after,created_at,updated_at) VALUES(?1,?2,'Human',2,9999999999,1,1)",
+        params![actor.name(),actor.subject_id().as_bytes()]).unwrap();
+    let grantee = access_control::Grantee::One(actor.name().to_owned());
+    access
+        .set_policy(
+            access_control::Method::Unspecified,
+            "/",
+            access_control::Effect::Allow,
+            grantee.clone(),
+        )
+        .await
+        .unwrap();
+    // Even a named root grant does not turn the authenticated peer into this owner.
+    let response = router
+        .clone()
+        .oneshot(request(target_path, application.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(queued.query_row("SELECT count(*) FROM outbound_contact_request WHERE target_name='one.ai.dhttp.net'", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+    let spoofed = json!({"application_id":"a".repeat(64),"description":"test"});
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request(target_path, spoofed))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    access
+        .remove_policy(access_control::Method::Unspecified, "/", grantee)
+        .await
+        .unwrap();
+    assert_eq!(
+        router
+            .oneshot(request(target_path, application))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
 }
 
 #[test]
