@@ -52,7 +52,7 @@ pub fn generate_with_owner(root: &Path, names: &[(&str, &str)], owner: Option<(&
             "-out",
             "ca.crt",
             "-days",
-            "2",
+            "7",
             "-subj",
             "/CN=DHTTP test CA",
             "-addext",
@@ -122,7 +122,7 @@ pub fn generate_with_owner(root: &Path, names: &[(&str, &str)], owner: Option<(&
                 "-out",
                 &cert,
                 "-days",
-                "1",
+                "6",
                 "-extfile",
                 "leaf.ext",
             ],
@@ -188,7 +188,7 @@ pub fn generate_with_owner(root: &Path, names: &[(&str, &str)], owner: Option<(&
                 "-respout",
                 &format!("{directory}/stapling.ocsp"),
                 "-ndays",
-                "1",
+                "5",
             ],
         );
         openssl(
