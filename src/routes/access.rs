@@ -293,6 +293,9 @@ pub(crate) async fn authorize(
             response
                 .headers_mut()
                 .insert(http::header::LOCATION, location.parse().unwrap());
+            response
+                .headers_mut()
+                .insert("pishoo-review-hops", http::HeaderValue::from_static("0"));
             response.headers_mut().insert(
                 http::header::RETRY_AFTER,
                 http::HeaderValue::from_static("3"),
@@ -375,13 +378,32 @@ pub(crate) async fn authorize(
     if let Err(error) = super::resource::rule_target(&mut request).await {
         return reject(error);
     }
+    let owner_subject = if app_head {
+        let authority = request
+            .extensions()
+            .get::<dhttp::HandshakeSummary>()
+            .and_then(|handshake| handshake.local.as_ref())
+            .or_else(|| request.extensions().get::<dhttp::LocalAuthority>());
+        authority.zip(visitor.as_ref()).and_then(|(local, caller)| {
+            let ski =
+                dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
+                    .ok()?;
+            (caller.name() == local.name()
+                && caller.subject_id().as_bytes() == ski.owner_hash().as_str().as_bytes())
+            .then(|| http::HeaderValue::from_str(ski.owner_hash().as_str()).ok())
+            .flatten()
+        })
+    } else {
+        None
+    };
     let mut response = next.run(request).await;
     if let Some((path, snapshot)) = stream
         && response.status().is_success()
         && response
             .headers()
             .get(http::header::CONTENT_TYPE)
-            .is_some_and(|v| v.as_bytes().starts_with(b"text/event-stream"))
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(super::event_stream_content_type)
     {
         use http_body_util::BodyExt;
         let (parts, mut body) = response.into_parts();
@@ -404,6 +426,12 @@ pub(crate) async fn authorize(
             return reject(Error::Denied);
         };
         response.headers_mut().insert("pishoo-viewer-name", name);
+        response.headers_mut().remove("pishoo-owner-subject");
+        if let Some(subject) = owner_subject {
+            response
+                .headers_mut()
+                .insert("pishoo-owner-subject", subject);
+        }
         response.headers_mut().insert(
             http::header::CACHE_CONTROL,
             http::HeaderValue::from_static("no-store"),

@@ -74,6 +74,36 @@ pub(crate) async fn normalize_method(
     next.run(request).await
 }
 
+pub(crate) fn event_stream_content_type(value: &str) -> bool {
+    value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("text/event-stream")
+}
+
+pub(crate) fn accepts_events(value: &str) -> bool {
+    value.split(',').any(|range| {
+        let mut parts = range.split(';');
+        parts
+            .next()
+            .unwrap_or("")
+            .trim()
+            .eq_ignore_ascii_case("text/event-stream")
+            && parts.all(|parameter| {
+                let Some((name, value)) = parameter.trim().split_once('=') else {
+                    return false;
+                };
+                !name.trim().eq_ignore_ascii_case("q")
+                    || value
+                        .trim()
+                        .parse::<f64>()
+                        .is_ok_and(|quality| quality > 0.0 && quality <= 1.0)
+            })
+    })
+}
+
 fn reject(error: Error) -> Response {
     let status = error.status();
     if status.is_server_error() {

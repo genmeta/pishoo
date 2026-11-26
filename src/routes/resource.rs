@@ -77,19 +77,38 @@ fn conversation(value: &str, reserved: &[&str]) -> Result<String> {
 }
 
 pub(crate) fn canonical(path: &str) -> Result<String> {
+    // Walk forwarding hops iteratively so input length cannot grow the stack.
+    let mut prefix = String::new();
+    let mut inner = path;
+    while let Some(tail) = inner.strip_prefix(super::DHTTP_PREFIX) {
+        let (target, suffix) = tail.split_once('/').unwrap_or((tail, ""));
+        if target.is_empty() {
+            if tail.is_empty() {
+                return Ok(format!("{prefix}/std/forward"));
+            }
+            return Err(invalid());
+        }
+        prefix.push_str(super::DHTTP_PREFIX);
+        prefix.push_str(&super::outbound::target_authority(target)?);
+        inner = &tail[target.len()..];
+        if suffix.is_empty() {
+            return Ok(prefix);
+        }
+    }
+    let path = inner;
     let Some((base, tail)) = [CONTACT, MESSAGE, GROUP].into_iter().find_map(|base| {
         path.strip_prefix(base)
             .filter(|s| s.is_empty() || s.starts_with('/'))
             .map(|s| (base, s))
     }) else {
-        return Ok(path.into());
+        return Ok(format!("{prefix}{path}"));
     };
     if tail.contains("//") {
         return Err(invalid());
     }
     let tail = tail.trim_matches('/');
     if tail.is_empty() {
-        return Ok(base.into());
+        return Ok(format!("{prefix}{base}"));
     }
     let mut parts: Vec<_> = tail.split('/').map(segment).collect::<Result<_>>()?;
     match base {
@@ -119,7 +138,7 @@ pub(crate) fn canonical(path: &str) -> Result<String> {
         }
         _ => (),
     }
-    Ok(format!("{base}/{}", parts.join("/")))
+    Ok(format!("{prefix}{base}/{}", parts.join("/")))
 }
 
 pub(super) fn normalize_uri(uri: &http::Uri) -> Result<http::Uri> {
@@ -231,12 +250,13 @@ pub(super) async fn operation(
             }
         }
         ("/std/comm/message/list", &Method::GET) => {
-            if request.headers().get_all(header::ACCEPT).iter().any(|v| {
-                v.to_str().is_ok_and(|s| {
-                    s.split(',')
-                        .any(|m| m.trim().split(';').next() == Some("text/event-stream"))
-                })
-            }) {
+            if request
+                .headers()
+                .get_all(header::ACCEPT)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .any(super::accepts_events)
+            {
                 return Ok(Some((method, format!("{MESSAGE}/history"))));
             }
             if query(request.uri(), "view")?.as_deref() == Some("conversations") {

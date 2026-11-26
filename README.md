@@ -168,7 +168,7 @@ Existing daccess schema v0 databases are backed up through SQLite before the lib
 
 `<identity-home>/<identity>/file/` is the personal file library. It has no static HTTP endpoint; explicit business actions copy verified content into it. `/std/file` is an internal per-Lib storage capability only. Ordinary `/file/*` paths still use configured proxies.
 
-Authenticated callers with ACL permission for the forwarding method and path can forward requests using the workspace identity. The DHTTP forwarding route streams request bytes through the native request writer. Request trailers are currently unsupported: declared trailers are rejected before forwarding, and trailers discovered during upload cancel that upload. Response bodies and trailers retain their native streaming behavior.
+Authenticated callers with ACL permission for the forwarding method and path can forward requests using the workspace identity. Forward ACLs use canonical target names and communication resource paths. App HEAD responses include `pishoo-owner-subject` only when the authenticated caller matches the local owner name and subject. For pending approvals, `pishoo-review-hops` identifies the reviewing host by its distance from the browser-facing host, starting at zero. The DHTTP forwarding route streams request bytes through the native request writer. Request trailers are currently unsupported: declared trailers are rejected before forwarding, and trailers discovered during upload cancel that upload. Response bodies and trailers retain their native streaming behavior.
 
 ### Run
 

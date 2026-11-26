@@ -153,7 +153,7 @@ fn canonicalize_communication_rules(path: &std::path::Path) -> Result<()> {
     let mut rules = BTreeMap::new();
     {
         let mut stmt=tx.prepare("SELECT api,method,grantee,grantee_type,effect,created_at FROM access_rules
-            WHERE api GLOB '/std/contact/*' OR api GLOB '/std/comm/message/*' OR api GLOB '/std/comm/group/*'")?;
+            WHERE api GLOB '/std/contact/*' OR api GLOB '/std/comm/message/*' OR api GLOB '/std/comm/group/*' OR api GLOB '/std/forward/*'")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let api: String = row.get(0)?;

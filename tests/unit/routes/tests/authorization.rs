@@ -141,6 +141,7 @@ async fn app_head_exposes_verified_viewer_without_a_new_endpoint() {
             (
                 [
                     ("pishoo-viewer-name", "stale.dhttp.net"),
+                    ("pishoo-owner-subject", "forged"),
                     ("cache-control", "public, max-age=3600"),
                 ],
                 "page",
@@ -171,6 +172,13 @@ async fn app_head_exposes_verified_viewer_without_a_new_endpoint() {
         assert_eq!(
             response.headers()["pishoo-viewer-name"],
             caller.unwrap_or("")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("pishoo-owner-subject")
+                .map(|v| v.as_bytes().len()),
+            caller.map(|_| 64)
         );
         assert_eq!(response.headers()["cache-control"], "no-store");
     }
@@ -788,6 +796,14 @@ fn communication_resources_share_canonical_path_spelling() {
         ),
         ("/std/contact/list.dhttp.net", "/std/contact/list.dhttp.net"),
         ("/std/contact/li%73t", "/std/contact/list"),
+        (
+            "/std/forward/BOB~/std/contact/Alice.dhttp.net",
+            "/std/forward/bob.dhttp.net/std/contact/alice",
+        ),
+        (
+            "/std/forward/BOB:007/std/forward/Alice~/std/contact/li%73t",
+            "/std/forward/bob.dhttp.net:7/std/forward/alice.dhttp.net/std/contact/list",
+        ),
     ] {
         assert_eq!(canonical(raw).unwrap(), expected);
     }
@@ -805,6 +821,23 @@ fn communication_resources_share_canonical_path_spelling() {
             canonical(&format!("/std/comm/message/{tail}")).is_err(),
             "{tail}"
         );
+    }
+}
+
+#[tokio::test]
+async fn list_acl_uses_the_event_stream_representation_only_when_accepted() {
+    for (accept, path) in [
+        ("Text/Event-Stream; q=0.8", "/std/comm/message/history"),
+        ("text/event-stream;q=0", "/std/comm/message/list"),
+    ] {
+        let mut request = Request::get("/std/comm/message/list")
+            .header(header::ACCEPT, accept)
+            .body(AxumBody::empty())
+            .unwrap();
+        let selected = crate::routes::resource::operation(&mut request, None, false)
+            .await
+            .unwrap();
+        assert_eq!(selected, Some((Method::GET, path.into())));
     }
 }
 
@@ -1053,7 +1086,7 @@ async fn check_stream_revocation(path: &'static str, grant: &str) {
                 yield Ok(bytes::Bytes::from_static(b"data: private\n\n"));
             };
             http::Response::builder()
-                .header(header::CONTENT_TYPE, "text/event-stream")
+                .header(header::CONTENT_TYPE, "Text/Event-Stream; charset=utf-8")
                 .body(AxumBody::from_stream(frames))
                 .unwrap()
         }

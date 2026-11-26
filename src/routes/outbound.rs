@@ -58,7 +58,7 @@ pub(crate) async fn forward_dhttp(
         );
         let outbound = Request::from_parts(parts, dhttp::WndBuf::new(64 * 1024));
         let mut exchange = endpoint.from_request(outbound);
-        if authority == endpoint.name() {
+        if authority.split(':').next() == Some(endpoint.name()) {
             let local = endpoint.local_authority()?;
             let ski =
                 dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
@@ -80,6 +80,18 @@ pub(crate) async fn forward_dhttp(
         // The two stream directions remain independent after response delivery.
         drop(scopeguard::ScopeGuard::into_inner(upload));
         clean_hop_headers(response.headers_mut());
+        if matches!(response.status().as_u16(), 202 | 400) {
+            let hops = response
+                .headers()
+                .get("pishoo-review-hops")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0)
+                .saturating_add(1);
+            response
+                .headers_mut()
+                .insert("pishoo-review-hops", hops.into());
+        }
         Ok(response.map(AxumBody::new))
     }
     .await;
@@ -105,29 +117,33 @@ async fn upload_body(
     Ok(())
 }
 
-fn outbound_uri(uri: &Uri) -> Result<(Uri, String)> {
-    let path = uri
-        .path()
-        .strip_prefix(DHTTP_PREFIX)
-        .ok_or(Error::RouteNotFound)?;
-    let (target, suffix) = path.split_once('/').unwrap_or((path, ""));
+pub(super) fn target_authority(target: &str) -> Result<String> {
     let (name, sequence) = match target.split_once(':') {
         Some((name, sequence)) => (name, Some(sequence)),
         None => (target, None),
     };
     let name = dhttp_home::normalize_name(name)
         .ok_or_else(|| Error::BadRequest("invalid DHTTP target".into()))?;
-    let authority = match sequence {
+    Ok(match sequence {
         Some(sequence) => {
             let number = sequence
                 .parse::<u64>()
                 .map_err(|_| Error::BadRequest("invalid DHTTP target sequence".into()))?;
             dhttp_home::certificate::CertificateSequence::try_from(number)
                 .map_err(|_| Error::BadRequest("invalid DHTTP target sequence".into()))?;
-            format!("{name}:{sequence}")
+            format!("{name}:{number}")
         }
         None => name,
-    };
+    })
+}
+
+fn outbound_uri(uri: &Uri) -> Result<(Uri, String)> {
+    let path = uri
+        .path()
+        .strip_prefix(DHTTP_PREFIX)
+        .ok_or(Error::RouteNotFound)?;
+    let (target, suffix) = path.split_once('/').unwrap_or((path, ""));
+    let authority = target_authority(target)?;
     let path = super::resource::canonical(&format!("/{suffix}"))?;
     let path = match uri.query() {
         Some(query) => format!("{path}?{query}"),

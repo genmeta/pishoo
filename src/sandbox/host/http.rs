@@ -105,7 +105,7 @@ impl WasiHttpHooks for Outgoing {
                 .get_all(header::ACCEPT)
                 .iter()
                 .filter_map(|value| value.to_str().ok())
-                .any(accepts_events);
+                .any(crate::routes::accepts_events);
             request.extensions_mut().clear();
             if target == endpoint.name()
                 && let Some(source) = source
@@ -249,14 +249,7 @@ impl WasiHttpHooks for Outgoing {
                     .headers()
                     .get(header::CONTENT_TYPE)
                     .and_then(|value| value.to_str().ok())
-                    .is_some_and(|value| {
-                        value
-                            .split(';')
-                            .next()
-                            .unwrap_or("")
-                            .trim()
-                            .eq_ignore_ascii_case("text/event-stream")
-                    });
+                    .is_some_and(crate::routes::event_stream_content_type);
             let (mut parts, mut body) = response.into_parts();
             clean_headers(&mut parts.headers);
             let frames = async_stream::try_stream! {
@@ -293,27 +286,6 @@ impl WasiHttpHooks for Outgoing {
             ))
         })
     }
-}
-
-fn accepts_events(value: &str) -> bool {
-    value.split(',').any(|range| {
-        let mut parts = range.split(';');
-        parts
-            .next()
-            .unwrap_or("")
-            .trim()
-            .eq_ignore_ascii_case("text/event-stream")
-            && parts.all(|parameter| {
-                let Some((name, value)) = parameter.trim().split_once('=') else {
-                    return false;
-                };
-                !name.trim().eq_ignore_ascii_case("q")
-                    || value
-                        .trim()
-                        .parse::<f64>()
-                        .is_ok_and(|quality| quality > 0.0 && quality <= 1.0)
-            })
-    })
 }
 
 fn network_error(error: dhttp::Error) -> HttpError {
